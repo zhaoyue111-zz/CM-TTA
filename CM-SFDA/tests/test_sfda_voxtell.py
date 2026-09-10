@@ -1,0 +1,414 @@
+"""Weight-free checks for the VoxTell SFDA adapter.
+
+These tests use a tiny fake network and never load VoxTell/Qwen weights.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import torch
+from torch import nn
+
+CM_SFDA = Path(__file__).resolve().parents[1]
+if str(CM_SFDA) not in sys.path:
+    sys.path.insert(0, str(CM_SFDA))
+if str(CM_SFDA / "method") not in sys.path:
+    sys.path.insert(0, str(CM_SFDA / "method"))
+
+from sfda_voxtell import (  # noqa: E402
+    VoxTellPromptSFDA,
+    cac_loss,
+    compute_cac_score,
+    entropy_loss,
+    load_sfda_checkpoint,
+    masked_segmentation_loss,
+    save_sfda_checkpoint,
+    select_cac_views,
+)
+from semantic_quality import (  # noqa: E402
+    SemanticPrototypeMemory,
+    compute_tse_components,
+)
+from run_sfda_voxtell import (  # noqa: E402
+    _native_spacing,
+    binary_segmentation_metrics,
+    should_evaluate_epoch,
+)
+
+
+class _VisionProjection(nn.Module):
+    def forward(self, features):
+        # B,C,D,H,W -> B,H,W,D,C, matching the documented VoxTell hook shape.
+        return features.permute(0, 3, 4, 2, 1)
+
+
+class _TextProjection(nn.Module):
+    def forward(self, prompt):
+        # B,1,1,C -> 1,B,C, matching the documented VoxTell hook shape.
+        return prompt[:, 0, 0, :].unsqueeze(0)
+
+
+class _TinyVoxTell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.image_encoder = nn.Conv3d(1, 4, kernel_size=1, bias=False)
+        self.project_bottleneck_embed = _VisionProjection()
+        self.project_text_embed = _TextProjection()
+        self.forward_calls = []
+
+    def forward(self, image, prompt):
+        self.forward_calls.append((image.shape[0], torch.is_grad_enabled()))
+        features = self.image_encoder(image)
+        self.project_bottleneck_embed(features)
+        text = self.project_text_embed(prompt)
+        bias = text[0, :, 0].view(image.shape[0], 1, 1, 1, 1)
+        return features[:, :1] + bias
+
+
+class _OverflowScaler:
+    """CPU test double for one recoverable CUDA AMP overflow."""
+
+    def __init__(self):
+        self.current_scale = 1024.0
+
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, optimizer):
+        for group in optimizer.param_groups:
+            for parameter in group["params"]:
+                parameter.grad.fill_(float("inf"))
+
+    def is_enabled(self):
+        return True
+
+    def get_scale(self):
+        return self.current_scale
+
+    def step(self, _optimizer):
+        return None
+
+    def update(self):
+        self.current_scale /= 2
+
+
+def _args(**overrides):
+    values = dict(
+        lr=0.05,
+        weight_decay=0.0,
+        ema_momentum=0.9,
+        confidence_threshold=0.5,
+        selection_p=0.5,
+        num_aug_views=3,
+        w_seg=1.0,
+        w_entropy=0.01,
+        w_cac=1.0,
+        w_quality=0.0,
+        quality_mode="cac",
+        quality_config=str(CM_SFDA / "configs" / "tse.json"),
+        grad_clip=1.0,
+        record_soft_prompt_grad_norm=True,
+        epochs=1,
+        print_freq=100,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _make_adapter():
+    model = _TinyVoxTell()
+    qwen = nn.Linear(4, 4)
+    adapter = VoxTellPromptSFDA(
+        model,
+        torch.ones(1, 1, 4),
+        torch.device("cpu"),
+        _args(),
+        qwen_text_encoder=qwen,
+    )
+    return adapter, model, qwen
+
+
+class SoftPromptOnlyTests(unittest.TestCase):
+    def test_evaluation_interval_and_final_epoch(self):
+        selected = [
+            epoch
+            for epoch in range(1, 13)
+            if should_evaluate_epoch(epoch, total_epochs=12, interval=5)
+        ]
+        self.assertEqual(selected, [5, 10, 12])
+        with self.assertRaises(ValueError):
+            should_evaluate_epoch(1, total_epochs=5, interval=0)
+
+    def test_fit_calls_epoch_callback_after_every_epoch(self):
+        adapter, _, _ = _make_adapter()
+        adapter.args.epochs = 2
+        callbacks = []
+        batch = (
+            torch.randn(1, 1, 2, 2, 2),
+            torch.randn(1, 1, 2, 2, 2),
+        )
+        try:
+            history = adapter.fit(
+                [batch],
+                epoch_end_callback=lambda epoch, row, rows: callbacks.append(
+                    (epoch, row["epoch"], len(rows))
+                ),
+            )
+            self.assertEqual(callbacks, [(1, 1, 1), (2, 2, 2)])
+            self.assertEqual(len(history), 2)
+        finally:
+            adapter.close()
+
+    def test_binary_segmentation_metrics(self):
+        metrics = binary_segmentation_metrics(
+            np.array([1, 1, 0, 0]),
+            np.array([1, 0, 1, 0]),
+        )
+        self.assertAlmostEqual(metrics["dice"], 0.5)
+        self.assertAlmostEqual(metrics["iou"], 1 / 3)
+        self.assertAlmostEqual(metrics["recall"], 0.5)
+        self.assertAlmostEqual(metrics["precision"], 0.5)
+        self.assertEqual(
+            binary_segmentation_metrics(np.zeros(2), np.zeros(2)),
+            {"dice": 1.0, "iou": 1.0, "recall": 1.0, "precision": 1.0},
+        )
+
+    def test_numpy_spacing_is_json_serializable(self):
+        spacing = _native_spacing(
+            torch.tensor([1.25, 2.5, 3.75], dtype=torch.float32).numpy()
+        )
+        encoded = json.dumps({"spacing": list(spacing)})
+        self.assertEqual(json.loads(encoded)["spacing"], [1.25, 2.5, 3.75])
+
+    def test_low_precision_initial_prompt_uses_fp32_trainable_state(self):
+        model = _TinyVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model,
+            torch.ones(1, 1, 4, dtype=torch.float16),
+            torch.device("cpu"),
+            _args(),
+        )
+        try:
+            self.assertEqual(adapter.soft_prompt_embedding.dtype, torch.float32)
+            self.assertEqual(adapter.teacher_soft_prompt.dtype, torch.float32)
+        finally:
+            adapter.close()
+
+    def test_only_soft_prompt_is_trainable_and_gradient_is_nonempty(self):
+        adapter, model, qwen = _make_adapter()
+        try:
+            self.assertEqual(sum(p.numel() for p in adapter.optimizer_parameters), 4)
+            self.assertEqual(len(adapter.optimizer_parameters), 1)
+            self.assertIs(adapter.optimizer_parameters[0], adapter.soft_prompt_embedding)
+            self.assertTrue(all(not p.requires_grad for p in model.parameters()))
+            self.assertTrue(all(not p.requires_grad for p in qwen.parameters()))
+
+            result = adapter.adapt_batch(
+                torch.randn(1, 1, 2, 2, 2), torch.randn(1, 1, 2, 2, 2)
+            )
+            self.assertGreater(result["soft_prompt_grad_norm"], 0.0)
+            self.assertTrue(all(p.grad is None for p in model.parameters()))
+            self.assertTrue(all(p.grad is None for p in qwen.parameters()))
+            self.assertEqual(
+                model.forward_calls,
+                [(1, False), (3, False), (1, True)],
+            )
+            self.assertEqual(result["update_skipped"], 0.0)
+        finally:
+            adapter.close()
+
+    def test_amp_overflow_skips_update_without_corrupting_prompts(self):
+        adapter, _, _ = _make_adapter()
+        try:
+            soft_prompt_before = adapter.soft_prompt_embedding.detach().clone()
+            teacher_prompt_before = adapter.teacher_soft_prompt.detach().clone()
+            adapter.scaler = _OverflowScaler()
+            result = adapter.adapt_batch(
+                torch.randn(1, 1, 2, 2, 2), torch.randn(1, 1, 2, 2, 2)
+            )
+            self.assertEqual(result["update_skipped"], 1.0)
+            self.assertEqual(result["soft_prompt_grad_norm"], 0.0)
+            self.assertTrue(torch.equal(soft_prompt_before, adapter.soft_prompt_embedding))
+            self.assertTrue(torch.equal(teacher_prompt_before, adapter.teacher_soft_prompt))
+        finally:
+            adapter.close()
+
+    def test_cac_view_selection_and_losses_have_expected_shapes(self):
+        vision = torch.randn(2, 2, 2, 2, 4)
+        text = torch.randn(1, 2, 4)
+        logits = torch.randn(2, 1, 2, 2, 2, requires_grad=True)
+        scores = compute_cac_score(vision, text, logits)
+        self.assertEqual(scores.shape, (2,))
+        view_scores = scores[:, None].expand(2, 4)
+        probabilities = torch.sigmoid(torch.randn(2, 4, 1, 2, 2, 2))
+        selected = select_cac_views(view_scores, probabilities, 0.5)
+        self.assertEqual(selected.shape, (2, 2))
+        valid = torch.ones_like(logits)
+        segmentation, bce, dice = masked_segmentation_loss(logits, (logits > 0).float(), valid)
+        self.assertEqual(segmentation.ndim, 0)
+        self.assertEqual(bce.ndim, 0)
+        self.assertEqual(dice.ndim, 0)
+        self.assertEqual(entropy_loss(logits, valid).ndim, 0)
+        self.assertEqual(cac_loss(scores).ndim, 0)
+
+    def test_false_positive_without_evidence_lowers_purity(self):
+        evidence = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
+        supported_prediction = torch.tensor([[1.0, 1.0, 0.0, 0.0]])
+        false_positive_prediction = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+        supported_purity, _, _ = compute_tse_components(
+            supported_prediction, evidence
+        )
+        false_positive_purity, _, _ = compute_tse_components(
+            false_positive_prediction, evidence
+        )
+        self.assertLess(false_positive_purity.item(), supported_purity.item())
+
+    def test_removing_strong_evidence_region_lowers_completeness(self):
+        evidence = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+        complete_prediction = torch.tensor([[1.0, 1.0, 1.0, 0.0]])
+        incomplete_prediction = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+        _, complete_coverage, _ = compute_tse_components(
+            complete_prediction, evidence
+        )
+        _, incomplete_coverage, _ = compute_tse_components(
+            incomplete_prediction, evidence
+        )
+        self.assertLess(incomplete_coverage.item(), complete_coverage.item())
+
+    def test_leave_one_case_out_excludes_current_case(self):
+        memory = SemanticPrototypeMemory()
+        statistics = {
+            "fg_sum": torch.tensor([[10.0, 0.0], [0.0, 4.0]]),
+            "fg_count": torch.tensor([10.0, 4.0]),
+            "bg_sum": torch.tensor([[0.0, 6.0], [8.0, 0.0]]),
+            "bg_count": torch.tensor([6.0, 8.0]),
+        }
+        memory.add(["case-a", "case-b"], statistics)
+        positive, negative, valid = memory.leave_one_out(["case-a"], "cpu")
+        self.assertEqual(memory.contributors(excluding="case-a"), ["case-b"])
+        self.assertTrue(torch.allclose(positive[0, 0], torch.tensor([0.0, 1.0])))
+        self.assertTrue(torch.allclose(negative[0, 0], torch.tensor([1.0, 0.0])))
+        self.assertTrue(valid.all())
+
+    def test_empty_prediction_or_evidence_is_finite(self):
+        zeros = torch.zeros(2, 8)
+        ones = torch.ones(2, 8)
+        for probability, evidence in ((zeros, ones), (ones, zeros), (zeros, zeros)):
+            values = compute_tse_components(probability, evidence)
+            self.assertTrue(all(torch.isfinite(value).all() for value in values))
+            self.assertTrue(all(torch.equal(value, torch.zeros_like(value)) for value in values))
+
+    def test_tse_adapter_uses_cross_case_prototypes_without_nan(self):
+        model = _TinyVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model,
+            torch.ones(1, 1, 4),
+            torch.device("cpu"),
+            _args(
+                quality_mode="tse",
+                w_quality=1.0,
+                w_seg=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        statistics = {
+            "fg_sum": torch.tensor(
+                [[1.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]]
+            ),
+            "fg_count": torch.tensor([1.0, 2.0]),
+            "bg_sum": torch.tensor(
+                [[0.0, 1.0, 0.0, 0.0], [2.0, 0.0, 0.0, 0.0]]
+            ),
+            "bg_count": torch.tensor([1.0, 2.0]),
+        }
+        adapter.prototype_memory.add(["case-a", "case-b"], statistics)
+        try:
+            prompt_before = adapter.soft_prompt_embedding.detach().clone()
+            result = adapter.adapt_batch(
+                torch.randn(1, 1, 2, 2, 2),
+                torch.randn(1, 1, 2, 2, 2),
+                ["case-a"],
+            )
+            for name in ("purity", "completeness", "tse", "quality_loss"):
+                self.assertTrue(np.isfinite(result[name]))
+            self.assertEqual(result["prototype_valid"], 1.0)
+            self.assertGreater(result["soft_prompt_grad_norm"], 0.0)
+            self.assertFalse(torch.equal(prompt_before, adapter.soft_prompt_embedding))
+        finally:
+            adapter.close()
+
+    def test_empty_seed_prototypes_produce_invalid_but_finite_evidence(self):
+        memory = SemanticPrototypeMemory()
+        memory.add(
+            ["case-a", "case-b"],
+            {
+                "fg_sum": torch.zeros(2, 4),
+                "fg_count": torch.zeros(2),
+                "bg_sum": torch.zeros(2, 4),
+                "bg_count": torch.zeros(2),
+            },
+        )
+        _, _, valid = memory.leave_one_out(["case-a"], "cpu")
+        self.assertFalse(valid.any())
+
+    def test_checkpoint_restores_soft_prompt_teacher_and_optimizer(self):
+        adapter, _, _ = _make_adapter()
+        restored, _, _ = _make_adapter()
+        try:
+            adapter.prototype_memory.add(
+                ["case-a"],
+                {
+                    "fg_sum": torch.ones(1, 4),
+                    "fg_count": torch.ones(1),
+                    "bg_sum": -torch.ones(1, 4),
+                    "bg_count": torch.ones(1),
+                },
+            )
+            adapter.adapt_batch(
+                torch.randn(1, 1, 2, 2, 2), torch.randn(1, 1, 2, 2, 2)
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "checkpoint.pt"
+                save_sfda_checkpoint(path, adapter, adapter.args, [{"epoch": 1}])
+                checkpoint = load_sfda_checkpoint(path, restored)
+                self.assertEqual(checkpoint["format"], "voxtell-sfda-prompt-tse-v4")
+                self.assertIn("soft_prompt_embedding", checkpoint)
+                self.assertIn("teacher_soft_prompt", checkpoint)
+                self.assertIn("prototype_memory", checkpoint)
+                self.assertEqual(restored.prototype_memory.contributors(), ["case-a"])
+                self.assertTrue(torch.equal(adapter.soft_prompt_embedding, restored.soft_prompt_embedding))
+                self.assertTrue(torch.equal(adapter.teacher_soft_prompt, restored.teacher_soft_prompt))
+                self.assertEqual(adapter.optimizer.state_dict().keys(), restored.optimizer.state_dict().keys())
+                for key, state in adapter.optimizer.state_dict()["state"].items():
+                    for state_key, value in state.items():
+                        other = restored.optimizer.state_dict()["state"][key][state_key]
+                        self.assertTrue(torch.equal(value, other))
+        finally:
+            adapter.close()
+            restored.close()
+
+    def test_training_dataset_uses_no_label(self):
+        # The dataset stores train entries as (image, None) and __getitem__
+        # only dereferences the first item. Use a missing label path to make
+        # accidental label access fail immediately.
+        from data.sfda_voxtell import VoxTellTargetDataset  # noqa: WPS433
+
+        dataset = VoxTellTargetDataset.__new__(VoxTellTargetDataset)
+        dataset.entries = [(Path("missing-image.nii.gz"), Path("missing-label.nii.gz"))]
+        dataset.patch_size = (2, 2, 2)
+        dataset._load = lambda _path: torch.zeros(1, 2, 2, 2)
+        weak, strong, image_name = dataset[0]
+        self.assertEqual(tuple(weak.shape), (1, 2, 2, 2))
+        self.assertEqual(tuple(strong.shape), (1, 2, 2, 2))
+        self.assertEqual(image_name, "missing-image.nii.gz")
+
+
+if __name__ == "__main__":
+    unittest.main()

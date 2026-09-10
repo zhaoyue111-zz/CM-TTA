@@ -1,0 +1,15 @@
+{
+  "feature_layer": "project_bottleneck_embed",
+  "text_feature_layer": "project_text_embed",
+  "foreground_probability_threshold": 0.8,
+  "background_probability_threshold": 0.2,
+  "foreground_text_similarity_threshold": 0.3,
+  "background_text_similarity_threshold": 0.0,
+  "probability_stability_threshold": 0.1,
+  "similarity_stability_threshold": 0.1,
+  "temperature": 0.1,
+  "epsilon": 1e-6,
+  "stop_evidence_gradient": true,
+  "seed_views": 3,
+  "num_prototypes": 1
+}
