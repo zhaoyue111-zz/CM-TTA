@@ -6,6 +6,7 @@ These tests use a tiny fake network and never load VoxTell/Qwen weights.
 from __future__ import annotations
 
 import json
+import inspect
 import sys
 import tempfile
 import unittest
@@ -51,9 +52,12 @@ from run_sfda_voxtell import (  # noqa: E402
     should_evaluate_epoch,
 )
 from evaluate_quality_metrics import (  # noqa: E402
+    _fuse_logits_then_sigmoid,
+    _patch_oracle_stats,
     binary_auprc,
     binary_auroc,
     evidence_localization_metrics,
+    summarize_quality_audit,
 )
 
 
@@ -150,6 +154,68 @@ def _make_adapter():
 
 
 class SoftPromptOnlyTests(unittest.TestCase):
+    def test_quality_audit_entry_uses_current_sliding_window_signature(self):
+        source = inspect.getsource(__import__("evaluate_quality_metrics").main)
+        signature = inspect.signature(__import__("evaluate_quality_metrics")._voxtell_sliding_window_views)
+        self.assertIn("_voxtell_sliding_window_views(", source)
+        self.assertNotIn("infer_full_volume_views", source)
+        self.assertNotIn("patch_size", list(signature.parameters))
+
+    def test_gaussian_fusion_applies_sigmoid_after_logit_fusion(self):
+        logits = torch.tensor([[[[0.0, 2.0]]]])
+        denominator = torch.tensor([[[2.0, 2.0]]])
+        fused_logits, probability = _fuse_logits_then_sigmoid(logits, denominator)
+        self.assertTrue(torch.allclose(fused_logits, torch.tensor([[[[0.0, 1.0]]]])))
+        self.assertTrue(torch.allclose(probability, torch.sigmoid(fused_logits)))
+        self.assertFalse(torch.allclose(probability, torch.sigmoid(logits) / denominator))
+
+    def test_cac_launcher_explicitly_disables_cac_loss(self):
+        launcher = (CM_SFDA / "train_cac.sh").read_text(encoding="utf-8")
+        self.assertIn("--w_cac 0", launcher)
+        self.assertIn("SCRIPT_DIR=", launcher)
+        self.assertIn('"$SCRIPT_DIR/run_sfda_voxtell.py"', launcher)
+        self.assertIn('"$SCRIPT_DIR/configs/tse.json"', launcher)
+        tse_launcher = (CM_SFDA / "train_tse.sh").read_text(encoding="utf-8")
+        self.assertIn('"$SCRIPT_DIR/configs/tse.json"', tse_launcher)
+        legacy = (CM_SFDA / "train.sh").read_text(encoding="utf-8")
+        self.assertIn("deprecated", legacy)
+        self.assertIn("exit 2", legacy)
+
+    def test_patch_oracle_gap_is_nonnegative_and_fixed_view_is_separate(self):
+        selected, best, gap = _patch_oracle_stats([0.2, 0.8, 0.4], selected_index=0)
+        self.assertAlmostEqual(selected, 0.2)
+        self.assertAlmostEqual(best, 0.8)
+        self.assertAlmostEqual(gap, 0.6)
+        self.assertEqual(_patch_oracle_stats([0.2, 0.8], selected_index=1)[2], 0.0)
+        source = inspect.getsource(__import__("evaluate_quality_metrics").summarize_quality_audit)
+        self.assertIn("patch_oracle_gap_mean", source)
+        self.assertIn("best_fixed_view_mean_dice", source)
+        self.assertNotIn('"gap_to_oracle":', source)
+
+    def test_quality_audit_summary_contains_patch_and_fixed_view_fields(self):
+        quality_names = __import__("evaluate_quality_metrics").QUALITY_NAMES
+        selection_names = __import__("evaluate_quality_metrics").SELECTION_NAMES
+        case = {
+            "within_case_spearman": {name: None for name in quality_names},
+            "patch_spearman": {name: {"valid_patches": 0, "mean": None} for name in quality_names},
+            "evidence_localization_original_view": {"valid": False},
+        }
+        args = SimpleNamespace(quality_mode="tse", w_quality=0.0, w_cac=0.0)
+        result = summarize_quality_audit(
+            [case], [], {name: [0.5] for name in selection_names},
+            {name: [0.4] for name in selection_names}, [0.7],
+            {name: [0.3] for name in selection_names}, [0.6],
+            {name: [None] for name in quality_names}, [], args, {},
+        )
+        for field in (
+            "selected_view_mean_dice", "patch_selected_dice_mean",
+            "patch_oracle_best_dice_mean", "patch_oracle_gap_mean",
+            "best_fixed_view_mean_dice", "valid_cases", "valid_patches",
+        ):
+            self.assertIn(field, result)
+        self.assertEqual(result["valid_cases"], 1)
+        self.assertEqual(result["valid_patches"], 1)
+
     def test_evaluation_interval_and_final_epoch(self):
         selected = [
             epoch

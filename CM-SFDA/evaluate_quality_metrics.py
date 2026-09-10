@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -12,12 +13,9 @@ import torch
 import torch.nn.functional as F
 
 from data.sfda_voxtell import (
-    extract_volume_patch,
     load_preprocessed_labeled_case,
     make_target_loader,
-    pad_to_patch_grid,
     read_image_entries,
-    sliding_window_locations,
 )
 from method.semantic_quality import (
     average_tie_ranks,
@@ -38,6 +36,13 @@ QUALITY_NAMES = (
     "tse",
 )
 SELECTION_NAMES = ("cac", "tse", "purity", "completeness", "cac_entropy", "tse_entropy")
+
+
+def _fuse_logits_then_sigmoid(logits, denominator):
+    """Fuse Gaussian-weighted logits first, then apply sigmoid exactly once."""
+    denominator = denominator.clamp_min(torch.finfo(logits.dtype).eps)
+    fused_logits = logits / denominator
+    return fused_logits, torch.sigmoid(fused_logits)
 
 
 def _rankdata(values):
@@ -120,6 +125,16 @@ def _resize_patch_map(values, patch_size):
     return F.interpolate(values.unsqueeze(1), size=patch_size, mode="trilinear", align_corners=False).squeeze(1)
 
 
+def _align_target_to_volume(target, volume):
+    """Align GT spatially with nearest-neighbor semantics only."""
+    target = target.float()
+    if tuple(target.shape[-3:]) != tuple(volume.shape[-3:]):
+        target = F.interpolate(
+            target.unsqueeze(0), size=tuple(volume.shape[-3:]), mode="nearest"
+        ).squeeze(0)
+    return target
+
+
 def _add_spatial_patch(accumulator, patch, location):
     patch_size = patch.shape[-3:]
     slices = tuple(slice(int(start), int(start) + int(size)) for start, size in zip(location, patch_size))
@@ -155,14 +170,18 @@ def _training_style_views(volume, num_views, seed):
     return torch.stack(views[: int(num_views)], dim=0)
 
 
-def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None):
+def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None, target=None):
     """Run the exact VoxTell sliding-window/padding/Gaussian logit pipeline.
 
     VoxTell's predictor pads with ``pad_nd_image``, obtains slicers through its
     private slicer helper, weights every patch with nnU-Net's Gaussian map and
     only then divides the accumulated logits. Evidence and text similarity use
     the same Gaussian numerator/denominator. Candidate view selection is done
-    independently for every sliding-window patch, matching training.
+    independently for every sliding-window patch, matching training. When
+    ``target`` is supplied, each patch also records candidate-view GT Dice,
+    patch-best Dice, selected Dice and the non-negative patch-oracle gap.
+    Full-volume selected maps are reported by Dice only; they are never compared
+    with a fixed-view oracle.
     """
     from acvl_utils.cropping_and_padding.padding import pad_nd_image
     from nnunetv2.inference.sliding_window_prediction import compute_gaussian
@@ -181,89 +200,159 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         device=adapter.device,
     ).float()
     padded_shape = tuple(int(value) for value in padded.shape[1:])
-    logit_sum = torch.zeros((num_views, *padded_shape), device="cpu")
-    evidence_sum = torch.zeros_like(logit_sum)
-    similarity_sum = torch.zeros_like(logit_sum)
-    gaussian_sum = torch.zeros(padded_shape, device="cpu")
+    # These are disk-backed so the audit does not keep 9 logits, 9 evidence
+    # maps, 9 similarity maps and multiple selected volumes in RAM. The
+    # numerical accumulation order and dtype remain unchanged.
+    target_padded = None
+    if target is not None:
+        target = _align_target_to_volume(target, volume)
+        target_padded, _ = pad_nd_image(
+            target, predictor.patch_size, "constant", {"value": 0}, True, None
+        )
+        if tuple(target_padded.shape[1:]) != padded_shape:
+            raise ValueError(
+                f"Padded target/volume shape mismatch: {target_padded.shape} vs {padded.shape}"
+            )
+    gaussian_sum = np.zeros(padded_shape, dtype=np.float32)
+    patch_records = []
     selected_names = SELECTION_NAMES
-    selected_logit_sum = {
-        name: torch.zeros(padded_shape, device="cpu") for name in selected_names
-    }
     case_key = "validation-case" if case_id is None else str(case_id)
     prototype_valid = 0
     prototype_queries = 0
+    with tempfile.TemporaryDirectory(prefix="voxtell_quality_") as cache_dir:
+        def mmap(name, shape):
+            return np.memmap(Path(cache_dir) / f"{name}.bin", mode="w+", dtype=np.float32, shape=shape)
 
-    for patch_index, slicer in enumerate(slicers):
-        patch = padded[slicer].to(adapter.device, non_blocking=True)
-        views = _training_style_views(patch, num_views, seed + patch_index)
-        adapter._cac_features.clear()
-        with torch.no_grad(), torch.autocast(
-            device_type=adapter.device.type, enabled=adapter.device.type == "cuda"
-        ):
-            prompt = adapter._text(adapter.initial_soft_prompt, num_views)
-            logits = adapter.model(views, prompt)
-        flat_case_ids = [case_key] * num_views
-        _quality, cac, semantic = adapter._quality_scores(
-            adapter._cac_features["vision"],
-            adapter._cac_features["text"],
-            logits,
-            flat_case_ids,
+        logit_sum = mmap("logits", (num_views, *padded_shape))
+        evidence_sum = mmap("evidence", (num_views, *padded_shape))
+        similarity_sum = mmap("similarity", (num_views, *padded_shape))
+        selected_logit_sum = {name: mmap(f"selected_{name}", padded_shape) for name in selected_names}
+
+        for patch_index, slicer in enumerate(slicers):
+            patch = padded[slicer].to(adapter.device, non_blocking=True)
+            views = _training_style_views(patch, num_views, seed + patch_index)
+            adapter._cac_features.clear()
+            with torch.no_grad(), torch.autocast(
+                device_type=adapter.device.type, enabled=adapter.device.type == "cuda"
+            ):
+                prompt = adapter._text(adapter.initial_soft_prompt, num_views)
+                logits = adapter.model(views, prompt)
+            flat_case_ids = [case_key] * num_views
+            _quality, cac, semantic = adapter._quality_scores(
+                adapter._cac_features["vision"],
+                adapter._cac_features["text"],
+                logits,
+                flat_case_ids,
+            )
+            probability = torch.sigmoid(logits[:, 0].float())
+            evidence = semantic["evidence"]
+            similarity = text_similarity_map(
+                adapter._cac_features["vision"], adapter._cac_features["text"]
+            )
+            evidence = _resize_patch_map(evidence.permute(0, 3, 1, 2), tuple(predictor.patch_size))
+            similarity = _resize_patch_map(similarity.permute(0, 3, 1, 2), tuple(predictor.patch_size))
+            probability = _resize_patch_map(probability, tuple(predictor.patch_size))
+            cac = cac.detach().view(1, num_views)
+            semantic_purity = semantic["purity"].detach().view(1, num_views)
+            semantic_completeness = semantic["completeness"].detach().view(1, num_views)
+            semantic_tse = semantic["tse"].detach().view(1, num_views)
+            clipped = probability.clamp(1e-6, 1 - 1e-6).view(1, num_views, *probability.shape[-3:])
+            patch_metrics = {
+                "confidence": torch.maximum(clipped, 1 - clipped).flatten(start_dim=2).mean(dim=2),
+                "entropy": -(clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()).flatten(start_dim=2).mean(dim=2),
+                "consistency": _soft_consistency(probability.view(1, num_views, *probability.shape[-3:])),
+                "cac": cac,
+                "purity": semantic_purity,
+                "completeness": semantic_completeness,
+                "tse": semantic_tse,
+            }
+            selected_indices = _selection_indices(patch_metrics)
+            patch_slices = slicer[1:]
+            weight = gaussian.detach().cpu()
+            logits_cpu = logits[:, 0].float().detach().cpu()
+            evidence_cpu = evidence.detach().cpu()
+            similarity_cpu = similarity.detach().cpu()
+            # Keep the original torch float32 accumulation order while using
+            # writable memmap-backed storage instead of resident tensors.
+            torch.from_numpy(logit_sum[(..., *patch_slices)]).add_(logits_cpu * weight)
+            torch.from_numpy(evidence_sum[(..., *patch_slices)]).add_(evidence_cpu * weight)
+            torch.from_numpy(similarity_sum[(..., *patch_slices)]).add_(similarity_cpu * weight)
+            torch.from_numpy(gaussian_sum[patch_slices]).add_(weight)
+            for name in selected_names:
+                torch.from_numpy(selected_logit_sum[name][patch_slices]).add_(
+                    logits_cpu[selected_indices[name]] * weight
+                )
+            patch_record = {
+                "patch_index": patch_index,
+                "location": [[int(s.start), int(s.stop)] for s in patch_slices],
+                "quality": {name: [float(v) for v in patch_metrics[name].view(-1).detach().cpu()] for name in QUALITY_NAMES},
+                "selected_view": selected_indices,
+            }
+            if target_padded is not None:
+                candidate_dice = _dice_per_view(probability, target_padded[slicer].float())
+                best_dice = float(candidate_dice.max().detach().cpu())
+                patch_record["candidate_dice"] = [float(v) for v in candidate_dice.detach().cpu()]
+                patch_record["best_dice"] = best_dice
+                patch_record["selection"] = {
+                    name: dict(zip(
+                        ("selected_dice", "patch_best_dice", "gap_to_patch_oracle"),
+                        _patch_oracle_stats(candidate_dice, index),
+                    ))
+                    for name, index in selected_indices.items()
+                }
+            patch_records.append(patch_record)
+            prototype_valid += int(semantic["prototype_valid"].sum().cpu())
+            prototype_queries += int(semantic["prototype_valid"].numel())
+
+        if not bool((gaussian_sum > 0).all()):
+            raise RuntimeError("VoxTell sliding-window inference left uncovered voxels")
+        crop = revert_padding[1:]
+        denominator_np = np.maximum(np.asarray(gaussian_sum[crop]), np.finfo(np.float32).eps)
+        fused_logits_np = np.asarray(logit_sum[(..., *crop)], dtype=np.float32).copy()
+        fused_logits, probability = _fuse_logits_then_sigmoid(
+            torch.from_numpy(fused_logits_np), torch.from_numpy(denominator_np.copy())
         )
-        probability = torch.sigmoid(logits[:, 0].float())
-        evidence = semantic["evidence"]
-        similarity = text_similarity_map(
-            adapter._cac_features["vision"], adapter._cac_features["text"]
+        evidence_original = torch.from_numpy(
+            (np.asarray(evidence_sum[(0, *crop)], dtype=np.float32) / denominator_np).copy()
         )
-        evidence = _resize_patch_map(evidence.permute(0, 3, 1, 2), tuple(predictor.patch_size))
-        similarity = _resize_patch_map(similarity.permute(0, 3, 1, 2), tuple(predictor.patch_size))
-        probability = _resize_patch_map(probability, tuple(predictor.patch_size))
-        cac = cac.detach().view(1, num_views)
-        semantic_purity = semantic["purity"].detach().view(1, num_views)
-        semantic_completeness = semantic["completeness"].detach().view(1, num_views)
-        semantic_tse = semantic["tse"].detach().view(1, num_views)
-        clipped = probability.clamp(1e-6, 1 - 1e-6).view(1, num_views, *probability.shape[-3:])
-        patch_metrics = {
-            "confidence": torch.maximum(clipped, 1 - clipped).flatten(start_dim=2).mean(dim=2),
-            "entropy": -(clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()).flatten(start_dim=2).mean(dim=2),
-            "consistency": _soft_consistency(probability.view(1, num_views, *probability.shape[-3:])),
-            "cac": cac,
-            "purity": semantic_purity,
-            "completeness": semantic_completeness,
-            "tse": semantic_tse,
+        full_metrics = {name: [] for name in QUALITY_NAMES}
+        full_consistency = _soft_consistency(probability)
+        for view_index in range(num_views):
+            evidence_view = torch.from_numpy(
+                (np.asarray(evidence_sum[(view_index, *crop)], dtype=np.float32) / denominator_np).copy()
+            )
+            similarity_view = torch.from_numpy(
+                (np.asarray(similarity_sum[(view_index, *crop)], dtype=np.float32) / denominator_np).copy()
+            )
+            view_probability = probability[view_index:view_index + 1]
+            clipped = view_probability.clamp(1e-6, 1 - 1e-6)
+            purity, completeness, tse = compute_tse_components(
+                view_probability, evidence_view[None], adapter.quality_config["epsilon"]
+            )
+            full_metrics["confidence"].append(float(torch.maximum(view_probability, 1 - view_probability).mean()))
+            full_metrics["entropy"].append(float(-(clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()).mean()))
+            full_metrics["consistency"].append(float(full_consistency[view_index]))
+            full_metrics["cac"].append(float(_cac_from_full_maps(view_probability, similarity_view[None])[0]))
+            full_metrics["purity"].append(float(purity[0]))
+            full_metrics["completeness"].append(float(completeness[0]))
+            full_metrics["tse"].append(float(tse[0]))
+        selected_dice = {}
+        for name, value in selected_logit_sum.items():
+            selected_np = (np.asarray(value[crop], dtype=np.float32) / denominator_np).copy()
+            if target is not None:
+                selected_probability = torch.sigmoid(torch.from_numpy(selected_np))
+                selected_dice[name] = float(
+                    _dice_per_view(selected_probability[None], target.float())[0]
+                )
+        return {
+            "probability": probability,
+            "evidence": evidence_original,
+            "full_metrics": {name: torch.tensor(values, dtype=torch.float32) for name, values in full_metrics.items()},
+            "selected_dice": selected_dice,
+            "patch_records": patch_records,
+            "prototype_valid_fraction": prototype_valid / prototype_queries if prototype_queries else 0.0,
+            "locations": slicers,
         }
-        patch_slices = slicer[1:]
-        weight = gaussian.detach().cpu()
-        logits_cpu = logits[:, 0].float().detach().cpu()
-        evidence_cpu = evidence.detach().cpu()
-        similarity_cpu = similarity.detach().cpu()
-        logit_sum[(..., *patch_slices)] += logits_cpu * weight
-        evidence_sum[(..., *patch_slices)] += evidence_cpu * weight
-        similarity_sum[(..., *patch_slices)] += similarity_cpu * weight
-        gaussian_sum[patch_slices] += weight
-        for name in selected_names:
-            selected_index = _selection_indices(patch_metrics)[name]
-            selected_logit_sum[name][patch_slices] += logits_cpu[selected_index] * weight
-        prototype_valid += int(semantic["prototype_valid"].sum().cpu())
-        prototype_queries += int(semantic["prototype_valid"].numel())
-
-    if not bool((gaussian_sum > 0).all()):
-        raise RuntimeError("VoxTell sliding-window inference left uncovered voxels")
-    crop = revert_padding[1:]
-    denominator = gaussian_sum.clamp_min(torch.finfo(gaussian_sum.dtype).eps)
-    fused_logits = (logit_sum / denominator)[(..., *crop)]
-    fused = {
-        "logits": fused_logits,
-        "probability": torch.sigmoid(fused_logits),
-        "evidence": (evidence_sum / denominator)[(..., *crop)],
-        "text_similarity": (similarity_sum / denominator)[(..., *crop)],
-        "selected_probability": {
-            name: torch.sigmoid((value / denominator)[crop])
-            for name, value in selected_logit_sum.items()
-        },
-        "prototype_valid_fraction": prototype_valid / prototype_queries if prototype_queries else 0.0,
-        "locations": slicers,
-    }
-    return fused
 
 
 def _dice_per_view(probability, target):
@@ -274,6 +363,17 @@ def _dice_per_view(probability, target):
         prediction.flatten(start_dim=1).sum(dim=1) + target.flatten(start_dim=1).sum(dim=1)
     ).float()
     return torch.where(denominator > 0, 2 * intersection / denominator, torch.ones_like(denominator))
+
+
+def _patch_oracle_stats(candidate_dice, selected_index):
+    """Return selected Dice, patch-best Dice and a non-negative patch gap."""
+    values = torch.as_tensor(candidate_dice, dtype=torch.float32).reshape(-1)
+    if values.numel() == 0:
+        raise ValueError("candidate_dice must contain at least one view")
+    best = values.max()
+    selected = values[int(selected_index)]
+    gap = torch.clamp(best - selected, min=0.0)
+    return float(selected), float(best), float(gap)
 
 
 def _soft_consistency(probability):
@@ -381,6 +481,106 @@ def parse_args():
     return parser.parse_args()
 
 
+def summarize_quality_audit(
+    cases,
+    mixed_views,
+    selected_dice,
+    patch_selected_dice,
+    patch_best_dice,
+    patch_oracle_gap,
+    best_fixed_view_dice,
+    patch_spearman_case,
+    invalid_evidence_cases,
+    args,
+    prototype_diagnostics,
+):
+    """Build the audit summary with separate patch-oracle and fixed-view stats."""
+    def case_selection_means(field, name):
+        values = [
+            case["selections"][name][field]
+            for case in cases
+            if case.get("selections", {}).get(name, {}).get(field) is not None
+        ]
+        return float(np.mean(values)) if values else None
+
+    macro_spearman = {}
+    macro_valid_cases = {}
+    for name in QUALITY_NAMES:
+        valid = [case["within_case_spearman"][name] for case in cases
+                 if case["within_case_spearman"][name] is not None]
+        macro_spearman[name] = float(np.mean(valid)) if valid else None
+        macro_valid_cases[name] = len(valid)
+    global_spearman = {
+        name: spearman([row[name] for row in mixed_views], [row["dice"] for row in mixed_views])
+        for name in QUALITY_NAMES
+    }
+    patch_spearman_macro = {}
+    patch_spearman_valid_cases = {}
+    patch_spearman_valid_patches = {}
+    for name in QUALITY_NAMES:
+        case_values = [value for value in patch_spearman_case[name] if value is not None]
+        patch_spearman_macro[name] = float(np.mean(case_values)) if case_values else None
+        patch_spearman_valid_cases[name] = len(case_values)
+        patch_spearman_valid_patches[name] = sum(
+            case["patch_spearman"][name]["valid_patches"] for case in cases
+        )
+    valid_localization = [
+        case["evidence_localization_original_view"] for case in cases
+        if case["evidence_localization_original_view"]["valid"]
+    ]
+    return {
+        "protocol": {
+            "quality_mode": args.quality_mode,
+            "w_quality": args.w_quality,
+            "w_cac": getattr(args, "w_cac", 0.0),
+            "gt_usage": "offline metrics/visualization only",
+            "views": "identical per-patch seeded training-style scale/offset/noise views for every metric",
+            "inference": "VoxTell-native padding, sliding windows and Gaussian-weighted logit fusion before sigmoid",
+            "oracle": "patchwise candidate-view GT Dice; fixed-view Dice is reported separately and never used for patch gap",
+        },
+        "prototype_diagnostics": prototype_diagnostics,
+        "within_case_spearman_macro": macro_spearman,
+        "within_case_spearman_valid_cases": macro_valid_cases,
+        "global_mixed_view_spearman": global_spearman,
+        "patch_spearman_macro": patch_spearman_macro,
+        "patch_spearman_valid_cases": patch_spearman_valid_cases,
+        "patch_spearman_valid_patches": patch_spearman_valid_patches,
+        "selected_view_mean_dice": {
+            name: float(np.mean(values)) if values else None for name, values in selected_dice.items()
+        },
+        "selected_view_valid_cases": {name: len(values) for name, values in selected_dice.items()},
+        "patch_selected_dice_mean": {
+            name: case_selection_means("patch_selected_dice", name) for name in SELECTION_NAMES
+        },
+        "patch_selected_valid_patches": {name: len(values) for name, values in patch_selected_dice.items()},
+        "patch_oracle_best_dice_mean": (
+            float(np.mean([
+                case["selections"][SELECTION_NAMES[0]]["patch_best_dice"]
+                for case in cases
+                if case.get("selections", {}).get(SELECTION_NAMES[0], {}).get("patch_best_dice") is not None
+            ]))
+            if any(case.get("selections", {}).get(SELECTION_NAMES[0], {}).get("patch_best_dice") is not None for case in cases)
+            else None
+        ),
+        "patch_oracle_valid_patches": len(patch_best_dice),
+        "patch_oracle_gap_mean": {
+            name: case_selection_means("patch_gap_to_oracle", name) for name in SELECTION_NAMES
+        },
+        "patch_oracle_gap_valid_patches": {name: len(values) for name, values in patch_oracle_gap.items()},
+        "best_fixed_view_mean_dice": float(np.mean(best_fixed_view_dice)) if best_fixed_view_dice else None,
+        "best_fixed_view_valid_cases": len(best_fixed_view_dice),
+        "valid_cases": len(cases),
+        "valid_patches": len(patch_best_dice),
+        "evidence_localization_macro": {
+            name: float(np.mean([row[name] for row in valid_localization])) if valid_localization else None
+            for name in ("dice", "auroc", "auprc")
+        },
+        "evidence_valid_cases": len(valid_localization),
+        "evidence_invalid_cases": invalid_evidence_cases,
+        "cases": cases,
+    }
+
+
 def main():
     args = parse_args()
     if args.quality_mode != "tse" or args.w_quality != 0:
@@ -407,39 +607,31 @@ def main():
     cases = []
     mixed_views = []
     selected_dice = {name: [] for name in SELECTION_NAMES}
+    patch_selected_dice = {name: [] for name in SELECTION_NAMES}
+    patch_best_dice = []
+    patch_oracle_gap = {name: [] for name in SELECTION_NAMES}
+    best_fixed_view_dice = []
+    patch_spearman_case = {name: [] for name in QUALITY_NAMES}
     invalid_evidence_cases = []
     try:
         test_entries = read_image_entries(args.data_dir, "test")
         for case_index, (image_path, label_path) in enumerate(test_entries):
             volume, target = load_preprocessed_labeled_case(image_path, label_path)
-            inference = infer_full_volume_views(
+            target = _align_target_to_volume(target, volume)
+            inference = _voxtell_sliding_window_views(
                 adapter,
                 volume,
-                tuple(int(value) for value in predictor.patch_size),
                 args.num_aug_views,
                 _case_seed(args.seed, image_path.name),
                 case_id=image_path.name,
+                target=target,
             )
-            probability, evidence, similarity = (
-                inference["probability"], inference["evidence"], inference["text_similarity"]
+            probability, evidence, metrics = (
+                inference["probability"], inference["evidence"], inference["full_metrics"]
             )
-            purity, completeness, tse = compute_tse_components(
-                probability, evidence, adapter.quality_config["epsilon"]
-            )
-            clipped = probability.clamp(1e-6, 1 - 1e-6)
-            metrics = {
-                "confidence": torch.maximum(probability, 1 - probability).flatten(start_dim=1).mean(dim=1),
-                "entropy": -(
-                    clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()
-                ).flatten(start_dim=1).mean(dim=1),
-                "consistency": _soft_consistency(probability),
-                "cac": _cac_from_full_maps(probability, similarity),
-                "purity": purity,
-                "completeness": completeness,
-                "tse": tse,
-            }
             dice = _dice_per_view(probability, target.float())
-            oracle_index, oracle_dice = int(dice.argmax()), float(dice.max())
+            fixed_index, fixed_dice = int(dice.argmax()), float(dice.max())
+            best_fixed_view_dice.append(fixed_dice)
             per_view = []
             for view_index in range(args.num_aug_views):
                 row = {
@@ -454,19 +646,54 @@ def main():
                 name: spearman([row[name] for row in per_view], [row["dice"] for row in per_view])
                 for name in QUALITY_NAMES
             }
+            patch_spearman = {}
+            for name in QUALITY_NAMES:
+                values = [
+                    spearman(patch["quality"][name], patch["candidate_dice"])
+                    for patch in inference["patch_records"]
+                    if "candidate_dice" in patch
+                ]
+                patch_spearman[name] = values
+                valid_patch_correlations = [v for v in values if v is not None]
+                patch_spearman_case[name].append(
+                    float(np.mean(valid_patch_correlations)) if valid_patch_correlations else None
+                )
+            for patch in inference["patch_records"]:
+                if "candidate_dice" in patch:
+                    patch["spearman"] = {
+                        name: spearman(patch["quality"][name], patch["candidate_dice"])
+                        for name in QUALITY_NAMES
+                    }
             selections = {}
-            for name, selected_map in inference["selected_probability"].items():
-                selected = float(_dice_per_view(selected_map[None], target.float())[0])
+            patch_best_dice.extend(
+                patch["best_dice"] for patch in inference["patch_records"] if "best_dice" in patch
+            )
+            for name, selected in inference["selected_dice"].items():
                 selected_dice[name].append(selected)
+                patch_values = [
+                    patch["selection"][name]["selected_dice"]
+                    for patch in inference["patch_records"] if "selection" in patch
+                ]
+                patch_best_values = [
+                    patch["selection"][name]["patch_best_dice"]
+                    for patch in inference["patch_records"] if "selection" in patch
+                ]
+                patch_gap_values = [
+                    max(0.0, patch["selection"][name]["gap_to_patch_oracle"])
+                    for patch in inference["patch_records"] if "selection" in patch
+                ]
+                patch_selected_dice[name].extend(patch_values)
+                patch_oracle_gap[name].extend(patch_gap_values)
                 selections[name] = {
                     "view": "patchwise",
-                    "selected_dice": selected,
-                    "oracle_best_view": oracle_index,
-                    "oracle_best_dice": oracle_dice,
-                    "gap_to_oracle": oracle_dice - selected,
+                    "full_volume_dice": selected,
+                    "patch_selected_dice": float(np.mean(patch_values)) if patch_values else None,
+                    "patch_best_dice": float(np.mean(patch_best_values)) if patch_best_values else None,
+                    "patch_gap_to_oracle": float(np.mean(patch_gap_values)) if patch_gap_values else None,
+                    "valid_patches": len(patch_values),
                 }
             localization = evidence_localization_metrics(
-                evidence[0], target.float(), adapter.quality_config["evidence_threshold"]
+                evidence, target.float(), adapter.quality_config["evidence_threshold"]
             )
             if not localization["valid"]:
                 invalid_evidence_cases.append({"case": image_path.name, "reason": localization["reason"]})
@@ -475,11 +702,20 @@ def main():
                     "case": image_path.name,
                     "views": per_view,
                     "within_case_spearman": correlations,
-                    "oracle_best_view": oracle_index,
-                    "oracle_best_dice": oracle_dice,
+                    "patch_spearman": {
+                        name: {
+                            "mean": float(np.mean([v for v in values if v is not None])) if any(v is not None for v in values) else None,
+                            "valid_patches": sum(v is not None for v in values),
+                        }
+                        for name, values in patch_spearman.items()
+                    },
+                    "best_fixed_view": fixed_index,
+                    "best_fixed_view_dice": fixed_dice,
+                    "patch_count": len(inference["patch_records"]),
+                    "patches": inference["patch_records"],
                     "selections": selections,
                     "evidence_localization_original_view": localization,
-                    "evidence_statistics_original_view": _tensor_statistics(evidence[0]),
+                    "evidence_statistics_original_view": _tensor_statistics(evidence),
                     "prototype_valid_fraction": inference["prototype_valid_fraction"],
                     "sliding_window_patches": len(inference["locations"]),
                 }
@@ -490,49 +726,24 @@ def main():
                     volume,
                     target,
                     probability[0] >= 0.5,
-                    evidence[0],
+                    evidence,
                 )
     finally:
         adapter.close()
 
-    macro_spearman = {}
-    macro_valid_cases = {}
-    for name in QUALITY_NAMES:
-        valid = [case["within_case_spearman"][name] for case in cases if case["within_case_spearman"][name] is not None]
-        macro_spearman[name] = float(np.mean(valid)) if valid else None
-        macro_valid_cases[name] = len(valid)
-    global_spearman = {
-        name: spearman([row[name] for row in mixed_views], [row["dice"] for row in mixed_views])
-        for name in QUALITY_NAMES
-    }
-    valid_localization = [
-        case["evidence_localization_original_view"]
-        for case in cases
-        if case["evidence_localization_original_view"]["valid"]
-    ]
-    result = {
-        "protocol": {
-            "quality_mode": args.quality_mode,
-            "w_quality": args.w_quality,
-            "gt_usage": "offline metrics/visualization only",
-            "views": "identical per-patch seeded training-style scale/offset/noise views for every metric",
-            "inference": "VoxTell-native padding, sliding windows and Gaussian-weighted logit fusion before sigmoid",
-        },
-        "prototype_diagnostics": adapter.prototype_diagnostics,
-        "within_case_spearman_macro": macro_spearman,
-        "within_case_spearman_valid_cases": macro_valid_cases,
-        "global_mixed_view_spearman": global_spearman,
-        "selected_view_mean_dice": {
-            name: float(np.mean(values)) if values else None for name, values in selected_dice.items()
-        },
-        "evidence_localization_macro": {
-            name: float(np.mean([row[name] for row in valid_localization])) if valid_localization else None
-            for name in ("dice", "auroc", "auprc")
-        },
-        "evidence_valid_cases": len(valid_localization),
-        "evidence_invalid_cases": invalid_evidence_cases,
-        "cases": cases,
-    }
+    result = summarize_quality_audit(
+        cases,
+        mixed_views,
+        selected_dice,
+        patch_selected_dice,
+        patch_best_dice,
+        patch_oracle_gap,
+        best_fixed_view_dice,
+        patch_spearman_case,
+        invalid_evidence_cases,
+        args,
+        adapter.prototype_diagnostics,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key != "cases"}, indent=2))

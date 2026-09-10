@@ -63,7 +63,17 @@ python run_sfda_voxtell.py `
 ```bash
 bash train_cac.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/cac
 bash train_tse.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/tse
+# Explicit historical CAC-loss baseline (w_cac=1), if needed:
+bash train_cac_baseline.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/cac_baseline
 ```
+
+`train_cac.sh` is the fair view-selection-only CAC configuration and explicitly
+passes `--w_cac 0`; `train_tse.sh` likewise passes `--w_quality 0`. Both launchers
+resolve `run_sfda_voxtell.py` and `configs/tse.json` relative to their own directory,
+so they are safe to call from any working directory. The legacy `train.sh` is
+disabled to prevent accidentally running an implicit CAC baseline; choose one of
+the two explicit launchers above (an original `w_cac=1` run must be named and
+invoked separately as a baseline).
 
 TSE 启动适配前，用冻结的初始 VoxTell、固定的单 prompt 和全部无标签 train cases
 做一次 prototype 预扫描。每个病例先按现有 nnUNet 预处理得到完整非零区域，再右侧
@@ -119,9 +129,12 @@ python evaluate_quality_metrics.py `
 ```
 
 输出 `quality_audit.json`，包含 confidence、entropy、consistency、CAC、purity、completeness、TSE
-与逐视图真实 Dice 的每病例 Spearman 宏平均及全局补充相关性；同时输出 CAC/TSE 单独
-选择、CAC+entropy/TSE+entropy 选择（以及 purity/completeness 单独选择）的 Dice、
-oracle-best Dice 与 gap。evidence 原图视图还输出空间 Dice、AUROC、AUPRC、均值、
+与逐视图真实 Dice 的每病例 Spearman 宏平均及全局补充相关性，并对每个滑窗 patch
+计算质量指标与候选 view GT Dice 的 Spearman；同时输出 CAC/TSE 单独选择、
+CAC+entropy/TSE+entropy 选择（以及 purity/completeness 单独选择）的完整体积 Dice、
+patch-level selected Dice、patch-best Dice 和非负 patch-oracle gap。固定 view 的最佳完整体积
+Dice 单独记为 `best_fixed_view_dice`，不参与 patch gap。汇总包含 mean selected Dice、
+mean patch-oracle gap、best-fixed-view mean Dice、有效病例数和有效 patch 数。evidence 原图视图还输出空间 Dice、AUROC、AUPRC、均值、
 标准差和分位数；空 GT/单类 GT 作为无效病例单独记录。默认保存前 5 个病例的 image、
 GT、预测和 evidence 轴向切片可视化。
 
