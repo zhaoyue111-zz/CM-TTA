@@ -9,6 +9,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,12 +35,25 @@ from sfda_voxtell import (  # noqa: E402
 )
 from semantic_quality import (  # noqa: E402
     SemanticPrototypeMemory,
+    average_tie_ranks,
     compute_tse_components,
 )
+from data.sfda_voxtell import (  # noqa: E402
+    fuse_volume_patches,
+    nonoverlapping_patch_locations,
+    pad_to_patch_grid,
+    sliding_window_locations,
+)
+import data.sfda_voxtell as sfda_data  # noqa: E402
 from run_sfda_voxtell import (  # noqa: E402
     _native_spacing,
     binary_segmentation_metrics,
     should_evaluate_epoch,
+)
+from evaluate_quality_metrics import (  # noqa: E402
+    binary_auprc,
+    binary_auroc,
+    evidence_localization_metrics,
 )
 
 
@@ -313,8 +327,8 @@ class SoftPromptOnlyTests(unittest.TestCase):
             torch.device("cpu"),
             _args(
                 quality_mode="tse",
-                w_quality=1.0,
-                w_seg=0.0,
+                w_quality=0.0,
+                w_seg=1.0,
                 w_entropy=0.0,
             ),
         )
@@ -357,6 +371,93 @@ class SoftPromptOnlyTests(unittest.TestCase):
         )
         _, _, valid = memory.leave_one_out(["case-a"], "cpu")
         self.assertFalse(valid.any())
+
+    def test_equal_quality_scores_receive_tied_ranks(self):
+        ranks = average_tie_ranks(torch.tensor([[0.0, 0.0, 1.0, 1.0]]), descending=True)
+        self.assertEqual(ranks.tolist(), [[2.5, 2.5, 0.5, 0.5]])
+
+    def test_deterministic_nonoverlap_covers_complete_case_once(self):
+        volume = torch.arange(27, dtype=torch.float32).view(1, 3, 3, 3)
+        padded, valid, original_shape = pad_to_patch_grid(volume, (2, 2, 2))
+        locations = nonoverlapping_patch_locations(padded.shape[-3:], (2, 2, 2))
+        patches = torch.stack([
+            padded[(slice(None), slice(d, d + 2), slice(h, h + 2), slice(w, w + 2))]
+            for d, h, w in locations
+        ])
+        fused = fuse_volume_patches(patches, locations, padded.shape[-3:])
+        self.assertEqual(original_shape, (3, 3, 3))
+        self.assertTrue(torch.equal(fused[..., :3, :3, :3], volume))
+        self.assertEqual(float(valid.sum()), 27.0)
+
+    def test_overlapping_sliding_locations_have_full_coverage(self):
+        locations = sliding_window_locations((5, 6, 7), (3, 3, 3), overlap=0.5)
+        coverage = torch.zeros(5, 6, 7)
+        for d, h, w in locations:
+            coverage[d:d + 3, h:h + 3, w:w + 3] += 1
+        self.assertTrue(torch.all(coverage > 0))
+
+    def test_overlapping_fusion_is_coverage_normalized(self):
+        locations = [
+            (d, h, w)
+            for d in (0, 1)
+            for h in (0, 1)
+            for w in (0, 1)
+        ]
+        patches = torch.stack(
+            [torch.full((1, 2, 2, 2), 2.0 if i == 0 else 4.0)
+             for i in range(len(locations))]
+        )
+        fused = fuse_volume_patches(patches, locations, (3, 3, 3))
+        self.assertAlmostEqual(float(fused[0, 1, 1, 1]), 3.75)
+        self.assertAlmostEqual(float(fused[0, 0, 0, 0]), 2.0)
+        self.assertAlmostEqual(float(fused[0, 2, 2, 2]), 4.0)
+
+    def test_evidence_localization_metrics_mark_empty_gt_invalid(self):
+        evidence = torch.tensor([[[0.1, 0.9]]])
+        empty_target = torch.zeros_like(evidence)
+        result = evidence_localization_metrics(evidence, empty_target, 0.5)
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["reason"], "empty_gt")
+        self.assertIsNone(binary_auroc([0.1, 0.2], [False, False]))
+        self.assertIsNone(binary_auprc([0.1, 0.2], [False, False]))
+
+    def test_evidence_ranking_metrics_are_perfect_for_separated_scores(self):
+        self.assertAlmostEqual(binary_auroc([0.1, 0.9], [False, True]), 1.0)
+        self.assertAlmostEqual(binary_auprc([0.1, 0.9], [False, True]), 1.0)
+
+    def test_prototype_build_uses_all_deterministic_case_patches(self):
+        adapter = VoxTellPromptSFDA(
+            _TinyVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), _args(quality_mode="tse")
+        )
+        adapter.quality_config.update(
+            foreground_probability_threshold=0.0,
+            background_probability_threshold=1.0,
+            foreground_text_similarity_threshold=-1.0,
+            background_text_similarity_threshold=1.0,
+            probability_stability_threshold=1.0,
+            similarity_stability_threshold=1.0,
+            prototype_patch_batch_size=2,
+        )
+        adapter.args.output_dir = tempfile.mkdtemp()
+        entries = [(Path("case-a.nii.gz"), None), (Path("case-b.nii.gz"), None)]
+        loader = SimpleNamespace(
+            dataset=SimpleNamespace(entries=entries, patch_size=(2, 2, 2))
+        )
+        try:
+            with mock.patch.object(
+                sfda_data,
+                "load_preprocessed_image",
+                return_value=torch.zeros(1, 3, 3, 3),
+            ):
+                adapter.build_prototype_memory(loader)
+            # 3^3 is padded to 4^3, hence 8 non-overlapping patches per case.
+            self.assertEqual(adapter.prototype_diagnostics["cases"]["case-a.nii.gz"]["patches"], 8)
+            self.assertEqual(adapter.prototype_diagnostics["cases"]["case-b.nii.gz"]["patches"], 8)
+            self.assertEqual(adapter.prototype_diagnostics["dataset"]["cases"], 2)
+            self.assertGreater(adapter.prototype_diagnostics["dataset"]["foreground_seed_count"], 0)
+            self.assertGreater(adapter.prototype_diagnostics["dataset"]["background_seed_count"], 0)
+        finally:
+            adapter.close()
 
     def test_checkpoint_restores_soft_prompt_teacher_and_optimizer(self):
         adapter, _, _ = _make_adapter()

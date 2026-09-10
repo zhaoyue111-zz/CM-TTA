@@ -50,18 +50,23 @@ python run_sfda_voxtell.py `
   --prompt prostate `
   --quality_mode tse `
   --quality_config configs\tse.json `
-  --w_quality 1.0
+  --w_quality 0
 ```
 
-`--w_quality 0`（默认）只把选定的质量指标用于增强视图排序；大于 0 时在原 CAC
-loss 位置加入 `-quality`。CAC 模式继续使用 `--w_cac`（`--w_contrast` 是兼容别名）。
-视图排序仍沿用原流程的 quality + entropy rank fusion。
+当前 TSE/purity/completeness 模式强制 `--w_quality 0`，质量指标只用于视图评价；
+不会把 TSE 加入训练损失。CAC 模式继续使用 `--w_cac`（`--w_contrast` 是兼容别名）。
+视图排序仍沿用原流程的 quality + entropy rank fusion，并列质量使用平均排名。
 
 TSE 启动适配前，用冻结的初始 VoxTell、固定的单 prompt 和全部无标签 train cases
-做一次 prototype 预扫描。复用 `project_bottleneck_embed` 输出
+做一次 prototype 预扫描。每个病例先按现有 nnUNet 预处理得到完整非零区域，再右侧
+padding 到 patch 网格，以确定性的无重叠 patch 覆盖完整病例；padding 区域由 valid
+mask 排除。复用 `project_bottleneck_embed` 输出
 `(B,H,W,D,C)`；高前景概率、高文本相似度且跨强度视图稳定的 voxel 聚合到前景
 prototype，低概率、低相似度且稳定的 voxel 聚合到背景 prototype。病例级 seed
-sum/count 会被保留，评价某病例时只聚合其他病例（严格 leave-one-case-out）。
+sum/count 会被保留，评价某病例时只聚合其他病例（严格 leave-one-case-out）。每个
+病例和数据集的 seed 数/占比、有效病例数及相似度直方图/矩/分位数写入
+`prototype_diagnostics.json`；全局无有效前景或背景 seed，或没有任何有效 LOO 原型时
+会直接报错。
 当前增强只有强度变换，空间逆变换为恒等；以后加入翻转/仿射时必须先逆变换再聚合。
 阈值、特征 hook、seed 视图数、温度和 epsilon 全部位于 `configs/tse.json`。
 
@@ -91,18 +96,26 @@ NPY/NIfTI 预测以及 ASSD/HD95；前几轮不保存 3D 预测，以控制磁�
 D:\anaconda\python.exe -m unittest discover -s CM-SFDA\tests -p "test_*.py" -v
 ```
 
-带 GT 的质量审计是独立脚本，GT 只在所有预测与质量分数计算结束后用于 Dice：
+带 GT 的质量审计是独立脚本。train split 只用于无标签 prototype；test/validation 的
+GT 只在完整体积 sliding-window 推理、evidence coverage 融合和所有质量选择结束后
+用于离线指标：
 
 ```powershell
 python evaluate_quality_metrics.py `
   --data_dir D:\path\to\data `
   --voxtell_root D:\path\to\VoxTell_from_disk `
   --model_dir D:\path\to\VoxTell_from_disk\model `
-  --prompt prostate
+  --prompt prostate `
+  --quality_mode tse `
+  --w_quality 0
 ```
 
-输出 `quality_audit.json`，包含 confidence、entropy、consistency、CAC、TSE 与逐视图
-真实 Dice 的 Spearman 相关性，以及每项指标选中视图的平均 Dice。
+输出 `quality_audit.json`，包含 confidence、entropy、consistency、CAC、purity、completeness、TSE
+与逐视图真实 Dice 的每病例 Spearman 宏平均及全局补充相关性；同时输出 CAC/TSE 单独
+选择、CAC+entropy/TSE+entropy 选择（以及 purity/completeness 单独选择）的 Dice、
+oracle-best Dice 与 gap。evidence 原图视图还输出空间 Dice、AUROC、AUPRC、均值、
+标准差和分位数；空 GT/单类 GT 作为无效病例单独记录。默认保存前 5 个病例的 image、
+GT、预测和 evidence 轴向切片可视化。
 
 注意：当前 `CM-SFDA` VoxTell 分支没有原始 2D CM-TTA 中的 short prompt memory，
 也没有 LSPM、DSPU 实现；因此本次没有伪造这些组件。已有 teacher prompt EMA、

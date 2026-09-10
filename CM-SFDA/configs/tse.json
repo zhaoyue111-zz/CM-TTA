@@ -11,5 +11,10 @@
   "epsilon": 1e-6,
   "stop_evidence_gradient": true,
   "seed_views": 3,
-  "num_prototypes": 1
+  "num_prototypes": 1,
+  "prototype_patch_batch_size": 1,
+  "evaluation_patch_batch_size": 1,
+  "evaluation_overlap": 0.5,
+  "evidence_threshold": 0.5,
+  "similarity_histogram_bins": 50
 }

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
@@ -19,17 +20,21 @@ try:
     from .semantic_quality import (
         QUALITY_MODES,
         SemanticPrototypeMemory,
+        average_tie_ranks,
         compute_semantic_quality,
         extract_case_seed_statistics,
         load_quality_config,
+        summarize_similarity_distribution,
     )
 except ImportError:  # Compatibility with direct ``from sfda_voxtell import ...``.
     from semantic_quality import (  # type: ignore
         QUALITY_MODES,
         SemanticPrototypeMemory,
+        average_tie_ranks,
         compute_semantic_quality,
         extract_case_seed_statistics,
         load_quality_config,
+        summarize_similarity_distribution,
     )
 
 
@@ -112,7 +117,7 @@ def compute_cac_score(vision_features, text_features, logits, fg_threshold=0.5):
 
 
 def select_cac_views(cac_scores, probabilities, selection_p):
-    """Rank augmented views using the original CAC + entropy fusion."""
+    """Rank views using quality + entropy with average ranks for exact ties."""
     if cac_scores.ndim != 2:
         raise ValueError(f"Expected CAC scores (B,V), got {tuple(cac_scores.shape)}")
     if probabilities.ndim < 3:
@@ -128,11 +133,11 @@ def select_cac_views(cac_scores, probabilities, selection_p):
     entropy = _binary_view_entropy(
         probabilities.reshape(batch_size * num_views, *probabilities.shape[2:])
     ).view(batch_size, num_views)
-    entropy_ranks = entropy.argsort(dim=1).argsort(dim=1).float()
-    cac_ranks = (-cac_scores).argsort(dim=1).argsort(dim=1).float()
+    entropy_ranks = average_tie_ranks(entropy, descending=False)
+    cac_ranks = average_tie_ranks(cac_scores, descending=True)
     combined_ranks = entropy_ranks + cac_ranks
     keep = max(1, int(num_views * float(selection_p)))
-    return torch.argsort(combined_ranks, dim=1)[:, :keep]
+    return torch.argsort(combined_ranks, dim=1, stable=True)[:, :keep]
 
 
 def cac_loss(cac_scores):
@@ -191,6 +196,10 @@ class VoxTellPromptSFDA:
             raise ValueError(
                 f"quality_mode must be one of {QUALITY_MODES}, got {self.quality_mode!r}"
             )
+        if self.quality_mode != "cac" and float(getattr(args, "w_quality", 0.0)) != 0.0:
+            raise ValueError(
+                "Semantic quality is evaluation-only in this version; use w_quality=0"
+            )
         default_quality_config = Path(__file__).resolve().parents[1] / "configs" / "tse.json"
         self.quality_config = load_quality_config(
             getattr(args, "quality_config", default_quality_config)
@@ -198,6 +207,7 @@ class VoxTellPromptSFDA:
         self.prototype_memory = SemanticPrototypeMemory(
             self.quality_config["num_prototypes"]
         )
+        self.prototype_diagnostics = {}
         self.optimizer = torch.optim.AdamW(
             [self.soft_prompt_embedding], lr=args.lr, weight_decay=args.weight_decay
         )
@@ -372,55 +382,243 @@ class VoxTellPromptSFDA:
             score = cac
         return score, cac, semantic
 
+    @staticmethod
+    def _make_deterministic_seed_views(base, count):
+        """Create fixed aligned intensity views without consuming any RNG state."""
+        views = [base]
+        scales = (0.90, 1.10, 0.95, 1.05)
+        offsets = (-0.05, 0.05, 0.025, -0.025)
+        for index in range(1, int(count)):
+            position = (index - 1) % len(scales)
+            cycle = (index - 1) // len(scales)
+            attenuation = 1.0 / (cycle + 1)
+            scale = 1.0 + (scales[position] - 1.0) * attenuation
+            offset = offsets[position] * attenuation
+            views.append((base * scale + offset).contiguous())
+        return torch.stack(views, dim=1)
+
+    @staticmethod
+    def _new_case_diagnostic(histogram_bins):
+        return {
+            "patches": 0,
+            "fg_count": 0.0,
+            "bg_count": 0.0,
+            "valid_count": 0.0,
+            "similarity_count": 0.0,
+            "similarity_sum": 0.0,
+            "similarity_square_sum": 0.0,
+            "similarity_min": float("inf"),
+            "similarity_max": float("-inf"),
+            "similarity_histogram": torch.zeros(histogram_bins, dtype=torch.float64),
+        }
+
+    @staticmethod
+    def _accumulate_case_diagnostic(target, statistics):
+        target["patches"] += int(statistics["fg_count"].shape[0])
+        for name in (
+            "fg_count",
+            "bg_count",
+            "valid_count",
+            "similarity_count",
+            "similarity_sum",
+            "similarity_square_sum",
+        ):
+            target[name] += float(statistics[name].detach().sum().cpu())
+        target["similarity_min"] = min(
+            target["similarity_min"],
+            float(statistics["similarity_min"].detach().min().cpu()),
+        )
+        target["similarity_max"] = max(
+            target["similarity_max"],
+            float(statistics["similarity_max"].detach().max().cpu()),
+        )
+        target["similarity_histogram"] += statistics[
+            "similarity_histogram"
+        ].detach().double().cpu().sum(dim=0)
+
+    def _finalize_prototype_diagnostics(self, raw_diagnostics):
+        cases = {}
+        global_raw = self._new_case_diagnostic(
+            int(self.quality_config["similarity_histogram_bins"])
+        )
+        for case_id in sorted(raw_diagnostics):
+            raw = raw_diagnostics[case_id]
+            valid_count = max(raw["valid_count"], float(self.quality_config["epsilon"]))
+            positive, negative, valid = self.prototype_memory.leave_one_out(
+                [case_id], "cpu"
+            )
+            del positive, negative
+            cases[case_id] = {
+                "patches": raw["patches"],
+                "foreground_seed_count": raw["fg_count"],
+                "background_seed_count": raw["bg_count"],
+                "foreground_seed_fraction": raw["fg_count"] / valid_count,
+                "background_seed_fraction": raw["bg_count"] / valid_count,
+                "total_seed_fraction": (raw["fg_count"] + raw["bg_count"]) / valid_count,
+                "valid_feature_voxels": raw["valid_count"],
+                "loo_prototype_valid": bool(valid.all()),
+                "similarity_distribution": summarize_similarity_distribution(
+                    raw["similarity_histogram"],
+                    raw["similarity_count"],
+                    raw["similarity_sum"],
+                    raw["similarity_square_sum"],
+                    raw["similarity_min"],
+                    raw["similarity_max"],
+                ),
+            }
+            for name in (
+                "patches",
+                "fg_count",
+                "bg_count",
+                "valid_count",
+                "similarity_count",
+                "similarity_sum",
+                "similarity_square_sum",
+            ):
+                global_raw[name] += raw[name]
+            global_raw["similarity_min"] = min(
+                global_raw["similarity_min"], raw["similarity_min"]
+            )
+            global_raw["similarity_max"] = max(
+                global_raw["similarity_max"], raw["similarity_max"]
+            )
+            global_raw["similarity_histogram"] += raw["similarity_histogram"]
+
+        epsilon = float(self.quality_config["epsilon"])
+        if global_raw["fg_count"] <= 0 or global_raw["bg_count"] <= 0:
+            raise RuntimeError(
+                "TSE prototype construction failed: global foreground/background "
+                f"seed counts are {global_raw['fg_count']}/{global_raw['bg_count']}. "
+                "Adjust seed thresholds after inspecting similarity diagnostics."
+            )
+        valid_count = max(global_raw["valid_count"], epsilon)
+        dataset = {
+            "cases": len(cases),
+            "patches": global_raw["patches"],
+            "foreground_seed_count": global_raw["fg_count"],
+            "background_seed_count": global_raw["bg_count"],
+            "foreground_seed_fraction": global_raw["fg_count"] / valid_count,
+            "background_seed_fraction": global_raw["bg_count"] / valid_count,
+            "total_seed_fraction": (
+                global_raw["fg_count"] + global_raw["bg_count"]
+            ) / valid_count,
+            "valid_foreground_cases": sum(
+                int(item["foreground_seed_count"] > 0) for item in cases.values()
+            ),
+            "valid_background_cases": sum(
+                int(item["background_seed_count"] > 0) for item in cases.values()
+            ),
+            "valid_loo_cases": sum(
+                int(item["loo_prototype_valid"]) for item in cases.values()
+            ),
+            "similarity_distribution": summarize_similarity_distribution(
+                global_raw["similarity_histogram"],
+                global_raw["similarity_count"],
+                global_raw["similarity_sum"],
+                global_raw["similarity_square_sum"],
+                global_raw["similarity_min"],
+                global_raw["similarity_max"],
+            ),
+        }
+        if dataset["valid_loo_cases"] == 0:
+            raise RuntimeError(
+                "TSE prototype construction produced no valid leave-one-case-out "
+                "prototype; at least two cases with foreground and background seeds are required"
+            )
+        return {"cases": cases, "dataset": dataset}
+
     def build_prototype_memory(self, loader, force=False):
-        """Build fixed initial-model case statistics over the unlabeled target split."""
+        """Build prototypes from deterministic non-overlapping full-case patches."""
         if len(self.prototype_memory) and not force:
             return
+        try:
+            from data.sfda_voxtell import (
+                extract_volume_patch,
+                load_preprocessed_image,
+                nonoverlapping_patch_locations,
+                pad_to_patch_grid,
+            )
+        except ImportError as error:
+            raise ImportError("Could not import deterministic target-volume utilities") from error
+        dataset = getattr(loader, "dataset", None)
+        entries = getattr(dataset, "entries", None)
+        patch_size = getattr(dataset, "patch_size", None)
+        if entries is None or patch_size is None:
+            raise TypeError(
+                "Prototype construction requires a VoxTellTargetDataset with entries/patch_size"
+            )
         self.prototype_memory.clear()
         seed_views = int(self.quality_config["seed_views"])
-        for batch in loader:
-            if len(batch) < 3:
-                raise ValueError(
-                    "TSE prototype construction requires stable case identifiers from the loader"
+        patch_batch_size = int(self.quality_config["prototype_patch_batch_size"])
+        histogram_bins = int(self.quality_config["similarity_histogram_bins"])
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+        raw_diagnostics = {}
+        for entry_index, (image_path, label_path) in enumerate(entries):
+            if label_path is not None:
+                raise RuntimeError("Prototype construction must receive unlabeled train entries")
+            if entry_index % world_size != rank:
+                continue
+            case_id = image_path.name
+            volume = load_preprocessed_image(image_path)
+            padded, valid_mask, _ = pad_to_patch_grid(volume, patch_size)
+            locations = nonoverlapping_patch_locations(padded.shape[-3:], patch_size)
+            case_diagnostic = self._new_case_diagnostic(histogram_bins)
+            for start in range(0, len(locations), patch_batch_size):
+                batch_locations = locations[start:start + patch_batch_size]
+                patches = torch.stack(
+                    [extract_volume_patch(padded, location, patch_size) for location in batch_locations]
+                ).to(self.device, non_blocking=True)
+                valid_patches = torch.stack(
+                    [extract_volume_patch(valid_mask, location, patch_size) for location in batch_locations]
+                ).to(self.device, non_blocking=True)
+                views = self._make_deterministic_seed_views(patches, seed_views)
+                flat_views = views.reshape(
+                    patches.shape[0] * seed_views, *patches.shape[1:]
                 )
-            weak, strong, case_ids = batch[:3]
-            weak = weak.to(self.device, non_blocking=True)
-            strong = strong.to(self.device, non_blocking=True)
-            case_ids = self._normalize_case_ids(case_ids, weak.shape[0])
-            extra = self._make_extra_views(weak, max(0, seed_views - 2))
-            views = torch.stack([weak, strong, *extra], dim=1)[:, :seed_views]
-            flat_views = views.reshape(weak.shape[0] * seed_views, *weak.shape[1:])
-            self._cac_features.clear()
-            with torch.no_grad(), torch.autocast(
-                device_type=self.device.type, enabled=self.device.type == "cuda"
-            ):
-                prompt = self._text(self.initial_soft_prompt, flat_views.shape[0])
-                logits = self.model(flat_views, prompt)
-            statistics = extract_case_seed_statistics(
-                self._cac_features["vision"],
-                self._cac_features["text"],
-                logits,
-                weak.shape[0],
-                seed_views,
-                self.quality_config,
-            )
-            self.prototype_memory.add(case_ids, statistics)
+                self._cac_features.clear()
+                with torch.no_grad(), torch.autocast(
+                    device_type=self.device.type, enabled=self.device.type == "cuda"
+                ):
+                    prompt = self._text(self.initial_soft_prompt, flat_views.shape[0])
+                    logits = self.model(flat_views, prompt)
+                statistics = extract_case_seed_statistics(
+                    self._cac_features["vision"],
+                    self._cac_features["text"],
+                    logits,
+                    patches.shape[0],
+                    seed_views,
+                    self.quality_config,
+                    valid_masks=valid_patches,
+                )
+                self.prototype_memory.add([case_id] * patches.shape[0], statistics)
+                self._accumulate_case_diagnostic(case_diagnostic, statistics)
+            raw_diagnostics[case_id] = case_diagnostic
         self.prototype_memory.synchronize()
         if not len(self.prototype_memory):
             raise RuntimeError("No target cases were available for prototype construction")
-        valid_fg = sum(
-            int(item["fg_count"].sum() > 0)
-            for item in self.prototype_memory.case_statistics.values()
-        )
-        valid_bg = sum(
-            int(item["bg_count"].sum() > 0)
-            for item in self.prototype_memory.case_statistics.values()
-        )
-        print(
-            "TSE prototype memory: "
-            f"cases={len(self.prototype_memory)} fg_seed_cases={valid_fg} "
-            f"bg_seed_cases={valid_bg} feature={self.quality_config['feature_layer']}"
-        )
+        if world_size > 1:
+            gathered = [None for _ in range(world_size)]
+            dist.all_gather_object(gathered, raw_diagnostics)
+            raw_diagnostics = {
+                case_id: diagnostic
+                for rank_diagnostics in gathered
+                for case_id, diagnostic in rank_diagnostics.items()
+            }
+        self.prototype_diagnostics = self._finalize_prototype_diagnostics(raw_diagnostics)
+        if rank == 0:
+            for case_id, diagnostic in self.prototype_diagnostics["cases"].items():
+                print(f"TSE seeds {case_id}: {json.dumps(diagnostic, ensure_ascii=False)}")
+            print(
+                "TSE prototype dataset: "
+                + json.dumps(self.prototype_diagnostics["dataset"], ensure_ascii=False)
+            )
+            output_dir = Path(getattr(self.args, "output_dir", "."))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "prototype_diagnostics.json").write_text(
+                json.dumps(self.prototype_diagnostics, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
     def _select_views(self, views, case_ids):
         """Rank every view without retaining a backward graph."""
@@ -680,6 +878,7 @@ def save_sfda_checkpoint(path, adapter: VoxTellPromptSFDA, args, history):
             "optimizer": adapter.optimizer.state_dict(),
             "scaler": adapter.scaler.state_dict(),
             "prototype_memory": adapter.prototype_memory.state_dict(),
+            "prototype_diagnostics": adapter.prototype_diagnostics,
             "quality_config": adapter.quality_config,
             "history": history,
             "args": vars(args),
@@ -709,6 +908,8 @@ def load_sfda_checkpoint(path, adapter: VoxTellPromptSFDA):
     adapter.teacher_soft_prompt.copy_(teacher_soft_prompt.to(adapter.device))
     if "prototype_memory" in checkpoint:
         adapter.prototype_memory.load_state_dict(checkpoint["prototype_memory"])
+    if "prototype_diagnostics" in checkpoint:
+        adapter.prototype_diagnostics = checkpoint["prototype_diagnostics"]
     if "optimizer" in checkpoint:
         adapter.optimizer.load_state_dict(checkpoint["optimizer"])
         for state in adapter.optimizer.state.values():

@@ -36,6 +36,11 @@ def load_quality_config(path):
         "epsilon",
         "seed_views",
         "num_prototypes",
+        "prototype_patch_batch_size",
+        "evaluation_patch_batch_size",
+        "evaluation_overlap",
+        "evidence_threshold",
+        "similarity_histogram_bins",
     }
     missing = sorted(required.difference(config))
     if missing:
@@ -44,6 +49,16 @@ def load_quality_config(path):
         raise ValueError("TSE v1 implements one foreground/background prototype")
     if int(config["seed_views"]) < 2:
         raise ValueError("seed_views must be at least 2 to measure stability")
+    if int(config["prototype_patch_batch_size"]) < 1 or int(
+        config["evaluation_patch_batch_size"]
+    ) < 1:
+        raise ValueError("patch batch sizes must be positive")
+    if not 0 <= float(config["evaluation_overlap"]) < 1:
+        raise ValueError("evaluation_overlap must be in [0, 1)")
+    if not 0 <= float(config["evidence_threshold"]) <= 1:
+        raise ValueError("evidence_threshold must be in [0, 1]")
+    if int(config["similarity_histogram_bins"]) < 2:
+        raise ValueError("similarity_histogram_bins must be at least 2")
     if float(config["temperature"]) <= 0 or float(config["epsilon"]) <= 0:
         raise ValueError("temperature and epsilon must be positive")
     if not 0 <= float(config["background_probability_threshold"]) <= 1:
@@ -105,6 +120,21 @@ def probability_on_feature_grid(logits, spatial_shape):
     return probability.clamp(0.0, 1.0)
 
 
+def mask_on_feature_grid(mask, spatial_shape):
+    """Map a (B,1,D,H,W) valid-region mask to VoxTell's (B,H,W,D) grid."""
+    if mask.ndim != 5 or mask.shape[1] != 1:
+        raise ValueError(f"Expected valid mask (B,1,D,H,W), got {tuple(mask.shape)}")
+    mapped = mask[:, 0].float().permute(0, 2, 3, 1)
+    if tuple(mapped.shape[1:]) != tuple(spatial_shape):
+        mapped = F.interpolate(
+            mapped.unsqueeze(1),
+            size=tuple(spatial_shape),
+            mode="trilinear",
+            align_corners=False,
+        ).squeeze(1)
+    return mapped.clamp(0.0, 1.0)
+
+
 def extract_case_seed_statistics(
     vision_features,
     text_features,
@@ -112,6 +142,7 @@ def extract_case_seed_statistics(
     batch_size,
     num_views,
     config,
+    valid_masks=None,
 ):
     """Aggregate stable foreground/background seed features for each case.
 
@@ -143,13 +174,22 @@ def extract_case_seed_statistics(
         config["similarity_stability_threshold"]
     )
     stable = probability_stable & similarity_stable
+    if valid_masks is None:
+        valid_weights = torch.ones_like(mean_probability)
+    else:
+        if valid_masks.shape[0] != batch_size:
+            raise ValueError("valid_masks batch must agree with seed patch batch")
+        valid_weights = mask_on_feature_grid(valid_masks, spatial)
+    valid = valid_weights > 0
     foreground = (
         stable
+        & valid
         & (mean_probability >= float(config["foreground_probability_threshold"]))
         & (mean_similarity >= float(config["foreground_text_similarity_threshold"]))
     )
     background = (
         stable
+        & valid
         & (mean_probability <= float(config["background_probability_threshold"]))
         & (mean_similarity <= float(config["background_text_similarity_threshold"]))
     )
@@ -158,8 +198,45 @@ def extract_case_seed_statistics(
     # unit regardless of the configured number of seed views.
     mean_features = F.normalize(vision.mean(dim=1), dim=-1)
     flat_features = mean_features.reshape(batch_size, -1, channels)
-    foreground_flat = foreground.reshape(batch_size, -1).float()
-    background_flat = background.reshape(batch_size, -1).float()
+    # Keep seed mass bounded by the valid (unpadded) support.  The explicit
+    # minimum is defensive for low-precision interpolation/broadcasting and
+    # guarantees that diagnostic seed ratios cannot exceed one.
+    weights_flat = valid_weights.reshape(batch_size, -1).clamp(0.0, 1.0)
+    foreground_flat = torch.minimum(
+        foreground.reshape(batch_size, -1).float() * weights_flat,
+        weights_flat,
+    )
+    background_flat = torch.minimum(
+        background.reshape(batch_size, -1).float() * weights_flat,
+        weights_flat,
+    )
+    flat_similarity = mean_similarity.reshape(batch_size, -1)
+    histogram_bins = int(config["similarity_histogram_bins"])
+    diagnostic_values = {
+        "similarity_sum": [],
+        "similarity_square_sum": [],
+        "similarity_min": [],
+        "similarity_max": [],
+        "similarity_histogram": [],
+    }
+    for index in range(batch_size):
+        values = flat_similarity[index][weights_flat[index] > 0].float()
+        if values.numel():
+            diagnostic_values["similarity_sum"].append(values.sum())
+            diagnostic_values["similarity_square_sum"].append(values.square().sum())
+            diagnostic_values["similarity_min"].append(values.min())
+            diagnostic_values["similarity_max"].append(values.max())
+            diagnostic_values["similarity_histogram"].append(
+                torch.histc(values, bins=histogram_bins, min=-1.0, max=1.0)
+            )
+        else:
+            diagnostic_values["similarity_sum"].append(values.new_zeros(()))
+            diagnostic_values["similarity_square_sum"].append(values.new_zeros(()))
+            diagnostic_values["similarity_min"].append(values.new_tensor(float("inf")))
+            diagnostic_values["similarity_max"].append(values.new_tensor(float("-inf")))
+            diagnostic_values["similarity_histogram"].append(
+                values.new_zeros(histogram_bins)
+            )
     fg_sum = torch.einsum("bmc,bm->bc", flat_features, foreground_flat)
     bg_sum = torch.einsum("bmc,bm->bc", flat_features, background_flat)
     return {
@@ -167,6 +244,88 @@ def extract_case_seed_statistics(
         "fg_count": foreground_flat.sum(dim=1),
         "bg_sum": bg_sum,
         "bg_count": background_flat.sum(dim=1),
+        "valid_count": weights_flat.sum(dim=1),
+        "similarity_count": (weights_flat > 0).sum(dim=1).float(),
+        **{
+            name: torch.stack(values)
+            for name, values in diagnostic_values.items()
+        },
+    }
+
+
+def average_tie_ranks(values, descending=False):
+    """Return zero-based average ranks; equal values receive exactly equal ranks."""
+    if values.ndim != 2:
+        raise ValueError(f"Expected rank values (B,V), got {tuple(values.shape)}")
+    ranked_values = -values if descending else values
+    ranks = torch.empty_like(ranked_values, dtype=torch.float32)
+    for batch_index in range(ranked_values.shape[0]):
+        row = ranked_values[batch_index]
+        offset = 0
+        for unique_value in torch.unique(row, sorted=True):
+            tied = row == unique_value
+            count = int(tied.sum())
+            average_rank = offset + 0.5 * (count - 1)
+            ranks[batch_index, tied] = float(average_rank)
+            offset += count
+    return ranks
+
+
+def summarize_similarity_distribution(
+    histogram,
+    count,
+    value_sum,
+    square_sum,
+    minimum,
+    maximum,
+):
+    """Produce JSON-safe similarity moments, approximate quantiles and histogram."""
+    histogram = torch.as_tensor(histogram).detach().double().cpu()
+    count = float(count)
+    bins = int(histogram.numel())
+    edges = torch.linspace(-1.0, 1.0, bins + 1, dtype=torch.float64)
+    empty_quantiles = {
+        "q05": None,
+        "q25": None,
+        "q50": None,
+        "q75": None,
+        "q95": None,
+    }
+    if count <= 0:
+        return {
+            "count": 0,
+            "mean": None,
+            "std": None,
+            "min": None,
+            "max": None,
+            "quantiles": empty_quantiles,
+            "histogram": histogram.long().tolist(),
+            "bin_edges": edges.tolist(),
+        }
+    mean = float(value_sum) / count
+    variance = max(0.0, float(square_sum) / count - mean * mean)
+    cumulative = histogram.cumsum(0)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    quantiles = {}
+    for name, fraction in (
+        ("q05", 0.05),
+        ("q25", 0.25),
+        ("q50", 0.50),
+        ("q75", 0.75),
+        ("q95", 0.95),
+    ):
+        target = torch.tensor(fraction * count, dtype=cumulative.dtype)
+        index = int(torch.searchsorted(cumulative, target).clamp(max=bins - 1))
+        quantiles[name] = float(centers[index])
+    return {
+        "count": int(round(count)),
+        "mean": mean,
+        "std": variance ** 0.5,
+        "min": float(minimum),
+        "max": float(maximum),
+        "quantiles": quantiles,
+        "histogram": histogram.long().tolist(),
+        "bin_edges": edges.tolist(),
     }
 
 
