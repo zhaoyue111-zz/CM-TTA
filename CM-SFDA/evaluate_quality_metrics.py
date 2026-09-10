@@ -260,7 +260,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             patch_metrics = {
                 "confidence": torch.maximum(clipped, 1 - clipped).flatten(start_dim=2).mean(dim=2),
                 "entropy": -(clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()).flatten(start_dim=2).mean(dim=2),
-                "consistency": _soft_consistency(probability.view(1, num_views, *probability.shape[-3:])),
+                "consistency": _soft_consistency(probability).view(1, num_views),
                 "cac": cac,
                 "purity": semantic_purity,
                 "completeness": semantic_completeness,
@@ -289,7 +289,11 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 "selected_view": selected_indices,
             }
             if target_padded is not None:
-                candidate_dice = _dice_per_view(probability, target_padded[slicer].float())
+                # Dice is deliberately evaluated on CPU: fused probabilities
+                # and padded GT must be on the same device.
+                probability_cpu = probability.detach().cpu()
+                target_patch_cpu = target_padded[slicer].detach().cpu()
+                candidate_dice = _dice_per_view(probability_cpu, target_patch_cpu)
                 best_dice = float(candidate_dice.max().detach().cpu())
                 patch_record["candidate_dice"] = [float(v) for v in candidate_dice.detach().cpu()]
                 patch_record["best_dice"] = best_dice

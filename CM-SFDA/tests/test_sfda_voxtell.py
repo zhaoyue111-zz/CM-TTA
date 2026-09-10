@@ -54,6 +54,7 @@ from run_sfda_voxtell import (  # noqa: E402
 from evaluate_quality_metrics import (  # noqa: E402
     _fuse_logits_then_sigmoid,
     _patch_oracle_stats,
+    _soft_consistency,
     binary_auprc,
     binary_auroc,
     evidence_localization_metrics,
@@ -168,6 +169,17 @@ class SoftPromptOnlyTests(unittest.TestCase):
         self.assertTrue(torch.allclose(fused_logits, torch.tensor([[[[0.0, 1.0]]]])))
         self.assertTrue(torch.allclose(probability, torch.sigmoid(fused_logits)))
         self.assertFalse(torch.allclose(probability, torch.sigmoid(logits) / denominator))
+
+    def test_patch_consistency_returns_one_score_per_view(self):
+        probability = torch.tensor(
+            [
+                [[[0.9, 0.1], [0.8, 0.2]]],
+                [[[0.1, 0.9], [0.2, 0.8]]],
+            ],
+            dtype=torch.float32,
+        )
+        consistency = _soft_consistency(probability).view(1, probability.shape[0])
+        self.assertEqual(tuple(consistency.shape), (1, 2))
 
     def test_cac_launcher_explicitly_disables_cac_loss(self):
         launcher = (CM_SFDA / "train_cac.sh").read_text(encoding="utf-8")
