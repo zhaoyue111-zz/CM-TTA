@@ -57,6 +57,14 @@ python run_sfda_voxtell.py `
 不会把 TSE 加入训练损失。CAC 模式继续使用 `--w_cac`（`--w_contrast` 是兼容别名）。
 视图排序仍沿用原流程的 quality + entropy rank fusion，并列质量使用平均排名。
 
+也可以直接使用仓库内的入口脚本（参数依次为 `DATA_DIR VOXTELL_ROOT MODEL_DIR`
+以及可选的 prompt 和输出目录）：
+
+```bash
+bash train_cac.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/cac
+bash train_tse.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/tse
+```
+
 TSE 启动适配前，用冻结的初始 VoxTell、固定的单 prompt 和全部无标签 train cases
 做一次 prototype 预扫描。每个病例先按现有 nnUNet 预处理得到完整非零区域，再右侧
 padding 到 patch 网格，以确定性的无重叠 patch 覆盖完整病例；padding 区域由 valid
@@ -116,6 +124,12 @@ python evaluate_quality_metrics.py `
 oracle-best Dice 与 gap。evidence 原图视图还输出空间 Dice、AUROC、AUPRC、均值、
 标准差和分位数；空 GT/单类 GT 作为无效病例单独记录。默认保存前 5 个病例的 image、
 GT、预测和 evidence 轴向切片可视化。
+
+审计推理直接复用 VoxTell predictor 的 `pad_nd_image`、滑窗 slicer、Gaussian
+importance map 和 logits 融合顺序：每个候选增强视图先在 patch 上得到 logits，完整体积
+先按 Gaussian 权重融合 logits，最后一次 sigmoid。evidence 与 text similarity 使用完全
+相同的空间权重。视图选择也按每个滑窗 patch 独立进行，再融合被选中的 logits；候选视图
+采用与训练相同的随机 scale、offset 和 Gaussian noise，并由固定 seed 重现。
 
 注意：当前 `CM-SFDA` VoxTell 分支没有原始 2D CM-TTA 中的 short prompt memory，
 也没有 LSPM、DSPU 实现；因此本次没有伪造这些组件。已有 teacher prompt EMA、
