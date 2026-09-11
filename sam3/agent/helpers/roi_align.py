@@ -14,7 +14,7 @@ class ROIAlign(nn.Module):
             sampling_ratio (int): number of inputs samples to take for each output
                 sample. 0 to take samples densely.
             aligned (bool): if False, use the legacy implementation in
-                Detectron. If True, align the results more perfectly.
+                Detectron. If True, align the results_ more perfectly.
 
         Note:
             The meaning of aligned=True:

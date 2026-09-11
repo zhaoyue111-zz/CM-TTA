@@ -82,7 +82,7 @@ def validate_metrics_list(metrics_list):
 
 
 def write_summary_results(summaries, cls, output_folder):
-    """Write summary results to file"""
+    """Write summary results_ to file"""
 
     fields = sum([list(s.keys()) for s in summaries], [])
     values = sum([list(s.values()) for s in summaries], [])
@@ -152,7 +152,7 @@ def write_summary_results(summaries, cls, output_folder):
 
 
 def write_detailed_results(details, cls, output_folder):
-    """Write detailed results to file"""
+    """Write detailed results_ to file"""
     sequences = details[0].keys()
     fields = ["seq"] + sum([list(s["COMBINED_SEQ"].keys()) for s in details], [])
     out_file = os.path.join(output_folder, cls + "_detailed.csv")

@@ -1,0 +1,614 @@
+{
+  "metric_definitions": {
+    "dice": "foreground Dice coefficient",
+    "iou": "foreground IoU: TP / (TP + FP + FN)",
+    "recall": "foreground recall",
+    "precision": "foreground precision",
+    "average": "macro average over test cases"
+  },
+  "epochs": [
+    {
+      "epoch": 5,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.034120018059323444,
+          "iou": 0.01735610432618621,
+          "recall": 0.017658073757588644,
+          "precision": 0.5037028329610909
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.0055937367787848675,
+          "iou": 0.002804712801969587,
+          "recall": 0.002874533923961885,
+          "precision": 0.10351687026599679
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.023921927469178796,
+          "iou": 0.012105760294450957,
+          "recall": 0.012289045212853794,
+          "precision": 0.44802536522716324
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.0016523619150603294,
+          "iou": 0.00082686409690149,
+          "recall": 0.0008292062117205283,
+          "precision": 0.22645184135977336
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.003202830381133901,
+          "iou": 0.001603983834645175,
+          "recall": 0.0016696367666473725,
+          "precision": 0.0391926108198709
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008561359325435168,
+        "iou": 0.004337178169269177,
+        "recall": 0.004415061984096528,
+        "precision": 0.1651111900792369
+      }
+    },
+    {
+      "epoch": 10,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.03420828645657919,
+          "iou": 0.017401785866172637,
+          "recall": 0.017705052063501484,
+          "precision": 0.5039528937058672
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.005703215253002725,
+          "iou": 0.002859762547190915,
+          "recall": 0.002933313504077391,
+          "precision": 0.102375244074248
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.024040480209770437,
+          "iou": 0.012166484165790302,
+          "recall": 0.012353996719398483,
+          "precision": 0.4449290302117199
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.0016587411394931538,
+          "iou": 0.0008300589962492194,
+          "recall": 0.0008324478310001238,
+          "precision": 0.22435785427223484
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.003196428857604485,
+          "iou": 0.0016007728069996235,
+          "recall": 0.001666598301193965,
+          "precision": 0.038950433177105524
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008600893989556248,
+        "iou": 0.004357358047800337,
+        "recall": 0.00443642605239643,
+        "precision": 0.16432068193014696
+      }
+    },
+    {
+      "epoch": 15,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.03434487052010881,
+          "iou": 0.017472480296783496,
+          "recall": 0.01777840415518995,
+          "precision": 0.5038187551091907
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.005987369619047423,
+          "iou": 0.0030026738686723094,
+          "recall": 0.003084865674495682,
+          "precision": 0.10128348214285714
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.02425367342853687,
+          "iou": 0.012275702149791956,
+          "recall": 0.012471790129572752,
+          "precision": 0.4384457602848407
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.0016649347814434042,
+          "iou": 0.0008331609700604995,
+          "recall": 0.0008356894502797194,
+          "precision": 0.21591289782244555
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.003180803327609635,
+          "iou": 0.0015929350703911005,
+          "recall": 0.0016590021375604465,
+          "precision": 0.038461538461538464
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008678956459593268,
+        "iou": 0.00439711904446242,
+        "recall": 0.004478718943387318,
+        "precision": 0.16224030422760904
+      }
+    },
+    {
+      "epoch": 20,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.03451643482462012,
+          "iou": 0.017561294042944705,
+          "recall": 0.017870712405404648,
+          "precision": 0.5035414876570447
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.006448444677941271,
+          "iou": 0.0032346515748370116,
+          "recall": 0.0033291904352167586,
+          "precision": 0.10226012051075678
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.024340453941441683,
+          "iou": 0.012320166189564847,
+          "recall": 0.012522430287217765,
+          "precision": 0.4327069385270846
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.0016968731174103184,
+          "iou": 0.0008491570145603933,
+          "recall": 0.0008518975466776968,
+          "precision": 0.20883661792752703
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.0031850610736916577,
+          "iou": 0.0015950707357008616,
+          "recall": 0.001662040603013854,
+          "precision": 0.038078663418029936
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008773408454388131,
+        "iou": 0.004445042444700978,
+        "recall": 0.00452953390969134,
+        "precision": 0.16067797850505539
+      }
+    },
+    {
+      "epoch": 25,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.03457469668945011,
+          "iou": 0.017591458007186898,
+          "recall": 0.017902031276013208,
+          "precision": 0.5034768902693431
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.006601469673256716,
+          "iou": 0.0033116657671934027,
+          "recall": 0.0034113402098360193,
+          "precision": 0.10180273474649704
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.02449079135120796,
+          "iou": 0.012397204348118003,
+          "recall": 0.012602794015654414,
+          "precision": 0.4318044659022329
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.0016865235661321274,
+          "iou": 0.0008439734736423078,
+          "recall": 0.000846710955830344,
+          "precision": 0.20700586463781898
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.003170107256751033,
+          "iou": 0.0015875700119833108,
+          "recall": 0.0016544444393803354,
+          "precision": 0.03779150471960022
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008815448567099744,
+        "iou": 0.00446648395101549,
+        "recall": 0.0045521651120892905,
+        "precision": 0.16023518253443653
+      }
+    },
+    {
+      "epoch": 30,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.034688336532248565,
+          "iou": 0.01765029800466442,
+          "recall": 0.017963844836424835,
+          "precision": 0.5027912341407151
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.007111530751178527,
+          "iou": 0.003568453960626845,
+          "recall": 0.003680451540485321,
+          "precision": 0.10495809350701807
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.024535351753556024,
+          "iou": 0.012420040913075948,
+          "recall": 0.012632517586446053,
+          "precision": 0.42476401998889507
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.0017391326802010008,
+          "iou": 0.0008703231438113693,
+          "recall": 0.0008732922339230271,
+          "precision": 0.2038129822968679
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.0032179226069246436,
+          "iou": 0.0016115542318598153,
+          "recall": 0.0016802713957342983,
+          "precision": 0.037911767730435676
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008911534290513595,
+        "iou": 0.004515083781754799,
+        "recall": 0.004603797199126692,
+        "precision": 0.1592797622079915
+      }
+    },
+    {
+      "epoch": 35,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.03475534797121226,
+          "iou": 0.017684998117325063,
+          "recall": 0.018000108791866323,
+          "precision": 0.5025426263834879
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.007545431179214586,
+          "iou": 0.0037870028743893897,
+          "recall": 0.003908487983824992,
+          "precision": 0.1086053879607218
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.02457975648962003,
+          "iou": 0.012442798726179436,
+          "recall": 0.01265893853826084,
+          "precision": 0.42154850062321286
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.0017416373327514966,
+          "iou": 0.0008715776524647105,
+          "recall": 0.0008745888816348653,
+          "precision": 0.20200658879904163
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.0032088112852409227,
+          "iou": 0.0016069838966518498,
+          "recall": 0.0016757136975541873,
+          "precision": 0.03770295675952828
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008978873032254912,
+        "iou": 0.004549170158376306,
+        "recall": 0.004639729736642651,
+        "precision": 0.15905075756574905
+      }
+    },
+    {
+      "epoch": 40,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.03474870603399918,
+          "iou": 0.017681558659032405,
+          "recall": 0.017996812068644372,
+          "precision": 0.5023349973544365
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.007629184981084214,
+          "iou": 0.003829199325534078,
+          "recall": 0.003953103809695798,
+          "precision": 0.10886821523998985
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.024616417143217446,
+          "iou": 0.012461588400779051,
+          "recall": 0.012678754252121933,
+          "precision": 0.42114308699308883
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.00172874572332322,
+          "iou": 0.0008651206484722125,
+          "recall": 0.0008681056430756743,
+          "precision": 0.20102086773757694
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.0031854313786808825,
+          "iou": 0.0015952564793636455,
+          "recall": 0.0016635598357405575,
+          "precision": 0.03740009563494774
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.008988560657538119,
+        "iou": 0.004554090439147674,
+        "recall": 0.004645041951159792,
+        "precision": 0.158845907870005
+      }
+    },
+    {
+      "epoch": 45,
+      "cases": [
+        {
+          "basename": "CYST_PA62.nii.gz",
+          "dice": 0.03480073515956304,
+          "iou": 0.017708502024291497,
+          "recall": 0.018024834216030974,
+          "precision": 0.502250597097189
+        },
+        {
+          "basename": "HEM_PA29.nii.gz",
+          "dice": 0.007826385122627939,
+          "iou": 0.00392856579576258,
+          "recall": 0.004057207403394343,
+          "precision": 0.11024303885157889
+        },
+        {
+          "basename": "HEP_PA28.nii.gz",
+          "dice": 0.02463932739273857,
+          "iou": 0.01247333093870768,
+          "recall": 0.012691964728029328,
+          "precision": 0.4199847000109286
+        },
+        {
+          "basename": "HEM_PA107.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HEM_PA81.nii.gz",
+          "dice": 0.001737700219600897,
+          "iou": 0.000869605666779513,
+          "recall": 0.000872643910067108,
+          "precision": 0.19985152190051966
+        },
+        {
+          "basename": "HEM_PA89.nii.gz",
+          "dice": 0.0032025783519083846,
+          "iou": 0.0016038574154733638,
+          "recall": 0.0016726752321007798,
+          "precision": 0.03752044711014177
+        },
+        {
+          "basename": "HEM_PA101.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        },
+        {
+          "basename": "HCC_10020116_20180118.nii.gz",
+          "dice": 0.0,
+          "iou": 0.0,
+          "recall": 0.0,
+          "precision": 0.0
+        }
+      ],
+      "average": {
+        "dice": 0.009025840780804853,
+        "iou": 0.0045729827301268285,
+        "recall": 0.004664915686202816,
+        "precision": 0.15873128812129475
+      }
+    }
+  ]
+}

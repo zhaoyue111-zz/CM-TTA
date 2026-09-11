@@ -123,7 +123,7 @@ def main():
     all_parser.add_argument(
         "--eval_res_dir",
         type=str,
-        help="Directory that contains the eval results files",
+        help="Directory that contains the eval results_ files",
     )
     all_parser.set_defaults(func=main_all)
 
@@ -142,7 +142,7 @@ def main():
     one_parser.add_argument(
         "--eval_res_file",
         type=str,
-        help="Path to the eval results file",
+        help="Path to the eval results_ file",
     )
     one_parser.set_defaults(func=main_one)
 

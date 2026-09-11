@@ -308,7 +308,7 @@ class Evaluator:
                                     metric_names,
                                 )
 
-                    # Combine results over all sequences and then over all classes
+                    # Combine results_ over all sequences and then over all classes
                     res, combined_cls_keys = self._combine_results(
                         res, metrics_list, metric_names, dataset, "COMBINED_SEQ"
                     )
@@ -316,7 +316,7 @@ class Evaluator:
                     if np.all(
                         ["tags" in annot for annot in dataset.gt_data["annotations"]]
                     ):
-                        # Combine results over the challenging sequences and then over all classes
+                        # Combine results_ over the challenging sequences and then over all classes
                         # currently only support "tracking_challenging_pair"
                         res, _ = self._combine_results(
                             res,
@@ -327,7 +327,7 @@ class Evaluator:
                             "tracking_challenging_pair",
                         )
 
-                    # Print and output results in various formats
+                    # Print and output results_ in various formats
                     if config["TIME_PROGRESS"]:
                         print(
                             "\nAll sequences for %s finished in %.2f seconds"

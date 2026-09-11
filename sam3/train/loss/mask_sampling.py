@@ -70,7 +70,7 @@ def get_uncertain_point_coords_with_randomness(
     point_logits = point_sample(logits, point_coords, align_corners=False)
     # It is crucial to calculate uncertainty based on the sampled prediction value for the points.
     # Calculating uncertainties of the predictions first and sampling them for points leads
-    # to incorrect results.
+    # to incorrect results_.
     # To illustrate this: assume uncertainty_func(logits)=-abs(logits), a sampled point between
     # two predictions with -1 and 1 logits has 0 logits, and therefore 0 uncertainty value.
     # However, if we calculate uncertainties for the predictions first,

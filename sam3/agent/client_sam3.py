@@ -55,7 +55,7 @@ def call_sam_service(
 ):
     """
     Loads an image, sends it with a text prompt to the service,
-    saves the results, and renders the visualization.
+    saves the results_, and renders the visualization.
     """
     print(f"📞 Loading image '{image_path}' and sending with prompt '{text_prompt}'...")
 

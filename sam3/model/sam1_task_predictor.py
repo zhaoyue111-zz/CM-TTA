@@ -256,7 +256,7 @@ class SAM3InteractiveImagePredictor(nn.Module):
             produce better masks than a single prediction. If only a single
             mask is needed, the model's predicted quality score can be used
             to select the best mask. For non-ambiguous prompts, such as multiple
-            input prompts, multimask_output=False can give better results.
+            input prompts, multimask_output=False can give better results_.
           return_logits (bool): If true, returns un-thresholded masks logits
             instead of a binary mask.
           normalize_coords (bool): If true, the point coordinates will be normalized to the range [0,1] and point_coords is expected to be wrt. image dimensions.
@@ -358,7 +358,7 @@ class SAM3InteractiveImagePredictor(nn.Module):
             produce better masks than a single prediction. If only a single
             mask is needed, the model's predicted quality score can be used
             to select the best mask. For non-ambiguous prompts, such as multiple
-            input prompts, multimask_output=False can give better results.
+            input prompts, multimask_output=False can give better results_.
           return_logits (bool): If true, returns un-thresholded masks logits
             instead of a binary mask.
 

@@ -188,7 +188,7 @@ class RotatedBoxes(Boxes):
             height = |AD| = |BC| = 6 - 4 = 2.
 
         This covers exactly the same region as (5, 3, 4, 2, 90) does, and their IoU
-        will be 1. However, these two will generate different RoI Pooling results and
+        will be 1. However, these two will generate different RoI Pooling results_ and
         should not be treated as an identical box.
 
         On the other hand, it's easy to see that (X, Y, W, H, A) is identical to

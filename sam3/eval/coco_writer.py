@@ -106,7 +106,7 @@ class PredictionDumper:
 
     def _dump(self, results):
         """
-        Add results to the dump list with precision rounding.
+        Add results_ to the dump list with precision rounding.
 
         Args:
             results: List of prediction dictionaries in COCO format.

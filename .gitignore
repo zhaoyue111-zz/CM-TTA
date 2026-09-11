@@ -19,6 +19,7 @@ results/
 outputs/
 logs/
 
+*.npy
 *.pt
 *.pth
 *.ckpt

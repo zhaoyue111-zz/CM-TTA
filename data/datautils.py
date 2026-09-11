@@ -21,7 +21,7 @@ def int_parameter(level, maxval):
       level/PARAMETER_MAX.
 
   Returns:
-    An int that results from scaling `maxval` according to `level`.
+    An int that results_ from scaling `maxval` according to `level`.
   """
   return int(level * maxval / 10)
 
@@ -35,7 +35,7 @@ def float_parameter(level, maxval):
       level/PARAMETER_MAX.
 
   Returns:
-    A float that results from scaling `maxval` according to `level`.
+    A float that results_ from scaling `maxval` according to `level`.
   """
   return float(level) * maxval / 10.
 

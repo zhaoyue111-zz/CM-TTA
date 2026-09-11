@@ -110,14 +110,14 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         inference_state["obj_id_to_idx"] = OrderedDict()
         inference_state["obj_idx_to_id"] = OrderedDict()
         inference_state["obj_ids"] = []
-        # A storage to hold the model's tracking results and states on each frame
+        # A storage to hold the model's tracking results_ and states on each frame
         inference_state["output_dict"] = {
             "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
             "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
         }
         # The index of the frame that received the first annotation
         inference_state["first_ann_frame_idx"] = None
-        # Slice (view) of each object tracking results, sharing the same memory with "output_dict"
+        # Slice (view) of each object tracking results_, sharing the same memory with "output_dict"
         inference_state["output_dict_per_obj"] = {}
         # A temporary storage to hold new outputs when user interact with a frame
         # to add clicks or mask (it's merged into "output_dict" before propagation starts)
@@ -988,7 +988,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         inference_state["temp_output_dict_per_obj"].clear()
 
     def _reset_tracking_results(self, inference_state):
-        """Reset all tracking inputs and results across the videos."""
+        """Reset all tracking inputs and results_ across the videos."""
         for v in inference_state["point_inputs_per_obj"].values():
             v.clear()
         for v in inference_state["mask_inputs_per_obj"].values():

@@ -200,7 +200,7 @@ class CocoEvaluator:
 
     def select_best_scoring(self, scorings):
         # This function is used for "oracle" type evaluation.
-        # It accepts the evaluation results with respect to several ground truths, and picks the best
+        # It accepts the evaluation results_ with respect to several ground truths, and picks the best
         if len(scorings) == 1:
             return scorings[0]
 
@@ -389,7 +389,7 @@ class CocoEvaluator:
 
     def write(self, stats):
         self._lazy_init()
-        """Write the results in the stats dict"""
+        """Write the results_ in the stats dict"""
         if "bbox" in self.coco_evals[0]:
             stats["coco_eval_bbox"] = self.coco_evals[0]["bbox"].stats.tolist()
         if "segm" in self.coco_evals[0]:
@@ -625,13 +625,13 @@ def segmentation_prepare(self):
         self._gts[gt["image_id"], gt["category_id"]].append(gt)
     for dt in dts:
         self._dts[dt["image_id"], dt["category_id"]].append(dt)
-    self.evalImgs = defaultdict(list)  # per-image per-category evaluation results
-    self.eval = {}  # accumulated evaluation results
+    self.evalImgs = defaultdict(list)  # per-image per-category evaluation results_
+    self.eval = {}  # accumulated evaluation results_
 
 
 def evaluate(self, use_self_evaluate):
     """
-    Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
+    Run per image evaluation on given images and store results_ (a list of dict) in self.evalImgs
     :return: None
     """
     # tic = time.time()
@@ -751,7 +751,7 @@ def loadRes(self, resFile):
         anns = self.loadNumpyAnnotations(resFile)
     else:
         anns = resFile
-    assert type(anns) == list, "results in not an array of objects"
+    assert type(anns) == list, "results_ in not an array of objects"
     annsImgIds = [ann["image_id"] for ann in anns]
     assert set(annsImgIds) == (
         set(annsImgIds) & set(self.getImgIds())
@@ -778,7 +778,7 @@ def loadRes(self, resFile):
     elif "segmentation" in anns[0]:
         res.dataset["categories"] = copy.deepcopy(self.dataset["categories"])
         for id, ann in enumerate(anns):
-            # now only support compressed RLE format as segmentation results
+            # now only support compressed RLE format as segmentation results_
             # ann["area"] = mask_util.area(ann["segmentation"])
             # The following lines are disabled because they are pointless
             #  if not 'bbox' in ann:
@@ -811,7 +811,7 @@ def loadRes(self, resFile):
 #################################################################
 def summarize(self):
     """
-    Compute and display summary metrics for evaluation results.
+    Compute and display summary metrics for evaluation results_.
     Note this functin can *only* be applied on the default parameter setting
     """
 
@@ -894,7 +894,7 @@ def summarize(self):
 #################################################################
 def accumulate(self, use_self_eval=False):
     """
-    Accumulate per image evaluation results and store the result in self.eval.  Does not
+    Accumulate per image evaluation results_ and store the result in self.eval.  Does not
     support changing parameter settings from those used by self.evaluate()
     """
     if use_self_eval:

@@ -605,7 +605,7 @@ class BinaryHungarianMatcherV2(nn.Module):
             + self.cost_giou * cost_giou
         )
         # assign a very high cost (1e9) to invalid outputs and targets, so that we can
-        # filter them out (in `_do_matching`) from bipartite matching results
+        # filter them out (in `_do_matching`) from bipartite matching results_
         do_filtering = out_is_valid is not None or target_is_valid_padded is not None
         if out_is_valid is not None:
             C = torch.where(out_is_valid[:, :, None], C, 1e9)

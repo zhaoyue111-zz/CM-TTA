@@ -178,7 +178,7 @@ class Sam3VideoBase(nn.Module):
         # Step 1: run backbone and detector in a distributed manner -- this is done via Sam3ImageOnVideoMultiGPU,
         # a MultiGPU model (assigned to `self.detector`) that shards frames in a round-robin manner.
         # It returns a "det_out" dict for `frame_idx` and fills SAM2 backbone features for `frame_idx`
-        # into `feature_cache`. Despite its distributed inference under the hood, the results would be
+        # into `feature_cache`. Despite its distributed inference under the hood, the results_ would be
         # the same as if it is running backbone and detector for every frame on a single GPU.
         det_out = self.run_backbone_and_detection(
             frame_idx=frame_idx,
@@ -662,7 +662,7 @@ class Sam3VideoBase(nn.Module):
         }
 
         # Step 3 (optional): recondition masklets based on high-confidence detections before memory encoding
-        # NOTE: Running this in execution phase (after memory encoding) can lead to suboptimal results
+        # NOTE: Running this in execution phase (after memory encoding) can lead to suboptimal results_
         should_recondition_iou = False
 
         # Evaluate tracklets for reconditioning based on bbox IoU mismatch with detections

@@ -358,7 +358,7 @@ class Visualizer:
     Note that the exact visualization style for the high-level wrappers are subject to change.
     Style such as color, opacity, label contents, visibility of labels, or even the visibility
     of objects themselves (e.g. when the object is too small) may change according
-    to different heuristics, as long as the results still look visually reasonable.
+    to different heuristics, as long as the results_ still look visually reasonable.
 
     To obtain a consistent style, you can implement custom drawing functions with the
     abovementioned primitive methods instead. If you need more customized visualization
@@ -416,7 +416,7 @@ class Visualizer:
 
     def draw_instance_predictions(self, predictions):
         """
-        Draw instance-level prediction results on an image.
+        Draw instance-level prediction results_ on an image.
 
         Args:
             predictions (Instances): the output of an instance detection/segmentation
@@ -530,7 +530,7 @@ class Visualizer:
         self, panoptic_seg, segments_info, area_threshold=None, alpha=0.7
     ):
         """
-        Draw panoptic prediction annotations or results.
+        Draw panoptic prediction annotations or results_.
 
         Args:
             panoptic_seg (Tensor): of shape (height, width) where the values are ids for each

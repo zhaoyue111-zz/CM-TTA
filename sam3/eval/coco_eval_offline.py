@@ -120,8 +120,8 @@ class COCOevalCustom(COCOeval):
                 continue
             self._dts[dt["image_id"], dt["category_id"]].append(dt)
         #### END MODIFICATION ####
-        self.evalImgs = defaultdict(list)  # per-image per-category evaluation results
-        self.eval = {}  # accumulated evaluation results
+        self.evalImgs = defaultdict(list)  # per-image per-category evaluation results_
+        self.eval = {}  # accumulated evaluation results_
 
 
 class CocoEvaluatorOfflineWithPredFileEvaluators:

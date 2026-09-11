@@ -78,7 +78,7 @@ class DemoEval(COCOeval):
     def evaluateImg(self, imgId, catId, aRng, maxDet):
         """
         perform evaluation for single category and image
-        :return: dict (single image results)
+        :return: dict (single image results_)
         """
         p = self.params
         assert not p.useCats, "This evaluator does not support per-category evaluation."
@@ -200,7 +200,7 @@ class DemoEval(COCOeval):
 
     def accumulate(self, p=None):
         """
-        Accumulate per image evaluation results and store the result in self.eval
+        Accumulate per image evaluation results_ and store the result in self.eval
         :param p: input params for evaluation
         :return: None
         """
@@ -341,7 +341,7 @@ class DemoEval(COCOeval):
 
     def summarize(self):
         """
-        Compute and display summary metrics for evaluation results.
+        Compute and display summary metrics for evaluation results_.
         Note this functin can *only* be applied on the default parameter setting
         """
         if not self.eval:
@@ -522,13 +522,13 @@ class DemoEvaluator(CocoEvaluator):
 
     def select_best_scoring(self, scorings):
         # This function is used for "oracle" type evaluation.
-        # It accepts the evaluation results with respect to several ground truths, and picks the best
+        # It accepts the evaluation results_ with respect to several ground truths, and picks the best
         if len(scorings) == 1:
             return scorings[0]
 
         assert (
             scorings[0].ndim == 3
-        ), f"Expecting results in [numCats, numAreas, numImgs] format, got {scorings[0].shape}"
+        ), f"Expecting results_ in [numCats, numAreas, numImgs] format, got {scorings[0].shape}"
         assert (
             scorings[0].shape[0] == 1
         ), f"Expecting a single category, got {scorings[0].shape[0]}"
@@ -546,7 +546,7 @@ class DemoEvaluator(CocoEvaluator):
                 current = scoring[:, :, img_id]
                 if "local_F1s" in best[0, 0] and "local_F1s" in current[0, 0]:
                     # we were able to compute a F1 score for this particular image in both evaluations
-                    # best["local_F1s"] contains the results at various IoU thresholds. We simply take the average for comparision
+                    # best["local_F1s"] contains the results_ at various IoU thresholds. We simply take the average for comparision
                     best_score = best[0, 0]["local_F1s"].mean()
                     current_score = current[0, 0]["local_F1s"].mean()
                     if current_score > best_score:

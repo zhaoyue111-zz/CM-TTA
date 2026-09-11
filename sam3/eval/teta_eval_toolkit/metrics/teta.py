@@ -390,7 +390,7 @@ class TETA(_BaseMetric):
         return res
 
     def print_summary_table(self, thr_res, thr, tracker, cls):
-        """Prints summary table of results."""
+        """Prints summary table of results_."""
         print("")
         metric_name = self.get_name()
         self._row_print(

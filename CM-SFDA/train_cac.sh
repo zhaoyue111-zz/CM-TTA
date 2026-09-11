@@ -11,6 +11,7 @@ fi
 DATA_DIR=$1
 VOXTELL_ROOT=$2
 MODEL_DIR=$3
+EPOCHS=$100
 PROMPT=${4:-prostate}
 OUTPUT_DIR=${5:-results/voxtell_sfda_cac}
 
@@ -19,6 +20,7 @@ exec python "$SCRIPT_DIR/run_sfda_voxtell.py" \
   --voxtell_root "$VOXTELL_ROOT" \
   --model_dir "$MODEL_DIR" \
   --prompt "$PROMPT" \
+  --epochs "$EPOCHS" \
   --output_dir "$OUTPUT_DIR" \
   --quality_mode cac \
   --quality_config "$SCRIPT_DIR/configs/tse.json" \

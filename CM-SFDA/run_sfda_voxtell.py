@@ -245,7 +245,7 @@ def evaluate(
             average[name] = float(np.mean(values))
     result = {"cases": rows, "average": average}
     if save_predictions:
-        _write_json(output_dir / "results.json", result)
+        _write_json(output_dir / "results_.json", result)
     print(
         "evaluation "
         + " ".join(f"{name}={average[name]:.4f}" for name in EVALUATION_METRICS)
@@ -269,7 +269,7 @@ def parse_args():
     parser.add_argument("--model_dir", default=DEFAULT_MODEL_DIR)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--prompt", default="prostate")
-    parser.add_argument("--output_dir", default="results/voxtell_sfda")
+    parser.add_argument("--output_dir", default="results_/voxtell_sfda")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--eval_interval", type=int, default=5,

@@ -85,7 +85,7 @@ def get_default_dataset_config():
         "TRACKERS_FOLDER": os.path.join(
             code_path, "data/trackers/tao/tao_training"
         ),  # Trackers location
-        "OUTPUT_FOLDER": None,  # Where to save eval results (if None, same as TRACKERS_FOLDER)
+        "OUTPUT_FOLDER": None,  # Where to save eval results_ (if None, same as TRACKERS_FOLDER)
         "TRACKERS_TO_EVAL": ['TETer'],  # Filenames of trackers to eval (if None, all in folder)
         "CLASSES_TO_EVAL": None,  # Classes to eval (if None, all classes)
         "SPLIT_TO_EVAL": "training",  # Valid: 'training', 'val'

@@ -61,8 +61,8 @@ class YTVISevalMixin:
             self._gts[gt["image_id"], gt["category_id"]].append(gt)
         for dt in dts:
             self._dts[dt["image_id"], dt["category_id"]].append(dt)
-        self.evalImgs = defaultdict(list)  # per-image per-category evaluation results
-        self.eval = {}  # accumulated evaluation results
+        self.evalImgs = defaultdict(list)  # per-image per-category evaluation results_
+        self.eval = {}  # accumulated evaluation results_
 
     def computeIoU(self, imgId, catId):
         """

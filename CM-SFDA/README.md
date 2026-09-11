@@ -61,10 +61,10 @@ python run_sfda_voxtell.py `
 以及可选的 prompt 和输出目录）：
 
 ```bash
-bash train_cac.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/cac
-bash train_tse.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/tse
+bash train_cac.sh /path/to/data /path/to/VoxTell /path/to/model prostate results_/cac
+bash train_tse.sh /path/to/data /path/to/VoxTell /path/to/model prostate results_/tse
 # Explicit historical CAC-loss baseline (w_cac=1), if needed:
-bash train_cac_baseline.sh /path/to/data /path/to/VoxTell /path/to/model prostate results/cac_baseline
+bash train_cac_baseline.sh /path/to/data /path/to/VoxTell /path/to/model prostate results_/cac_baseline
 ```
 
 `train_cac.sh` is the fair view-selection-only CAC configuration and explicitly

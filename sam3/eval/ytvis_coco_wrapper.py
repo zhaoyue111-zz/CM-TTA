@@ -91,7 +91,7 @@ class YTVIS(COCO):
             anns = self.loadNumpyAnnotations(resFile)
         else:
             anns = resFile
-        assert type(anns) == list, "results is not an array of objects"
+        assert type(anns) == list, "results_ is not an array of objects"
         annsImgIds = [ann["image_id"] for ann in anns]
         assert set(annsImgIds) == (
             set(annsImgIds) & set(self.getImgIds())

@@ -16,7 +16,7 @@ class Count(_BaseMetric):
     @_timing.time
     def eval_sequence(self, data):
         """Returns counts for one sequence"""
-        # Get results
+        # Get results_
         res = {
             "Dets": data["num_tracker_dets"],
             "GT_Dets": data["num_gt_dets"],

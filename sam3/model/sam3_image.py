@@ -723,7 +723,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
         # Step 1: fetch the detector outputs in the current chunk from buffer
         frame_idx_curr_b = frame_idx - frame_idx % self.world_size
         frame_idx_curr_e = min(frame_idx_curr_b + self.world_size, num_frames)
-        # in case the current frame's detection results are not in the buffer yet, build the current chunk
+        # in case the current frame's detection results_ are not in the buffer yet, build the current chunk
         # (this should only happen on the first chunk, since we are also building the next chunk below)
         if frame_idx not in multigpu_buffer:
             with torch.profiler.record_function("build_multigpu_buffer_next_chunk1"):
@@ -740,7 +740,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
                     nms_iou_thresh=nms_iou_thresh,
                 )
 
-        # read out the current frame's results from `multigpu_buffer`
+        # read out the current frame's results_ from `multigpu_buffer`
         out = {}
         for k, (v, handle) in multigpu_buffer[frame_idx].items():
             if k.startswith("sam2_backbone_") and not return_sam2_backbone_feats:
@@ -802,7 +802,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
         nms_prob_thresh=None,
         nms_iou_thresh=None,
     ):
-        """Compute detection outputs on a chunk of frames and store their results in multigpu_buffer."""
+        """Compute detection outputs on a chunk of frames and store their results_ in multigpu_buffer."""
         # each GPU computes detections on one frame in the chunk (in a round-robin manner)
         frame_idx_local_gpu = min(frame_idx_begin + self.rank, frame_idx_end - 1)
         # `forward_grounding` (from base class `Sam3ImageOnVideo`) runs the detector on a single frame
@@ -851,7 +851,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
             "pred_masks": out_local["pred_masks"],
         }
 
-        # gather the results: after this step, each GPU will receive detector outputs on
+        # gather the results_: after this step, each GPU will receive detector outputs on
         # all frames in the chunk and store them in `multigpu_buffer`
         out_gathered = {k: self._gather_tensor(v) for k, v in out_local.items()}
         for rank in range(self.world_size):
@@ -876,7 +876,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
 
         async_op = self.async_all_gather
         # here `.contiguous()` is required -- otherwise NCCL all_gather
-        # sometimes gives wrong results
+        # sometimes gives wrong results_
         x = x.contiguous()  # ensure contiguous memory for NCCL
         output_list = [torch.empty_like(x) for _ in range(self.world_size)]
         handle = torch.distributed.all_gather(output_list, x, async_op=async_op)

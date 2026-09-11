@@ -40,7 +40,7 @@ class HOTA(_BaseMetric):
     def eval_sequence(self, data):
         """Calculates the HOTA metrics for one sequence"""
 
-        # Initialise results
+        # Initialise results_
         res = {}
         for field in self.float_array_fields + self.integer_array_fields:
             res[field] = np.zeros((len(self.array_labels)), dtype=float)
@@ -267,7 +267,7 @@ class HOTA(_BaseMetric):
         return res
 
     def plot_single_tracker_results(self, table_res, tracker, cls, output_folder):
-        """Create plot of results"""
+        """Create plot of results_"""
 
         # Only loaded when run to reduce minimum requirements
         from matplotlib import pyplot as plt

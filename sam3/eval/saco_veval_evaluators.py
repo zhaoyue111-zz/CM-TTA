@@ -108,7 +108,7 @@ class YTVISPredFileEvaluator(BasePredFileEvaluator):
             result_key = f"{self.dataset_name}_{'mask' if iou_type == 'segm' else 'bbox'}_mAP_50_95"
             results[result_key] = ytvisEval.stats[0]
 
-        # video-NP level results not supported for `YTVISPredFileEvaluator` yet
+        # video-NP level results_ not supported for `YTVISPredFileEvaluator` yet
         video_np_level_results = {}
         return results, video_np_level_results
 
@@ -170,13 +170,13 @@ class VideoPhraseApEvaluator(BasePredFileEvaluator):
             phraseApEval.summarize()
             result_prefix = f"{self.dataset_name}"
             result_prefix += f"_{'mask' if iou_type == 'segm' else 'bbox'}_phrase_ap"
-            # fetch Phrase AP results from the corresponding indices in `phraseApEval.stats`
+            # fetch Phrase AP results_ from the corresponding indices in `phraseApEval.stats`
             # (see `_summarizeDets` in https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocotools/cocoeval.py)
             results[result_prefix + "_50_95"] = phraseApEval.stats[0]  # IoU=0.5:0.95
             results[result_prefix + "_50"] = phraseApEval.stats[1]  # IoU=0.5
             results[result_prefix + "_75"] = phraseApEval.stats[2]  # IoU=0.75
 
-        # video-NP level results not supported for `VideoPhraseApEvaluator` yet
+        # video-NP level results_ not supported for `VideoPhraseApEvaluator` yet
         video_np_level_results = {}
         return results, video_np_level_results
 
@@ -451,7 +451,7 @@ class VideoTetaEvaluator(BasePredFileEvaluator):
                 dataset_list, [metrics.TETA(exhaustive=self.is_exhaustive)]
             )
 
-            # Extract and format results
+            # Extract and format results_
             results = {
                 f"{self.dataset_name}_{'mask' if self.use_mask else 'bbox'}_teta": float(
                     eval_results[dataset_parsing_key]["TETA"][0]
@@ -485,7 +485,7 @@ class VideoTetaEvaluator(BasePredFileEvaluator):
                 ),
             }
 
-        # video-NP level results not supported for `VideoTetaEvaluator` yet
+        # video-NP level results_ not supported for `VideoTetaEvaluator` yet
         video_np_level_results = {}
         return results, video_np_level_results
 
@@ -505,7 +505,7 @@ class VideoPhraseHotaEvaluator(BasePredFileEvaluator):
         self.dataset_name = dataset_name
         self.prob_thresh = prob_thresh
         self.metric_prefix = "phrase"
-        # the list of metrics to collect from the HOTA evaluation results
+        # the list of metrics to collect from the HOTA evaluation results_
         self.metric_to_collect = [
             "HOTA",
             "DetA",
@@ -625,7 +625,7 @@ class VideoPhraseHotaEvaluator(BasePredFileEvaluator):
                     output_res, iou_type, "COMBINED_SEQ_CHALLENGING", "challenging"
                 )
 
-        # video-NP level results not supported for `VideoPhraseHotaEvaluator` yet
+        # video-NP level results_ not supported for `VideoPhraseHotaEvaluator` yet
         return out_dict, video_np_level_results
 
     def _remap_gt_dt(self, gt, dt):
@@ -691,7 +691,7 @@ class VideoClassBasedHotaEvaluator(VideoPhraseHotaEvaluator):
         return gt, dt  # no remapping needed for class-based HOTA evaluation
 
     def extract_video_np_level_results(self, *args, **kwargs):
-        pass  # no video-NP level results for class-based HOTA evaluation
+        pass  # no video-NP level results_ for class-based HOTA evaluation
 
 
 def _compress_rle(rle):

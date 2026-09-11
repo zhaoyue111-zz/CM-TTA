@@ -181,7 +181,7 @@ class Sam3VideoInference(Sam3VideoBase):
         explicitly distinguish between initial box as visual prompt vs subsequent boxes
         or boxes after inference for refinement.
         """
-        # If the frame hasn't had any inference results before (prompting or propagation),
+        # If the frame hasn't had any inference results_ before (prompting or propagation),
         # we treat the first added box prompt as a visual prompt; otherwise, we treat
         # the first box just as a refinement prompt.
         is_new_visual_prompt = (
@@ -255,7 +255,7 @@ class Sam3VideoInference(Sam3VideoBase):
         reverse=False,
     ):
         """
-        Propagate the prompts to get grounding results for the entire video. This method
+        Propagate the prompts to get grounding results_ for the entire video. This method
         is a generator and yields inference outputs for all frames in the range specified
         by `start_frame_idx`, `max_frame_num_to_track`, and `reverse`.
         """
@@ -356,7 +356,7 @@ class Sam3VideoInference(Sam3VideoBase):
 
     def _run_single_frame_inference(self, inference_state, frame_idx, reverse):
         """
-        Perform inference on a single frame and get its inference results. This would
+        Perform inference on a single frame and get its inference results_. This would
         also update `inference_state`.
         """
         # prepare inputs
@@ -1407,7 +1407,7 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
         """Add a new point prompt to Tracker. Suppporting instance refinement to existing
         objects by passing existing obj_id or adding a new object by passing a new obj_id.
         use_prev_mem_frame=False to disable cross attention to previous memory frames.
-        Every GPU returns the same results, and results should contain all masks including
+        Every GPU returns the same results_, and results_ should contain all masks including
         these masks not refined or not added by the current user points.
         """
         assert obj_id is not None, "obj_id must be provided to add new points"
@@ -1560,7 +1560,7 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
                 tracker_state, obj_id, frame_idx
             )
 
-        # fetch results from states and gather across GPUs
+        # fetch results_ from states and gather across GPUs
         # Use optimized caching approach to avoid reprocessing unmodified objects
         if self.rank == obj_rank and len(obj_ids) > 0:
             new_mask_data = (video_res_masks[obj_ids.index(obj_id)] > 0.0).to(

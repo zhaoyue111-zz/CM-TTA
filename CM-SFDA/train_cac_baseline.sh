@@ -11,7 +11,8 @@ fi
 DATA_DIR=$1
 VOXTELL_ROOT=$2
 MODEL_DIR=$3
-PROMPT=${4:-prostate}
+EPOCHS=100
+PROMPT=${4:-liver}
 OUTPUT_DIR=${5:-results/voxtell_sfda_cac_baseline}
 
 # Explicitly named historical CAC-loss baseline (not fair view-selection-only).
@@ -20,6 +21,7 @@ exec python "$SCRIPT_DIR/run_sfda_voxtell.py" \
   --voxtell_root "$VOXTELL_ROOT" \
   --model_dir "$MODEL_DIR" \
   --prompt "$PROMPT" \
+  --epochs "$EPOCHS" \
   --output_dir "$OUTPUT_DIR" \
   --quality_mode cac \
   --quality_config "$SCRIPT_DIR/configs/tse.json" \

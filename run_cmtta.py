@@ -153,7 +153,7 @@ def main():
         "HD95": hd95_scores.avg,
     }
     pd.DataFrame([avg_row] + case_results).to_csv(
-        os.path.join(args.output_dir, "final-results.csv"), index=False)
+        os.path.join(args.output_dir, "final-results_.csv"), index=False)
 
     summary = f"=> Results: Dice {dice_scores.avg} / HD95 {hd95_scores.avg} / ASSD {assd_scores.avg}"
     print(summary)
@@ -172,7 +172,7 @@ def parse_args():
     parser.add_argument("--print-freq", default=50, type=int)
     parser.add_argument("--gpu", default=0, type=int)
     parser.add_argument("--seed", default=1377, type=int)
-    parser.add_argument("--output_dir", default="results", type=str)
+    parser.add_argument("--output_dir", default="results_", type=str)
     parser.add_argument("--exm_suffix", default="cmtta", type=str)
 
     parser.add_argument("--n_ctx", default=1, type=int)

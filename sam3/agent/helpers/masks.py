@@ -200,7 +200,7 @@ class BitMasks:
 
     def crop_and_resize(self, boxes: torch.Tensor, mask_size: int) -> torch.Tensor:
         """
-        Crop each bitmask by the given box, and resize results to (mask_size, mask_size).
+        Crop each bitmask by the given box, and resize results_ to (mask_size, mask_size).
         This can be used to prepare training targets for Mask R-CNN.
         It has less reconstruction error compared to rasterization with polygons.
         However we observe no difference in accuracy,
@@ -414,7 +414,7 @@ class PolygonMasks:
 
     def crop_and_resize(self, boxes: torch.Tensor, mask_size: int) -> torch.Tensor:
         """
-        Crop each mask by the given box, and resize results to (mask_size, mask_size).
+        Crop each mask by the given box, and resize results_ to (mask_size, mask_size).
         This can be used to prepare training targets for Mask R-CNN.
 
         Args:

@@ -296,7 +296,7 @@ class PostProcessImage(nn.Module):
                             raise NotImplementedError(
                                 f"Unexpected type {type(result[k])} in result."
                             )
-        # Prune the results to the max number of detections per image.
+        # Prune the results_ to the max number of detections per image.
         for img_id, result in results.items():
             if (
                 self.max_dets_per_img > 0
@@ -380,7 +380,7 @@ class PostProcessAPIVideo(PostProcessImage):
             )
             raise e
         # Notes and assumptions:
-        # 1- This postprocessor assumes results only for a single video.
+        # 1- This postprocessor assumes results_ only for a single video.
         # 2- There are N stage outputs corresponding to N video frames
         # 3- Each stage outputs contains PxQ preds, where P is number of prompts and Q is number of object queries. The output should also contain the tracking object ids corresponding to each object query.
         # 4- The tracking object id has a default value of -1, indicating that the object query is not tracking any object in the frame, and hence its predictions can be ingored for a given frame.
@@ -404,7 +404,7 @@ class PostProcessAPIVideo(PostProcessImage):
         for frame_idx, (frame_outs, meta) in enumerate(
             zip(find_stages, find_metadatas)
         ):
-            # only store keys we need to extract the results
+            # only store keys we need to extract the results_
             frame_outs_td = TensorDict(
                 {k: frame_outs[k] for k in self.EXPECTED_KEYS}
             ).auto_batch_size_()  # Shape is [P,Q,...]
@@ -448,7 +448,7 @@ class PostProcessAPIVideo(PostProcessImage):
                 total_num_preds += 1
 
             # Since we have P*Q masks per frame, mask interpolation is the GPU memory bottleneck or time bottleneck in case of cpu processing.
-            # Instead, we first extract results only for tracked objects, reducing the number of masks to K = sum_i(tracked_objs_per_ith_prompt), hopefully <<< P*Q
+            # Instead, we first extract results_ only for tracked objects, reducing the number of masks to K = sum_i(tracked_objs_per_ith_prompt), hopefully <<< P*Q
             tracked_objs_outs_td = frame_outs_td[
                 tracked_obj_ids_idx
             ]  # [P,Q,...] --> [K,...]
@@ -511,7 +511,7 @@ class PostProcessAPIVideo(PostProcessImage):
         tracklet_labels = []
         # Optionally, fill the list of RLEs for masklets
         # note: only frames with actual predicted masks (in packed format) will be
-        # filled with RLEs; the rest will remains None in results["masks_rle"]
+        # filled with RLEs; the rest will remains None in results_["masks_rle"]
         if self.convert_mask_to_rle_for_video:
             vid_masklets_rle_padded = [[None] * num_frames for _ in range(num_preds)]
         for o_idx, oid in enumerate(tracked_objects_packed_idx):

@@ -134,7 +134,7 @@ class Evaluator:
                     for seq_key, seq_value in res.items()
                     if seq_key != "COMBINED_SEQ"
                 }
-                # combine results over all sequences and then over all classes
+                # combine results_ over all sequences and then over all classes
                 res["COMBINED_SEQ"][c_cls][mname] = metric.combine_sequences(curr_res)
 
         # combine classes
@@ -172,7 +172,7 @@ class Evaluator:
                     res["COMBINED_SEQ"][cat][
                         mname
                     ] = metric.combine_classes_det_averaged(cat_res)
-        # Print and output results in various formats
+        # Print and output results_ in various formats
         if config["TIME_PROGRESS"]:
             print(
                 f"\nAll sequences for {tracker} finished in"
@@ -224,7 +224,7 @@ class Evaluator:
         if config["OUTPUT_TEM_RAW_DATA"]:
             out_file = os.path.join(output_fol, "teta_summary_results.pth")
             pickle.dump(all_res, open(out_file, "wb"))
-            print("Saved the TETA summary results.")
+            print("Saved the TETA summary results_.")
 
         # output
         output_res[dname][mname] = all_res[s_key][cls_keys[0]][mname][t]

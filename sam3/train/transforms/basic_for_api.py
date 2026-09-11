@@ -94,7 +94,7 @@ def crop(
             query.input_bbox = cropped_boxes.reshape(-1, 4)
         if query.image_id == index and query.input_points is not None:
             print(
-                "Warning! Point cropping with this function may lead to unexpected results"
+                "Warning! Point cropping with this function may lead to unexpected results_"
             )
             points = query.input_points
             # Unlike right-lower box edges, which are exclusive, the

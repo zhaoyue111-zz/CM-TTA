@@ -110,7 +110,7 @@ class COCOCustom(COCO):
         res.dataset["images"] = self.dataset["images"]
         # END MODIFICATION
 
-        print("Loading and preparing results...")
+        print("Loading and preparing results_...")
         tic = time.time()
         if type(resFile) == str:
             with open(resFile) as f:
@@ -119,7 +119,7 @@ class COCOCustom(COCO):
             anns = self.loadNumpyAnnotations(resFile)
         else:
             anns = resFile
-        assert type(anns) == list, "results in not an array of objects"
+        assert type(anns) == list, "results_ in not an array of objects"
         annsImgIds = [ann["image_id"] for ann in anns]
         # MODIFICATION: faster and cached subset check
         if not hasattr(self, "img_id_set"):
@@ -150,7 +150,7 @@ class COCOCustom(COCO):
         elif "segmentation" in anns[0]:
             res.dataset["categories"] = copy.deepcopy(self.dataset["categories"])
             for id, ann in enumerate(anns):
-                # now only support compressed RLE format as segmentation results
+                # now only support compressed RLE format as segmentation results_
                 ann["area"] = maskUtils.area(ann["segmentation"])
                 if not "bbox" in ann:
                     ann["bbox"] = maskUtils.toBbox(ann["segmentation"])
@@ -240,7 +240,7 @@ class CGF1Eval(COCOeval):
     def evaluateImg(self, imgId, catId, aRng, maxDet):
         """
         perform evaluation for single category and image
-        :return: dict (single image results)
+        :return: dict (single image results_)
         """
         p = self.params
         assert not p.useCats, "This evaluator does not support per-category evaluation."
@@ -341,7 +341,7 @@ class CGF1Eval(COCOeval):
 
     def accumulate(self, p=None):
         """
-        Accumulate per image evaluation results and store the result in self.eval
+        Accumulate per image evaluation results_ and store the result in self.eval
         :param p: input params for evaluation
         :return: None
         """
@@ -448,7 +448,7 @@ class CGF1Eval(COCOeval):
 
     def summarize(self):
         """
-        Compute and display summary metrics for evaluation results.
+        Compute and display summary metrics for evaluation results_.
         """
         if not self.eval:
             raise Exception("Please run accumulate() first")
@@ -501,7 +501,7 @@ class CGF1Eval(COCOeval):
 
 def _evaluate(self):
     """
-    Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
+    Run per image evaluation on given images and store results_ (a list of dict) in self.evalImgs
     """
     p = self.params
     # add backward compatibility if useSegm is specified in params
@@ -644,7 +644,7 @@ class CGF1Evaluator:
         self.coco_evals[0]._paramsEval = copy.deepcopy(self.coco_evals[0].params)
 
         if self.verbose:
-            print(f"Accumulating results")
+            print(f"Accumulating results_")
         self.coco_evals[0].accumulate()
         print("cgF1 metric, IoU type={}".format(self.iou_type))
         self.coco_evals[0].summarize()
@@ -662,13 +662,13 @@ class CGF1Evaluator:
     @staticmethod
     def _select_best_scoring(scorings):
         # This function is used for "oracle" type evaluation.
-        # It accepts the evaluation results with respect to several ground truths, and picks the best
+        # It accepts the evaluation results_ with respect to several ground truths, and picks the best
         if len(scorings) == 1:
             return scorings[0]
 
         assert (
             scorings[0].ndim == 3
-        ), f"Expecting results in [numCats, numAreas, numImgs] format, got {scorings[0].shape}"
+        ), f"Expecting results_ in [numCats, numAreas, numImgs] format, got {scorings[0].shape}"
         assert (
             scorings[0].shape[0] == 1
         ), f"Expecting a single category, got {scorings[0].shape[0]}"
@@ -686,7 +686,7 @@ class CGF1Evaluator:
                 current = scoring[:, :, img_id]
                 if "local_F1s" in best[0, 0] and "local_F1s" in current[0, 0]:
                     # we were able to compute a F1 score for this particular image in both evaluations
-                    # best["local_F1s"] contains the results at various IoU thresholds. We simply take the average for comparision
+                    # best["local_F1s"] contains the results_ at various IoU thresholds. We simply take the average for comparision
                     best_score = best[0, 0]["local_F1s"].mean()
                     current_score = current[0, 0]["local_F1s"].mean()
                     if current_score > best_score:

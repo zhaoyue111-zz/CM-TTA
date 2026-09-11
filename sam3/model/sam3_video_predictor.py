@@ -187,7 +187,7 @@ class Sam3VideoPredictor:
         start_frame_idx,
         max_frame_num_to_track,
     ):
-        """Propagate the added prompts to get grounding results on all video frames."""
+        """Propagate the added prompts to get grounding results_ on all video frames."""
         logger.debug(
             f"propagate in video in session {session_id}: "
             f"{propagation_direction=}, {start_frame_idx=}, {max_frame_num_to_track=}"

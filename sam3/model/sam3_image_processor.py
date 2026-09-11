@@ -152,7 +152,7 @@ class Sam3Processor:
         return self._forward_grounding(state)
 
     def reset_all_prompts(self, state: Dict):
-        """Removes all the prompts and results"""
+        """Removes all the prompts and results_"""
         if "backbone_out" in state:
             backbone_keys_to_del = [
                 "language_features",

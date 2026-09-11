@@ -38,7 +38,7 @@ class _BaseMetric(ABC):
     def combine_classes_det_averaged(self, all_res): ...
 
     def plot_single_tracker_results(self, all_res, tracker, output_folder, cls):
-        """Plot results of metrics, only valid for metrics with self.plottable"""
+        """Plot results_ of metrics, only valid for metrics with self.plottable"""
         if self.plottable:
             raise NotImplementedError(
                 "plot_results is not implemented for metric %s" % self.get_name()
@@ -55,12 +55,12 @@ class _BaseMetric(ABC):
 
     @staticmethod
     def _combine_sum(all_res, field):
-        """Combine sequence results via sum"""
+        """Combine sequence results_ via sum"""
         return sum([all_res[k][field] for k in all_res.keys()])
 
     @staticmethod
     def _combine_weighted_av(all_res, field, comb_res, weight_field):
-        """Combine sequence results via weighted average"""
+        """Combine sequence results_ via weighted average"""
         return sum(
             [all_res[k][field] * all_res[k][weight_field] for k in all_res.keys()]
         ) / np.maximum(1.0, comb_res[weight_field])
@@ -68,7 +68,7 @@ class _BaseMetric(ABC):
     def print_table(
         self, table_res, tracker, cls, res_field="COMBINED_SEQ", output_lable="COMBINED"
     ):
-        """Prints table of results for all sequences"""
+        """Prints table of results_ for all sequences"""
         print("")
         metric_name = self.get_name()
         self._row_print(
@@ -99,7 +99,7 @@ class _BaseMetric(ABC):
 
     @staticmethod
     def _row_print(*argv):
-        """Prints results in an evenly spaced rows, with more space in first row"""
+        """Prints results_ in an evenly spaced rows, with more space in first row"""
         if len(argv) == 1:
             argv = argv[0]
         to_print = "%-35s" % argv[0]
@@ -108,13 +108,13 @@ class _BaseMetric(ABC):
         print(to_print)
 
     def summary_results(self, table_res):
-        """Returns a simple summary of final results for a tracker"""
+        """Returns a simple summary of final results_ for a tracker"""
         return dict(
             zip(self.summary_fields, self._summary_row(table_res["COMBINED_SEQ"]))
         )
 
     def detailed_results(self, table_res):
-        """Returns detailed final results for a tracker"""
+        """Returns detailed final results_ for a tracker"""
         # Get detailed field information
         detailed_fields = self.float_fields + self.integer_fields
         for h in self.float_array_fields + self.integer_array_fields:
@@ -122,7 +122,7 @@ class _BaseMetric(ABC):
                 detailed_fields.append(h + "___" + str(alpha))
             detailed_fields.append(h + "___AUC")
 
-        # Get detailed results
+        # Get detailed results_
         detailed_results = {}
         for seq, res in table_res.items():
             detailed_row = self._detailed_row(res)

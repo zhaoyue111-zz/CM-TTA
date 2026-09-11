@@ -3,7 +3,7 @@
   "text_feature_layer": "project_text_embed",
   "foreground_probability_threshold": 0.8,
   "background_probability_threshold": 0.2,
-  "foreground_text_similarity_threshold": 0.3,
+  "foreground_text_similarity_threshold": 0.0,
   "background_text_similarity_threshold": 0.0,
   "probability_stability_threshold": 0.1,
   "similarity_stability_threshold": 0.1,
