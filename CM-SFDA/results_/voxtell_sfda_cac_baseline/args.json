@@ -5,7 +5,7 @@
   "voxtell_root": "/mnt/afs2/zy/VoxTell_from_disk",
   "model_dir": "/mnt/afs2/zy/VoxTell_from_disk/model",
   "checkpoint": null,
-  "prompt": "prostate",
+  "prompt": "liver",
   "output_dir": "results/voxtell_sfda_cac_baseline",
   "device": "cuda:0",
   "epochs": 100,
