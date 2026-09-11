@@ -157,13 +157,22 @@ def first_cross_attention(
         raise ValueError("Text anchor batch must be one or match image memory batch")
     tokens = anchor.shape[1]
     tgt = base.project_text_embed(anchor.permute(1, 0, 2))
-    position = base.pos_embed.to(device=vision_features.device, dtype=memory.dtype)
+    position = base.pos_embed.to(device=vision_features.device)
     if position.shape[0] != memory.shape[0]:
         raise ValueError(
             "VoxTell positional encoding and projected image memory disagree: "
             f"{position.shape[0]} vs {memory.shape[0]}"
         )
     layer = base.transformer_decoder.layers[0]
+    # VoxTell inference may run under autocast (half image memory with float
+    # decoder weights).  The standalone diagnostic call must present q/k/v in
+    # the same dtype as the native attention module to avoid a mixed-dtype
+    # projection error while preserving its exact projections and scaling.
+    attention_parameters = list(layer.multihead_attn.parameters())
+    attention_dtype = attention_parameters[0].dtype if attention_parameters else memory.dtype
+    memory = memory.to(dtype=attention_dtype)
+    tgt = tgt.to(dtype=attention_dtype)
+    position = base.pos_embed.to(device=vision_features.device, dtype=attention_dtype)
     query_pos = None
     if getattr(layer, "normalize_before", False):
         query = layer.norm2(tgt)

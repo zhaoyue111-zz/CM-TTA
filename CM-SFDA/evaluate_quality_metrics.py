@@ -20,6 +20,7 @@ from data.sfda_voxtell import (
 from method.semantic_quality import (
     average_tie_ranks,
     compute_saaf_quality,
+    first_cross_attention,
     text_similarity_map,
 )
 from method.sfda_voxtell import VoxTellPromptSFDA
@@ -38,6 +39,21 @@ def _fuse_logits_then_sigmoid(logits, denominator):
     denominator = denominator.clamp_min(torch.finfo(logits.dtype).eps)
     fused_logits = logits / denominator
     return fused_logits, torch.sigmoid(fused_logits)
+
+
+def _fuse_evidence_with_valid_weights(evidence_sum, evidence_weight_sum):
+    """Fuse only evidence from valid patch/views and report spatial coverage."""
+    evidence_sum = np.asarray(evidence_sum, dtype=np.float32)
+    evidence_weight_sum = np.asarray(evidence_weight_sum, dtype=np.float32)
+    covered = evidence_weight_sum > 0
+    fused = evidence_sum / np.maximum(evidence_weight_sum, np.finfo(np.float32).eps)
+    return fused, covered
+
+
+def _full_volume_selection_valid(selected_weight_sum, valid_patch_count):
+    """A selected full-volume map is valid only when every voxel is covered."""
+    weight = np.asarray(selected_weight_sum, dtype=np.float32)
+    return bool(valid_patch_count > 0 and np.isfinite(weight).all() and (weight > 0).all())
 
 
 def _rankdata(values):
@@ -217,13 +233,15 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
     case_key = "validation-case" if case_id is None else str(case_id)
     prototype_valid = 0
     prototype_queries = 0
-    view_valid = torch.ones(num_views, dtype=torch.bool)
+    valid_patch_counts = np.zeros(num_views, dtype=np.int64)
+    patch_count = len(slicers)
     with tempfile.TemporaryDirectory(prefix="voxtell_quality_") as cache_dir:
         def mmap(name, shape):
             return np.memmap(Path(cache_dir) / f"{name}.bin", mode="w+", dtype=np.float32, shape=shape)
 
         logit_sum = mmap("logits", (num_views, *padded_shape))
         evidence_sum = mmap("evidence", (num_views, *padded_shape))
+        evidence_weight_sum = mmap("evidence_weight", (num_views, *padded_shape))
         similarity_sum = mmap("similarity", (num_views, *padded_shape))
         selected_logit_sum = {name: mmap(f"selected_{name}", padded_shape) for name in selected_names}
         selected_weight_sum = {name: mmap(f"selected_weight_{name}", padded_shape) for name in selected_names}
@@ -236,11 +254,46 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             views = _training_style_views(patch, num_views, seed + patch_index)
             valid_views = valid_patch.expand(num_views, -1, -1, -1, -1)
             adapter._cac_features.clear()
+            native_attention_match = None
             with torch.no_grad(), torch.autocast(
                 device_type=adapter.device.type, enabled=adapter.device.type == "cuda"
             ):
                 prompt = adapter._text(adapter.initial_soft_prompt, num_views)
-                logits = adapter.model(views, prompt)
+                try:
+                    model_output = adapter.model(views, prompt, return_diagnostics=True)
+                except TypeError:
+                    model_output = adapter.model(views, prompt)
+                if (
+                    isinstance(model_output, tuple)
+                    and len(model_output) == 2
+                    and isinstance(model_output[1], dict)
+                ):
+                    logits, model_diagnostics = model_output
+                    native_cross = model_diagnostics.get("cross_attention")
+                    if isinstance(native_cross, (list, tuple)) and native_cross:
+                        native_first = native_cross[0]
+                        if torch.is_tensor(native_first):
+                            # VoxTell's native MHA diagnostics are averaged
+                            # over heads; compare against our exact per-head
+                            # reconstruction before using the latter for SAAF.
+                            try:
+                                recomputed, _, _ = first_cross_attention(
+                                    adapter.model,
+                                    adapter._cac_features["vision"],
+                                    adapter.text_anchor,
+                                )
+                                native_attention_match = bool(
+                                    torch.allclose(
+                                        native_first.float(),
+                                        recomputed.mean(dim=1).float(),
+                                        atol=1e-5,
+                                        rtol=1e-4,
+                                    )
+                                )
+                            except (AttributeError, RuntimeError, ValueError):
+                                native_attention_match = False
+                else:
+                    logits = model_output
             flat_case_ids = [case_key] * num_views
             current_text_features = adapter._cac_features["text"]
             _quality, cac, semantic = adapter._quality_scores(
@@ -301,7 +354,14 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             # Keep the original torch float32 accumulation order while using
             # writable memmap-backed storage instead of resident tensors.
             torch.from_numpy(logit_sum[(..., *patch_slices)]).add_(logits_cpu * weight)
-            torch.from_numpy(evidence_sum[(..., *patch_slices)]).add_(evidence_cpu * weight)
+            semantic_valid = semantic["valid"].detach().cpu().reshape(-1).bool()
+            for view_index in range(num_views):
+                if bool(semantic_valid[view_index]):
+                    valid_patch_counts[view_index] += 1
+                    torch.from_numpy(evidence_sum[(view_index, *patch_slices)]).add_(
+                        evidence_cpu[view_index] * weight
+                    )
+                    torch.from_numpy(evidence_weight_sum[(view_index, *patch_slices)]).add_(weight)
             torch.from_numpy(similarity_sum[(..., *patch_slices)]).add_(similarity_cpu * weight)
             torch.from_numpy(gaussian_sum[patch_slices]).add_(weight)
             for name in selected_names:
@@ -341,6 +401,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                         "selected": view_index == selected_indices.get(
                             "saaf" if adapter.quality_metric == "saaf" else "cac"
                         ),
+                        "native_attention_match": native_attention_match,
                     }
                     for view_index in range(num_views)
                 ],
@@ -364,7 +425,6 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             patch_records.append(patch_record)
             prototype_valid += int(semantic["valid"].sum().cpu())
             prototype_queries += int(semantic["valid"].numel())
-            view_valid &= semantic["valid"].detach().cpu().reshape(-1)
 
         if not bool((gaussian_sum > 0).all()):
             raise RuntimeError("VoxTell sliding-window inference left uncovered voxels")
@@ -374,16 +434,21 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         fused_logits, probability = _fuse_logits_then_sigmoid(
             torch.from_numpy(fused_logits_np), torch.from_numpy(denominator_np.copy())
         )
-        evidence_original = torch.from_numpy(
-            (np.asarray(evidence_sum[(0, *crop)], dtype=np.float32) / denominator_np).copy()
+        evidence_original_np, _ = _fuse_evidence_with_valid_weights(
+            evidence_sum[(0, *crop)], evidence_weight_sum[(0, *crop)]
         )
+        evidence_original = torch.from_numpy(evidence_original_np.copy())
         full_metrics = {name: [] for name in QUALITY_NAMES}
         full_consistency = _soft_consistency(probability)
-        full_view_valid = view_valid.clone()
+        full_view_valid = torch.zeros(num_views, dtype=torch.bool)
+        view_invalid_reasons = [None for _ in range(num_views)]
+        evidence_coverage = np.zeros(num_views, dtype=np.float32)
         for view_index in range(num_views):
-            evidence_view = torch.from_numpy(
-                (np.asarray(evidence_sum[(view_index, *crop)], dtype=np.float32) / denominator_np).copy()
+            evidence_view_np, evidence_covered = _fuse_evidence_with_valid_weights(
+                evidence_sum[(view_index, *crop)], evidence_weight_sum[(view_index, *crop)]
             )
+            evidence_coverage[view_index] = float(evidence_covered.mean())
+            evidence_view = torch.from_numpy(evidence_view_np.copy())
             similarity_view = torch.from_numpy(
                 (np.asarray(similarity_sum[(view_index, *crop)], dtype=np.float32) / denominator_np).copy()
             )
@@ -395,7 +460,12 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 epsilon=adapter.quality_config["epsilon"],
                 min_mass=adapter.quality_config.get("saaf_min_mass", 1e-6),
             )
-            full_view_valid[view_index] = bool(full_view_valid[view_index]) and bool(saaf["valid"][0])
+            if not bool(evidence_covered.all()):
+                view_invalid_reasons[view_index] = "incomplete_evidence_spatial_coverage"
+            elif not bool(saaf["valid"][0]):
+                view_invalid_reasons[view_index] = "saaf_quality_invalid"
+            else:
+                full_view_valid[view_index] = True
             full_metrics["confidence"].append(float(torch.maximum(view_probability, 1 - view_probability).mean()))
             full_metrics["entropy"].append(float(-(clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()).mean()))
             full_metrics["consistency"].append(float(full_consistency[view_index]))
@@ -406,18 +476,49 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             full_metrics["completeness"].append(float(saaf["coverage"][0]))
             full_metrics["tse"].append(float(saaf["saaf"][0]))
         selected_dice = {}
+        selection_diagnostics = {}
         for name, value in selected_logit_sum.items():
             selection_skipped[name] = selection_valid_patch_counts[name] == 0
+            selected_weight = np.asarray(selected_weight_sum[name][crop], dtype=np.float32)
+            selected_covered = selected_weight > 0
+            selected_coverage = float(selected_covered.mean())
+            method_valid = bool(
+                (not selection_skipped[name])
+                and _full_volume_selection_valid(selected_weight, selection_valid_patch_counts[name])
+            )
+            method_reason = None
+            if selection_skipped[name]:
+                method_reason = "no_valid_selected_patch"
+            elif not bool(selected_covered.all()):
+                method_reason = "incomplete_selected_spatial_coverage"
             method_denominator = np.maximum(
-                np.asarray(selected_weight_sum[name][crop], dtype=np.float32),
+                selected_weight,
                 np.finfo(np.float32).eps,
             )
             selected_np = (np.asarray(value[crop], dtype=np.float32) / method_denominator).copy()
-            if target is not None and not selection_skipped[name] and np.asarray(selected_weight_sum[name][crop]).sum() > 0:
+            if target is not None and method_valid:
                 selected_probability = torch.sigmoid(torch.from_numpy(selected_np))
                 selected_dice[name] = float(
                     _dice_per_view(selected_probability[None], target.float())[0]
                 )
+            else:
+                selected_dice[name] = None
+            selection_diagnostics[name] = {
+                "valid_patch_count": int(selection_valid_patch_counts[name]),
+                "valid_patch_fraction": float(selection_valid_patch_counts[name] / max(1, patch_count)),
+                "spatial_coverage_fraction": selected_coverage,
+                "full_volume_valid": method_valid,
+                "invalid_reason": method_reason,
+            }
+        view_diagnostics = {}
+        for view_index in range(num_views):
+            view_diagnostics[str(view_index)] = {
+                "valid_patch_count": int(valid_patch_counts[view_index]),
+                "valid_patch_fraction": float(valid_patch_counts[view_index] / max(1, patch_count)),
+                "spatial_coverage_fraction": float(evidence_coverage[view_index]),
+                "full_view_valid": bool(full_view_valid[view_index]),
+                "invalid_reason": view_invalid_reasons[view_index],
+            }
         return {
             "probability": probability,
             "evidence": evidence_original,
@@ -425,9 +526,11 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             "selected_dice": selected_dice,
             "selection_skipped": selection_skipped,
             "selection_valid_patch_counts": selection_valid_patch_counts,
+            "selection_diagnostics": selection_diagnostics,
             "patch_records": patch_records,
             "prototype_valid_fraction": prototype_valid / prototype_queries if prototype_queries else 0.0,
             "view_valid": full_view_valid,
+            "view_diagnostics": view_diagnostics,
             "locations": slicers,
         }
 
@@ -845,7 +948,8 @@ def main():
                 patch["best_dice"] for patch in inference["patch_records"] if "best_dice" in patch
             )
             for name, selected in inference["selected_dice"].items():
-                selected_dice[name].append(selected)
+                if selected is not None:
+                    selected_dice[name].append(selected)
                 patch_values = [
                     patch["selection"][name]["selected_dice"]
                     for patch in inference["patch_records"]
@@ -870,7 +974,25 @@ def main():
                     "patch_best_dice": float(np.mean(patch_best_values)) if patch_best_values else None,
                     "patch_gap_to_oracle": float(np.mean(patch_gap_values)) if patch_gap_values else None,
                     "valid_patches": len(patch_values),
+                    "full_volume_valid": selected is not None,
+                    "invalid_reason": inference.get("selection_diagnostics", {}).get(name, {}).get("invalid_reason"),
                 }
+            # Preserve diagnostics for methods whose selected full-volume map
+            # was invalid and therefore is represented by a None Dice.
+            for name, diagnostic in inference.get("selection_diagnostics", {}).items():
+                selections.setdefault(
+                    name,
+                    {
+                        "view": "patchwise",
+                        "full_volume_dice": None,
+                        "patch_selected_dice": None,
+                        "patch_best_dice": None,
+                        "patch_gap_to_oracle": None,
+                        "valid_patches": int(diagnostic.get("valid_patch_count", 0)),
+                        "full_volume_valid": bool(diagnostic.get("full_volume_valid", False)),
+                        "invalid_reason": diagnostic.get("invalid_reason"),
+                    },
+                )
             localization = evidence_localization_metrics(
                 evidence, target.float(), adapter.quality_config["evidence_threshold"]
             )
@@ -898,6 +1020,8 @@ def main():
                     "evidence_statistics_original_view": _tensor_statistics(evidence),
                     "prototype_valid_fraction": inference["prototype_valid_fraction"],
                     "sliding_window_patches": len(inference["locations"]),
+                    "view_diagnostics": inference.get("view_diagnostics", {}),
+                    "selection_diagnostics": inference.get("selection_diagnostics", {}),
                 }
             )
             if case_index < args.visualize_cases:

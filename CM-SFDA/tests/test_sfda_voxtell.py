@@ -57,6 +57,8 @@ from run_sfda_voxtell import (  # noqa: E402
 )
 from evaluate_quality_metrics import (  # noqa: E402
     _fuse_logits_then_sigmoid,
+    _fuse_evidence_with_valid_weights,
+    _full_volume_selection_valid,
     _patch_oracle_stats,
     _soft_consistency,
     _selection_indices,
@@ -594,6 +596,39 @@ class SoftPromptOnlyTests(unittest.TestCase):
                      [d for d, ok in zip(dice, valid) if ok]),
             1.0,
         )
+
+    def test_invalid_patch_hole_marks_selected_volume_invalid(self):
+        evidence_sum = np.ones((2, 2, 2), dtype=np.float32)
+        evidence_weight = np.ones((2, 2, 2), dtype=np.float32)
+        evidence_weight[0, 0, 0] = 0.0
+        fused, covered = _fuse_evidence_with_valid_weights(evidence_sum, evidence_weight)
+        self.assertFalse(bool(covered.all()))
+        self.assertFalse(_full_volume_selection_valid(evidence_weight, 1))
+        # The uncovered voxel is not treated as a valid selected prediction.
+        self.assertIsNotNone(fused)
+
+    def test_invalid_patch_with_overlapping_valid_patch_keeps_volume_valid(self):
+        # Two overlapping patches provide complete effective evidence coverage.
+        evidence_sum = np.array([[[1.0, 1.0], [1.0, 1.0]]], dtype=np.float32)
+        evidence_weight = np.array([[[1.0, 2.0], [1.0, 2.0]]], dtype=np.float32)
+        _, covered = _fuse_evidence_with_valid_weights(evidence_sum, evidence_weight)
+        self.assertTrue(bool(covered.all()))
+        self.assertTrue(_full_volume_selection_valid(evidence_weight, 1))
+
+    def test_invalid_evidence_does_not_dilute_valid_evidence(self):
+        evidence_sum = np.array([[[2.0, 2.0]]], dtype=np.float32)
+        evidence_weight = np.array([[[1.0, 1.0]]], dtype=np.float32)
+        fused, _ = _fuse_evidence_with_valid_weights(evidence_sum, evidence_weight)
+        self.assertTrue(np.allclose(fused, 2.0))
+
+    def test_cac_full_volume_coverage_is_independent_of_saaf_patch_validity(self):
+        # CAC accumulates every sliding-window patch, so its own denominator
+        # remains complete even if the evidence denominator has a hole.
+        cac_weight = np.ones((2, 2, 2), dtype=np.float32)
+        saaf_weight = cac_weight.copy()
+        saaf_weight[0, 0, 0] = 0.0
+        self.assertTrue(_full_volume_selection_valid(cac_weight, 1))
+        self.assertFalse(_full_volume_selection_valid(saaf_weight, 1))
 
     def test_saaf_rejects_batch_size_greater_than_one(self):
         with self.assertRaisesRegex(ValueError, "batch_size=1"):
