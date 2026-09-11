@@ -141,21 +141,30 @@ def select_cac_views(cac_scores, probabilities, selection_p, valid_mask=None):
         raise ValueError(f"selection_p must be in (0, 1], got {selection_p}")
 
     batch_size, num_views = cac_scores.shape
+    keep = max(1, int(num_views * float(selection_p)))
     if valid_mask is not None:
         valid_mask = torch.as_tensor(valid_mask, device=cac_scores.device).bool()
         if tuple(valid_mask.shape) != (batch_size, num_views):
             raise ValueError("valid_mask must have shape (B,V)")
-        keep = max(1, int(num_views * float(selection_p)))
-        if bool((valid_mask.sum(dim=1) < keep).any()):
-            raise ValueError("Fewer valid SAAF views than the requested selection count")
+        valid_counts = valid_mask.sum(dim=1)
+        if bool((valid_counts == 0).any()):
+            raise ValueError("No valid SAAF views available for selection")
+        # Keep a rectangular result for batched callers while never padding
+        # with invalid views when a case has fewer valid candidates than keep.
+        keep = min(keep, int(valid_counts.min().item()))
         cac_scores = cac_scores.masked_fill(~valid_mask, float("-inf"))
     entropy = _binary_view_entropy(
         probabilities.reshape(batch_size * num_views, *probabilities.shape[2:])
     ).view(batch_size, num_views)
+    if valid_mask is not None:
+        # Invalid views must lose both components of the rank fusion.  This is
+        # important when an invalid view happens to have the lowest entropy.
+        entropy = entropy.masked_fill(~valid_mask, float("inf"))
     entropy_ranks = average_tie_ranks(entropy, descending=False)
     cac_ranks = average_tie_ranks(cac_scores, descending=True)
     combined_ranks = entropy_ranks + cac_ranks
-    keep = max(1, int(num_views * float(selection_p)))
+    if valid_mask is not None:
+        combined_ranks = combined_ranks.masked_fill(~valid_mask, float("inf"))
     return torch.argsort(combined_ranks, dim=1, stable=True)[:, :keep]
 
 

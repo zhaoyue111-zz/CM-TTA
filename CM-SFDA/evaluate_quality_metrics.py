@@ -217,6 +217,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
     case_key = "validation-case" if case_id is None else str(case_id)
     prototype_valid = 0
     prototype_queries = 0
+    view_valid = torch.ones(num_views, dtype=torch.bool)
     with tempfile.TemporaryDirectory(prefix="voxtell_quality_") as cache_dir:
         def mmap(name, shape):
             return np.memmap(Path(cache_dir) / f"{name}.bin", mode="w+", dtype=np.float32, shape=shape)
@@ -225,7 +226,9 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         evidence_sum = mmap("evidence", (num_views, *padded_shape))
         similarity_sum = mmap("similarity", (num_views, *padded_shape))
         selected_logit_sum = {name: mmap(f"selected_{name}", padded_shape) for name in selected_names}
-        selection_skipped = False
+        selected_weight_sum = {name: mmap(f"selected_weight_{name}", padded_shape) for name in selected_names}
+        selection_skipped = {name: False for name in selected_names}
+        selection_valid_patch_counts = {name: 0 for name in selected_names}
 
         for patch_index, slicer in enumerate(slicers):
             patch = padded[slicer].to(adapter.device, non_blocking=True)
@@ -287,7 +290,9 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             selected_indices, patch_skipped = _selection_indices(
                 patch_metrics, semantic["valid"]
             )
-            selection_skipped = selection_skipped or patch_skipped
+            for name, skipped in patch_skipped.items():
+                if not skipped:
+                    selection_valid_patch_counts[name] += 1
             patch_slices = slicer[1:]
             weight = gaussian.detach().cpu()
             logits_cpu = logits[:, 0].float().detach().cpu()
@@ -299,11 +304,14 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             torch.from_numpy(evidence_sum[(..., *patch_slices)]).add_(evidence_cpu * weight)
             torch.from_numpy(similarity_sum[(..., *patch_slices)]).add_(similarity_cpu * weight)
             torch.from_numpy(gaussian_sum[patch_slices]).add_(weight)
-            if not patch_skipped:
-                for name in selected_names:
+            for name in selected_names:
+                if patch_skipped[name]:
+                    continue
+                with torch.no_grad():
                     torch.from_numpy(selected_logit_sum[name][patch_slices]).add_(
                         logits_cpu[selected_indices[name]] * weight
                     )
+                    torch.from_numpy(selected_weight_sum[name][patch_slices]).add_(weight)
             patch_record = {
                 "patch_index": patch_index,
                 "location": [[int(s.start), int(s.stop)] for s in patch_slices],
@@ -326,8 +334,12 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                         "evidence_sum": float(semantic["evidence_sum"].view(-1)[view_index].cpu()),
                         "valid": bool(semantic["valid"].view(-1)[view_index].cpu()),
                         "invalid_reason": semantic["invalid_reason"][view_index],
-                        "selected": (not patch_skipped) and any(
-                            index == view_index for index in selected_indices.values()
+                        "selected_by": [
+                            name for name, index in selected_indices.items()
+                            if index == view_index
+                        ],
+                        "selected": view_index == selected_indices.get(
+                            "saaf" if adapter.quality_metric == "saaf" else "cac"
                         ),
                     }
                     for view_index in range(num_views)
@@ -352,6 +364,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             patch_records.append(patch_record)
             prototype_valid += int(semantic["valid"].sum().cpu())
             prototype_queries += int(semantic["valid"].numel())
+            view_valid &= semantic["valid"].detach().cpu().reshape(-1)
 
         if not bool((gaussian_sum > 0).all()):
             raise RuntimeError("VoxTell sliding-window inference left uncovered voxels")
@@ -366,6 +379,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         )
         full_metrics = {name: [] for name in QUALITY_NAMES}
         full_consistency = _soft_consistency(probability)
+        full_view_valid = view_valid.clone()
         for view_index in range(num_views):
             evidence_view = torch.from_numpy(
                 (np.asarray(evidence_sum[(view_index, *crop)], dtype=np.float32) / denominator_np).copy()
@@ -381,6 +395,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 epsilon=adapter.quality_config["epsilon"],
                 min_mass=adapter.quality_config.get("saaf_min_mass", 1e-6),
             )
+            full_view_valid[view_index] = bool(full_view_valid[view_index]) and bool(saaf["valid"][0])
             full_metrics["confidence"].append(float(torch.maximum(view_probability, 1 - view_probability).mean()))
             full_metrics["entropy"].append(float(-(clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()).mean()))
             full_metrics["consistency"].append(float(full_consistency[view_index]))
@@ -392,8 +407,13 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             full_metrics["tse"].append(float(saaf["saaf"][0]))
         selected_dice = {}
         for name, value in selected_logit_sum.items():
-            selected_np = (np.asarray(value[crop], dtype=np.float32) / denominator_np).copy()
-            if target is not None and not selection_skipped:
+            selection_skipped[name] = selection_valid_patch_counts[name] == 0
+            method_denominator = np.maximum(
+                np.asarray(selected_weight_sum[name][crop], dtype=np.float32),
+                np.finfo(np.float32).eps,
+            )
+            selected_np = (np.asarray(value[crop], dtype=np.float32) / method_denominator).copy()
+            if target is not None and not selection_skipped[name] and np.asarray(selected_weight_sum[name][crop]).sum() > 0:
                 selected_probability = torch.sigmoid(torch.from_numpy(selected_np))
                 selected_dice[name] = float(
                     _dice_per_view(selected_probability[None], target.float())[0]
@@ -404,8 +424,10 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             "full_metrics": {name: torch.tensor(values, dtype=torch.float32) for name, values in full_metrics.items()},
             "selected_dice": selected_dice,
             "selection_skipped": selection_skipped,
+            "selection_valid_patch_counts": selection_valid_patch_counts,
             "patch_records": patch_records,
             "prototype_valid_fraction": prototype_valid / prototype_queries if prototype_queries else 0.0,
+            "view_valid": full_view_valid,
             "locations": slicers,
         }
 
@@ -449,14 +471,11 @@ def _cac_from_full_maps(probability, similarity):
 
 
 def _selection_indices(metrics, saaf_valid=None, valid_mask=None):
-    """Select audit views with the same invalid-SAAF rule as training.
+    """Select views with method-specific validity.
 
-    With a validity mask, returns ``(indices, skipped)``.  ``indices`` is empty
-    when every view is invalid; callers must record the skip instead of silently
-    selecting index 0.  Without a mask it retains the historical dict return.
-    The audit currently uses one selected view per patch, so a variable number
-    of valid views is represented by the explicit skip flag rather than padded
-    selections.
+    CAC and CAC+entropy are legacy baselines and always rank every view.  SAAF,
+    purity, coverage and SAAF+entropy rank only valid SAAF views.  When a mask is
+    supplied the second return value is a per-method skip dictionary.
     """
     if saaf_valid is not None and valid_mask is not None:
         raise ValueError("Pass only one of saaf_valid or valid_mask")
@@ -469,19 +488,34 @@ def _selection_indices(metrics, saaf_valid=None, valid_mask=None):
         valid = torch.as_tensor(saaf_valid, device=metrics["saaf"].device).bool().reshape(-1)
         if valid.numel() != metrics["saaf"].numel():
             raise ValueError("saaf_valid must contain one flag per candidate view")
-    if not bool(valid.any()):
-        return ({}, True) if not legacy_return else {}
-    masked_metrics = dict(metrics)
-    for name in names:
-        masked_metrics[name] = metrics[name].clone().masked_fill(~valid, float("-inf"))
-    entropy = metrics["entropy"].clone().masked_fill(~valid, float("inf"))
-    result = {name: int(masked_metrics[name].argmax()) for name in names}
-    entropy_rank = average_tie_ranks(entropy.view(1, -1), descending=False)
-    for quality in ("cac", "saaf"):
-        quality_rank = average_tie_ranks(masked_metrics[quality].view(1, -1), descending=True)
-        combined = entropy_rank + quality_rank
-        result[f"{quality}_entropy"] = int(torch.argsort(combined, dim=1, stable=True)[0, 0])
-    return result if legacy_return else (result, False)
+    def flat(name):
+        return torch.as_tensor(metrics[name]).reshape(-1)
+
+    result = {}
+    skipped = {name: False for name in SELECTION_NAMES}
+    # Legacy CAC family: no SAAF mask is ever applied.
+    result["cac"] = int(flat("cac").argmax())
+    cac_entropy = flat("entropy")
+    cac_rank = average_tie_ranks(flat("cac").view(1, -1), descending=True)
+    entropy_rank = average_tie_ranks(cac_entropy.view(1, -1), descending=False)
+    result["cac_entropy"] = int(torch.argsort(cac_rank + entropy_rank, dim=1, stable=True)[0, 0])
+
+    # SAAF family: invalid quality is -inf and invalid entropy is +inf.
+    if bool(valid.any()):
+        masked_entropy = flat("entropy").masked_fill(~valid, float("inf"))
+        masked_entropy_rank = average_tie_ranks(masked_entropy.view(1, -1), descending=False)
+        for name in ("saaf", "purity", "coverage"):
+            masked_quality = flat(name).masked_fill(~valid, float("-inf"))
+            result[name] = int(masked_quality.argmax())
+        saaf_quality = flat("saaf").masked_fill(~valid, float("-inf"))
+        saaf_rank = average_tie_ranks(saaf_quality.view(1, -1), descending=True)
+        combined = saaf_rank + masked_entropy_rank
+        combined = combined.masked_fill(~valid.view(1, -1), float("inf"))
+        result["saaf_entropy"] = int(torch.argsort(combined, dim=1, stable=True)[0, 0])
+    else:
+        for name in ("saaf", "purity", "coverage", "saaf_entropy"):
+            skipped[name] = True
+    return result if legacy_return else (result, skipped)
 
 
 def evidence_localization_metrics(evidence, target, threshold):
@@ -595,13 +629,24 @@ def summarize_quality_audit(
 
     macro_spearman = {}
     macro_valid_cases = {}
+    within_valid_views = {}
     for name in QUALITY_NAMES:
         valid = [case["within_case_spearman"][name] for case in cases
                  if case["within_case_spearman"][name] is not None]
         macro_spearman[name] = float(np.mean(valid)) if valid else None
         macro_valid_cases[name] = len(valid)
+        within_valid_views[name] = sum(
+            int(case.get("within_case_valid_views", {}).get(name, 0)) for case in cases
+        )
     global_spearman = {
-        name: spearman([row[name] for row in mixed_views], [row["dice"] for row in mixed_views])
+        name: spearman(
+            [row[name] for row in mixed_views if row.get("valid_metrics", {}).get(name, True)],
+            [row["dice"] for row in mixed_views if row.get("valid_metrics", {}).get(name, True)],
+        )
+        for name in QUALITY_NAMES
+    }
+    global_valid_views = {
+        name: sum(1 for row in mixed_views if row.get("valid_metrics", {}).get(name, True))
         for name in QUALITY_NAMES
     }
     patch_spearman_macro = {}
@@ -632,7 +677,9 @@ def summarize_quality_audit(
         "prototype_diagnostics": prototype_diagnostics,
         "within_case_spearman_macro": macro_spearman,
         "within_case_spearman_valid_cases": macro_valid_cases,
+        "within_case_spearman_valid_views": within_valid_views,
         "global_mixed_view_spearman": global_spearman,
+        "global_mixed_view_valid_views": global_valid_views,
         "patch_spearman_macro": patch_spearman_macro,
         "patch_spearman_valid_cases": patch_spearman_valid_cases,
         "patch_spearman_valid_patches": patch_spearman_valid_patches,
@@ -730,6 +777,7 @@ def main():
             probability, evidence, metrics = (
                 inference["probability"], inference["evidence"], inference["full_metrics"]
             )
+            view_valid = inference.get("view_valid", torch.ones(args.num_aug_views, dtype=torch.bool))
             dice = _dice_per_view(probability, target.float())
             fixed_index, fixed_dice = int(dice.argmax()), float(dice.max())
             best_fixed_view_dice.append(fixed_dice)
@@ -741,16 +789,37 @@ def main():
                     "dice": float(dice[view_index]),
                     **{name: float(values[view_index]) for name, values in metrics.items()},
                 }
+                valid_semantic = bool(view_valid[view_index])
+                row["valid_metrics"] = {
+                    name: (valid_semantic if name in ("saaf", "purity", "coverage", "completeness", "tse") else True)
+                    for name in QUALITY_NAMES
+                }
                 per_view.append(row)
                 mixed_views.append(row)
             correlations = {
-                name: spearman([row[name] for row in per_view], [row["dice"] for row in per_view])
+                name: spearman(
+                    [row[name] for row in per_view if row["valid_metrics"][name]],
+                    [row["dice"] for row in per_view if row["valid_metrics"][name]],
+                )
+                for name in QUALITY_NAMES
+            }
+            valid_view_counts = {
+                name: sum(1 for row in per_view if row["valid_metrics"][name])
                 for name in QUALITY_NAMES
             }
             patch_spearman = {}
             for name in QUALITY_NAMES:
                 values = [
-                    spearman(patch["quality"][name], patch["candidate_dice"])
+                    spearman(
+                        [value for value, valid in zip(
+                            patch["quality"][name],
+                            [d["valid"] for d in patch.get("diagnostics", [])],
+                        ) if valid or name not in ("saaf", "purity", "coverage", "completeness", "tse")],
+                        [dice_value for dice_value, valid in zip(
+                            patch["candidate_dice"],
+                            [d["valid"] for d in patch.get("diagnostics", [])],
+                        ) if valid or name not in ("saaf", "purity", "coverage", "completeness", "tse")],
+                    )
                     for patch in inference["patch_records"]
                     if "candidate_dice" in patch
                 ]
@@ -761,8 +830,14 @@ def main():
                 )
             for patch in inference["patch_records"]:
                 if "candidate_dice" in patch:
+                    patch_valid = [d["valid"] for d in patch.get("diagnostics", [])]
                     patch["spearman"] = {
-                        name: spearman(patch["quality"][name], patch["candidate_dice"])
+                        name: spearman(
+                            [value for value, valid in zip(patch["quality"][name], patch_valid)
+                             if valid or name not in ("saaf", "purity", "coverage", "completeness", "tse")],
+                            [value for value, valid in zip(patch["candidate_dice"], patch_valid)
+                             if valid or name not in ("saaf", "purity", "coverage", "completeness", "tse")],
+                        )
                         for name in QUALITY_NAMES
                     }
             selections = {}
@@ -773,15 +848,18 @@ def main():
                 selected_dice[name].append(selected)
                 patch_values = [
                     patch["selection"][name]["selected_dice"]
-                    for patch in inference["patch_records"] if "selection" in patch
+                    for patch in inference["patch_records"]
+                    if name in patch.get("selection", {})
                 ]
                 patch_best_values = [
                     patch["selection"][name]["patch_best_dice"]
-                    for patch in inference["patch_records"] if "selection" in patch
+                    for patch in inference["patch_records"]
+                    if name in patch.get("selection", {})
                 ]
                 patch_gap_values = [
                     max(0.0, patch["selection"][name]["gap_to_patch_oracle"])
-                    for patch in inference["patch_records"] if "selection" in patch
+                    for patch in inference["patch_records"]
+                    if name in patch.get("selection", {})
                 ]
                 patch_selected_dice[name].extend(patch_values)
                 patch_oracle_gap[name].extend(patch_gap_values)
@@ -803,6 +881,7 @@ def main():
                     "case": image_path.name,
                     "views": per_view,
                     "within_case_spearman": correlations,
+                    "within_case_valid_views": valid_view_counts,
                     "patch_spearman": {
                         name: {
                             "mean": float(np.mean([v for v in values if v is not None])) if any(v is not None for v in values) else None,

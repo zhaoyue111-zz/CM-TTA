@@ -64,6 +64,7 @@ from evaluate_quality_metrics import (  # noqa: E402
     binary_auroc,
     evidence_localization_metrics,
     summarize_quality_audit,
+    spearman,
 )
 
 
@@ -480,6 +481,28 @@ class SoftPromptOnlyTests(unittest.TestCase):
         self.assertEqual(tuple(token_mask.shape), (1, 1))
         self.assertTrue(torch.allclose(attention.sum(dim=-1), torch.ones(1, 2, 1)))
 
+    def test_first_cross_attention_head_mean_matches_native_attention(self):
+        model = _TinyAttentionVoxTell().eval()
+        features = torch.randn(1, 4, 4, 2, 4)
+        anchor = torch.randn(1, 1, 4)
+        with torch.no_grad():
+            attention, spatial, _ = first_cross_attention(model, features, anchor)
+            memory = features.reshape(1, -1, 4).permute(1, 0, 2)
+            tgt = model.project_text_embed(anchor.permute(1, 0, 2))
+            layer = model.transformer_decoder.layers[0]
+            query = layer.norm2(tgt)
+            key = layer.with_pos_embed(memory, model.pos_embed)
+            _, native = layer.multihead_attn(
+                query=query,
+                key=key,
+                value=memory,
+                need_weights=True,
+                average_attn_weights=False,
+            )
+            native = native.mean(dim=1).permute(1, 0, 2).reshape(1, 1, -1)
+        self.assertEqual(spatial, (4, 4, 2))
+        self.assertTrue(torch.allclose(attention.mean(dim=1), native, atol=1e-6, rtol=1e-5))
+
     def test_saaf_quality_aligns_finer_logits_to_coarse_evidence(self):
         args = _args(
             quality_metric="saaf", quality_mode="cac", selection_p=0.1,
@@ -509,11 +532,12 @@ class SoftPromptOnlyTests(unittest.TestCase):
         }
         metrics["entropy"] = torch.tensor([[0.1, 0.2, 0.3]])
         selected, skipped = _selection_indices(metrics, torch.tensor([False, True, False]))
-        self.assertFalse(skipped)
-        self.assertTrue(all(index == 1 for index in selected.values()))
+        self.assertFalse(skipped["saaf"])
+        self.assertEqual(selected["saaf"], 1)
+        self.assertEqual(selected["cac"], 1)
         selected, skipped = _selection_indices(metrics, torch.tensor([False, False, False]))
-        self.assertTrue(skipped)
-        self.assertEqual(selected, {})
+        self.assertTrue(skipped["saaf"])
+        self.assertIn("cac", selected)
         probabilities = torch.full((1, 3, 1, 2, 2, 2), 0.5)
         selected = select_cac_views(
             metrics["saaf"], probabilities, 0.1,
@@ -525,6 +549,51 @@ class SoftPromptOnlyTests(unittest.TestCase):
                 metrics["saaf"], probabilities, 0.1,
                 valid_mask=torch.tensor([[False, False, False]]),
             )
+
+    def test_invalid_saaf_lowest_entropy_is_never_selected(self):
+        # View 0 has the lowest entropy but is invalid; rank fusion must still
+        # select the valid view only.
+        scores = torch.tensor([[0.1, 0.2]])
+        probabilities = torch.stack(
+            [torch.zeros(1, 1, 2, 2, 2), torch.full((1, 1, 2, 2, 2), 0.5)], dim=1
+        )
+        selected = select_cac_views(
+            scores, probabilities, 0.5, valid_mask=torch.tensor([[False, True]])
+        )
+        self.assertEqual(selected.tolist(), [[1]])
+
+    def test_selection_keeps_only_available_valid_views_when_keep_is_larger(self):
+        scores = torch.tensor([[0.1, 0.9, 0.2]])
+        probabilities = torch.full((1, 3, 1, 2, 2, 2), 0.5)
+        selected = select_cac_views(
+            scores, probabilities, 1.0, valid_mask=torch.tensor([[False, True, False]])
+        )
+        self.assertEqual(selected.tolist(), [[1]])
+
+    def test_cac_selection_is_independent_of_saaf_mask(self):
+        metrics = {
+            "cac": torch.tensor([0.9, 0.1, 0.2]),
+            "saaf": torch.tensor([0.1, 0.8, 0.7]),
+            "purity": torch.tensor([0.1, 0.8, 0.7]),
+            "coverage": torch.tensor([0.1, 0.8, 0.7]),
+            "entropy": torch.tensor([0.3, 0.2, 0.1]),
+        }
+        all_selected, _ = _selection_indices(metrics, torch.tensor([True, True, True]))
+        masked_selected, _ = _selection_indices(metrics, torch.tensor([False, True, True]))
+        self.assertEqual(all_selected["cac"], masked_selected["cac"])
+        self.assertEqual(all_selected["cac_entropy"], masked_selected["cac_entropy"])
+
+    def test_saaf_spearman_excludes_invalid_views(self):
+        # The invalid outlier must not influence a SAAF correlation.  With the
+        # two valid observations left, this is a perfect monotonic relation.
+        values = [0.1, 0.2, 100.0]
+        dice = [0.1, 0.2, 0.0]
+        valid = [True, True, False]
+        self.assertAlmostEqual(
+            spearman([v for v, ok in zip(values, valid) if ok],
+                     [d for d, ok in zip(dice, valid) if ok]),
+            1.0,
+        )
 
     def test_saaf_rejects_batch_size_greater_than_one(self):
         with self.assertRaisesRegex(ValueError, "batch_size=1"):
