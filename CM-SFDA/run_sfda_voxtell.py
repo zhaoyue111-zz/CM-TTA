@@ -294,6 +294,10 @@ def parse_args():
         help="Pseudo-label quality used for view selection and optional quality loss",
     )
     parser.add_argument(
+        "--quality_metric", default="cac", choices=("cac", "saaf"),
+        help="View-selection metric; SAAF uses frozen text anchor 'liver' and w_quality must be 0",
+    )
+    parser.add_argument(
         "--quality_config",
         default=str(Path(__file__).resolve().parent / "configs" / "tse.json"),
         help="JSON containing TSE feature layers, seed thresholds and temperature",
@@ -341,11 +345,12 @@ def main():
     # free soft prompt. It is not retained in the adaptation optimizer.
     with torch.no_grad():
         initial_soft_prompt = predictor.embed_text_prompts([args.prompt]).detach()
+        text_anchor = predictor.embed_text_prompts(["liver"]).detach()
     print(
         f"VoxTell: {args.model_dir}\n"
         "Adaptation: soft_prompt_embedding only\n"
         f"Prompt initialization: Qwen encoder ({args.prompt})\n"
-        f"Pseudo-label quality: {args.quality_mode}"
+        f"Pseudo-label quality: {args.quality_metric}"
     )
     adapter = VoxTellPromptSFDA(
         predictor.network,
@@ -353,6 +358,7 @@ def main():
         device,
         args,
         qwen_text_encoder=qwen_text_encoder,
+        text_anchor=text_anchor,
     )
     checkpoint = None
     if args.checkpoint:

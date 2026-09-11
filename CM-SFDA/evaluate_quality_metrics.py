@@ -19,7 +19,7 @@ from data.sfda_voxtell import (
 )
 from method.semantic_quality import (
     average_tie_ranks,
-    compute_tse_components,
+    compute_saaf_quality,
     text_similarity_map,
 )
 from method.sfda_voxtell import VoxTellPromptSFDA
@@ -27,15 +27,10 @@ from run_sfda_voxtell import build_predictor, seed_everything
 
 
 QUALITY_NAMES = (
-    "confidence",
-    "entropy",
-    "consistency",
-    "cac",
-    "purity",
-    "completeness",
-    "tse",
+    "confidence", "entropy", "consistency", "cac", "purity", "coverage", "saaf",
+    "completeness", "tse",
 )
-SELECTION_NAMES = ("cac", "tse", "purity", "completeness", "cac_entropy", "tse_entropy")
+SELECTION_NAMES = ("cac", "saaf", "purity", "coverage", "cac_entropy", "saaf_entropy")
 
 
 def _fuse_logits_then_sigmoid(logits, denominator):
@@ -200,6 +195,9 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         device=adapter.device,
     ).float()
     padded_shape = tuple(int(value) for value in padded.shape[1:])
+    valid_crop = revert_padding[1:]
+    padded_valid = torch.zeros_like(padded, dtype=torch.float32)
+    padded_valid[(..., *valid_crop)] = 1.0
     # These are disk-backed so the audit does not keep 9 logits, 9 evidence
     # maps, 9 similarity maps and multiple selected volumes in RAM. The
     # numerical accumulation order and dtype remain unchanged.
@@ -230,7 +228,9 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
 
         for patch_index, slicer in enumerate(slicers):
             patch = padded[slicer].to(adapter.device, non_blocking=True)
+            valid_patch = padded_valid[slicer].to(adapter.device, non_blocking=True)
             views = _training_style_views(patch, num_views, seed + patch_index)
+            valid_views = valid_patch.expand(num_views, -1, -1, -1, -1)
             adapter._cac_features.clear()
             with torch.no_grad(), torch.autocast(
                 device_type=adapter.device.type, enabled=adapter.device.type == "cuda"
@@ -238,24 +238,38 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 prompt = adapter._text(adapter.initial_soft_prompt, num_views)
                 logits = adapter.model(views, prompt)
             flat_case_ids = [case_key] * num_views
+            current_text_features = adapter._cac_features["text"]
             _quality, cac, semantic = adapter._quality_scores(
                 adapter._cac_features["vision"],
                 adapter._cac_features["text"],
                 logits,
                 flat_case_ids,
+                spatial_valid=valid_views,
             )
+            # SAAF evidence is audited for both modes.  Legacy purity/TSE
+            # details are intentionally not reused: they are prototype-based,
+            # whereas this audit always measures the frozen ``liver`` anchor.
+            if adapter.quality_metric == "saaf":
+                saaf_details = semantic
+            else:
+                saaf_details = adapter._saaf_quality(
+                    adapter._cac_features["vision"], logits, valid_views
+                )
+            if saaf_details is None:
+                raise RuntimeError("SAAF audit did not produce anchor evidence details")
+            semantic = saaf_details
             probability = torch.sigmoid(logits[:, 0].float())
             evidence = semantic["evidence"]
             similarity = text_similarity_map(
-                adapter._cac_features["vision"], adapter._cac_features["text"]
+                adapter._cac_features["vision"], current_text_features
             )
             evidence = _resize_patch_map(evidence.permute(0, 3, 1, 2), tuple(predictor.patch_size))
             similarity = _resize_patch_map(similarity.permute(0, 3, 1, 2), tuple(predictor.patch_size))
             probability = _resize_patch_map(probability, tuple(predictor.patch_size))
             cac = cac.detach().view(1, num_views)
             semantic_purity = semantic["purity"].detach().view(1, num_views)
-            semantic_completeness = semantic["completeness"].detach().view(1, num_views)
-            semantic_tse = semantic["tse"].detach().view(1, num_views)
+            semantic_coverage = semantic["coverage"].detach().view(1, num_views)
+            semantic_saaf = semantic["saaf"].detach().view(1, num_views)
             clipped = probability.clamp(1e-6, 1 - 1e-6).view(1, num_views, *probability.shape[-3:])
             patch_metrics = {
                 "confidence": torch.maximum(clipped, 1 - clipped).flatten(start_dim=2).mean(dim=2),
@@ -263,8 +277,11 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 "consistency": _soft_consistency(probability).view(1, num_views),
                 "cac": cac,
                 "purity": semantic_purity,
-                "completeness": semantic_completeness,
-                "tse": semantic_tse,
+                "coverage": semantic_coverage,
+                "saaf": semantic_saaf,
+                # Compatibility aliases used by older audit consumers.
+                "completeness": semantic_coverage,
+                "tse": semantic_saaf,
             }
             selected_indices = _selection_indices(patch_metrics)
             patch_slices = slicer[1:]
@@ -287,6 +304,26 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 "location": [[int(s.start), int(s.stop)] for s in patch_slices],
                 "quality": {name: [float(v) for v in patch_metrics[name].view(-1).detach().cpu()] for name in QUALITY_NAMES},
                 "selected_view": selected_indices,
+                "diagnostics": [
+                    {
+                        "case_id": case_key,
+                        "view_id": int(view_index),
+                        "entropy": float(patch_metrics["entropy"].view(-1)[view_index].cpu()),
+                        "cac": float(cac.view(-1)[view_index].cpu()),
+                        "saaf": float(semantic["saaf"].view(-1)[view_index].cpu()),
+                        "purity": float(semantic["purity"].view(-1)[view_index].cpu()),
+                        "coverage": float(semantic["coverage"].view(-1)[view_index].cpu()),
+                        "mu_fg": float(semantic["mu_fg"].view(-1)[view_index].cpu()),
+                        "mu_bg": float(semantic["mu_bg"].view(-1)[view_index].cpu()),
+                        "attention_mad": float(semantic["attention_mad"].view(-1)[view_index].cpu()),
+                        "mask_ratio": float(semantic["mask_ratio"].view(-1)[view_index].cpu()),
+                        "evidence_sum": float(semantic["evidence_sum"].view(-1)[view_index].cpu()),
+                        "valid": bool(semantic["valid"].view(-1)[view_index].cpu()),
+                        "invalid_reason": semantic["invalid_reason"][view_index],
+                        "selected": any(index == view_index for index in selected_indices.values()),
+                    }
+                    for view_index in range(num_views)
+                ],
             }
             if target_padded is not None:
                 # Dice is deliberately evaluated on CPU: fused probabilities
@@ -305,12 +342,12 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                     for name, index in selected_indices.items()
                 }
             patch_records.append(patch_record)
-            prototype_valid += int(semantic["prototype_valid"].sum().cpu())
-            prototype_queries += int(semantic["prototype_valid"].numel())
+            prototype_valid += int(semantic["valid"].sum().cpu())
+            prototype_queries += int(semantic["valid"].numel())
 
         if not bool((gaussian_sum > 0).all()):
             raise RuntimeError("VoxTell sliding-window inference left uncovered voxels")
-        crop = revert_padding[1:]
+        crop = valid_crop
         denominator_np = np.maximum(np.asarray(gaussian_sum[crop]), np.finfo(np.float32).eps)
         fused_logits_np = np.asarray(logit_sum[(..., *crop)], dtype=np.float32).copy()
         fused_logits, probability = _fuse_logits_then_sigmoid(
@@ -330,16 +367,21 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             )
             view_probability = probability[view_index:view_index + 1]
             clipped = view_probability.clamp(1e-6, 1 - 1e-6)
-            purity, completeness, tse = compute_tse_components(
-                view_probability, evidence_view[None], adapter.quality_config["epsilon"]
+            saaf = compute_saaf_quality(
+                view_probability,
+                evidence_view[None],
+                epsilon=adapter.quality_config["epsilon"],
+                min_mass=adapter.quality_config.get("saaf_min_mass", 1e-6),
             )
             full_metrics["confidence"].append(float(torch.maximum(view_probability, 1 - view_probability).mean()))
             full_metrics["entropy"].append(float(-(clipped * clipped.log() + (1 - clipped) * (1 - clipped).log()).mean()))
             full_metrics["consistency"].append(float(full_consistency[view_index]))
             full_metrics["cac"].append(float(_cac_from_full_maps(view_probability, similarity_view[None])[0]))
-            full_metrics["purity"].append(float(purity[0]))
-            full_metrics["completeness"].append(float(completeness[0]))
-            full_metrics["tse"].append(float(tse[0]))
+            full_metrics["purity"].append(float(saaf["purity"][0]))
+            full_metrics["coverage"].append(float(saaf["coverage"][0]))
+            full_metrics["saaf"].append(float(saaf["saaf"][0]))
+            full_metrics["completeness"].append(float(saaf["coverage"][0]))
+            full_metrics["tse"].append(float(saaf["saaf"][0]))
         selected_dice = {}
         for name, value in selected_logit_sum.items():
             selected_np = (np.asarray(value[crop], dtype=np.float32) / denominator_np).copy()
@@ -398,9 +440,9 @@ def _cac_from_full_maps(probability, similarity):
 
 
 def _selection_indices(metrics):
-    result = {name: int(metrics[name].argmax()) for name in ("cac", "tse", "purity", "completeness")}
+    result = {name: int(metrics[name].argmax()) for name in ("cac", "saaf", "purity", "coverage")}
     entropy_rank = average_tie_ranks(metrics["entropy"].view(1, -1), descending=False)
-    for quality in ("cac", "tse"):
+    for quality in ("cac", "saaf"):
         quality_rank = average_tie_ranks(metrics[quality].view(1, -1), descending=True)
         combined = entropy_rank + quality_rank
         result[f"{quality}_entropy"] = int(torch.argsort(combined, dim=1, stable=True)[0, 0])
@@ -474,7 +516,16 @@ def parse_args():
     parser.add_argument("--prompt", default="prostate")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--quality_config", default=str(Path(__file__).parent / "configs" / "tse.json"))
-    parser.add_argument("--quality_mode", choices=("tse",), default="tse")
+    parser.add_argument(
+        "--quality_mode",
+        choices=("cac", "purity", "completeness", "tse"),
+        default="cac",
+        help="Legacy semantic mode; SAAF is selected with --quality_metric saaf",
+    )
+    parser.add_argument(
+        "--quality_metric", choices=("cac", "saaf"), default="saaf",
+        help="Metric used by the adapter view-selection path",
+    )
     parser.add_argument("--w_quality", type=float, default=0.0)
     parser.add_argument("--num_aug_views", type=int, default=9)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -535,6 +586,7 @@ def summarize_quality_audit(
     return {
         "protocol": {
             "quality_mode": args.quality_mode,
+            "quality_metric": getattr(args, "quality_metric", "cac"),
             "w_quality": args.w_quality,
             "w_cac": getattr(args, "w_cac", 0.0),
             "gt_usage": "offline metrics/visualization only",
@@ -587,13 +639,14 @@ def summarize_quality_audit(
 
 def main():
     args = parse_args()
-    if args.quality_mode != "tse" or args.w_quality != 0:
-        raise ValueError("Quality audit requires --quality_mode tse --w_quality 0")
+    if args.w_quality != 0:
+        raise ValueError("Quality audit is evaluation-only; use --w_quality 0")
     seed_everything(args.seed)
     device = torch.device(args.device)
     predictor = build_predictor(args.model_dir, device, args.voxtell_root)
     with torch.no_grad():
         initial_prompt = predictor.embed_text_prompts([args.prompt]).detach()
+        text_anchor = predictor.embed_text_prompts(["liver"]).detach()
     output = Path(args.output)
     adapter_args = argparse.Namespace(
         **vars(args),
@@ -603,10 +656,17 @@ def main():
         amp_init_scale=1024.0,
         record_soft_prompt_grad_norm=False,
     )
-    adapter = VoxTellPromptSFDA(predictor.network, initial_prompt, device, adapter_args)
+    adapter = VoxTellPromptSFDA(
+        predictor.network,
+        initial_prompt,
+        device,
+        adapter_args,
+        text_anchor=text_anchor,
+    )
     adapter.predictor = predictor
     train_loader = make_target_loader(args.data_dir, tuple(predictor.patch_size), args.batch_size, args.num_workers)
-    adapter.build_prototype_memory(train_loader)
+    if args.quality_metric != "saaf" and args.quality_mode != "cac":
+        adapter.build_prototype_memory(train_loader)
 
     cases = []
     mixed_views = []

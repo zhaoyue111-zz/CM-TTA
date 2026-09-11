@@ -41,6 +41,10 @@ def load_quality_config(path):
         "evaluation_overlap",
         "evidence_threshold",
         "similarity_histogram_bins",
+        "attention_mad_threshold",
+        "attention_min_valid_positions",
+        "saaf_min_mass",
+        "saaf_text_anchor",
     }
     missing = sorted(required.difference(config))
     if missing:
@@ -59,6 +63,12 @@ def load_quality_config(path):
         raise ValueError("evidence_threshold must be in [0, 1]")
     if int(config["similarity_histogram_bins"]) < 2:
         raise ValueError("similarity_histogram_bins must be at least 2")
+    if str(config["saaf_text_anchor"]).lower() != "liver":
+        raise ValueError("SAAF text anchor is fixed to the exact prompt 'liver'")
+    if float(config["attention_mad_threshold"]) < 0 or int(config["attention_min_valid_positions"]) < 2:
+        raise ValueError("attention MAD threshold must be non-negative and valid positions >= 2")
+    if float(config["saaf_min_mass"]) <= 0:
+        raise ValueError("saaf_min_mass must be positive")
     if float(config["temperature"]) <= 0 or float(config["epsilon"]) <= 0:
         raise ValueError("temperature and epsilon must be positive")
     if not 0 <= float(config["background_probability_threshold"]) <= 1:
@@ -100,6 +110,229 @@ def text_similarity_map(vision_features, text_features):
     # helper well-defined if its projection exposes more than one prompt token.
     text = F.normalize(text_features.float().mean(dim=0), dim=-1)
     return (vision * text[:, None, None, None, :]).sum(dim=-1)
+
+
+def first_cross_attention(
+    model,
+    vision_features,
+    text_anchor,
+    text_token_mask=None,
+    memory_key_padding_mask=None,
+):
+    """Recompute VoxTell decoder layer-0 cross-attention without approximations.
+
+    ``vision_features`` must be the output of VoxTell's
+    ``project_bottleneck_embed`` hook, i.e. ``(B,H,W,D,C)``.  The operation
+    mirrors VoxTell's own decoder: project the anchor with
+    ``project_text_embed``, use the decoder layer's ``norm2``, add the model's
+    ``pos_embed`` to keys, and call the original ``multihead_attn`` with
+    ``average_attn_weights=False``.  No decoder parameters are copied or
+    modified, and the returned attention is detached by the caller.
+    """
+    if not torch.is_tensor(vision_features) or vision_features.ndim != 5:
+        raise ValueError(f"Expected projected image memory (B,H,W,D,C), got {getattr(vision_features, 'shape', None)}")
+    base = getattr(model, "_orig_mod", model)
+    base = getattr(base, "module", base)
+    required = ("project_text_embed", "transformer_decoder", "pos_embed")
+    missing = [name for name in required if not hasattr(base, name)]
+    if missing:
+        raise AttributeError("VoxTell model lacks first cross-attention components: " + ", ".join(missing))
+    batch_size = vision_features.shape[0]
+    channels = vision_features.shape[-1]
+    memory_spatial = tuple(int(value) for value in vision_features.shape[1:-1])
+    # Keep the projected-memory dtype used by VoxTell's forward (autocast may
+    # make this fp16/bf16); the attention module therefore sees identical
+    # inputs and scaling.  Robust statistics are promoted to fp32 below.
+    memory = vision_features.reshape(batch_size, -1, channels).permute(1, 0, 2)
+    anchor = torch.as_tensor(text_anchor, device=vision_features.device).float()
+    if anchor.ndim == 4:
+        if anchor.shape[2] != 1:
+            raise ValueError(f"Expected anchor shape (B,N,1,C), got {tuple(anchor.shape)}")
+        anchor = anchor.squeeze(2)
+    if anchor.ndim != 3 or anchor.shape[-1] != getattr(base, "text_embedding_dim", anchor.shape[-1]):
+        raise ValueError(f"Expected raw text anchor (B,N,C), got {tuple(anchor.shape)}")
+    if anchor.shape[0] == 1:
+        anchor = anchor.expand(batch_size, -1, -1)
+    if anchor.shape[0] != batch_size:
+        raise ValueError("Text anchor batch must be one or match image memory batch")
+    tokens = anchor.shape[1]
+    tgt = base.project_text_embed(anchor.permute(1, 0, 2))
+    position = base.pos_embed.to(device=vision_features.device, dtype=memory.dtype)
+    if position.shape[0] != memory.shape[0]:
+        raise ValueError(
+            "VoxTell positional encoding and projected image memory disagree: "
+            f"{position.shape[0]} vs {memory.shape[0]}"
+        )
+    layer = base.transformer_decoder.layers[0]
+    query_pos = None
+    if getattr(layer, "normalize_before", False):
+        query = layer.norm2(tgt)
+    else:
+        # Match VoxTell's post-norm branch exactly, including its self-attention
+        # call before norm1.  The returned self-attention weights are discarded.
+        layer.self_attn(
+            layer.with_pos_embed(tgt, query_pos),
+            layer.with_pos_embed(tgt, query_pos),
+            tgt,
+            key_padding_mask=None,
+            need_weights=False,
+        )
+        query = layer.norm1(tgt)
+    key = layer.with_pos_embed(memory, position)
+    try:
+        _, attention = layer.multihead_attn(
+            query=layer.with_pos_embed(query, query_pos),
+            key=key,
+            value=memory,
+            key_padding_mask=memory_key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+    except TypeError as error:
+        raise RuntimeError(
+            "VoxTell first cross-attention module does not support per-head weights"
+        ) from error
+    if attention.ndim != 4:
+        raise RuntimeError(
+            "Expected per-head cross-attention shape (B,heads,tokens,spatial), "
+            f"got {tuple(attention.shape)}"
+        )
+    if attention.shape[0] != batch_size or attention.shape[2] != tokens or attention.shape[3] != memory.shape[0]:
+        raise RuntimeError(
+            "Unexpected first cross-attention dimensions: "
+            f"{tuple(attention.shape)} for memory {tuple(memory.shape)}"
+        )
+    if text_token_mask is None:
+        text_token_mask = torch.ones((batch_size, tokens), dtype=torch.bool, device=attention.device)
+    else:
+        text_token_mask = torch.as_tensor(text_token_mask, device=attention.device).bool()
+        if text_token_mask.ndim == 1:
+            text_token_mask = text_token_mask.unsqueeze(0).expand(batch_size, -1)
+        if tuple(text_token_mask.shape) != (batch_size, tokens):
+            raise ValueError("text_token_mask must have shape (B,tokens)")
+    return attention, memory_spatial, text_token_mask
+
+
+def attention_evidence_map(
+    attention,
+    spatial_shape,
+    spatial_valid=None,
+    text_token_mask=None,
+    eps=1e-6,
+    mad_threshold=1e-3,
+    min_valid_positions=2,
+):
+    """Robust per-head/token log-attention evidence and validity diagnostics."""
+    if attention.ndim != 4:
+        raise ValueError(f"Expected attention (B,heads,tokens,spatial), got {tuple(attention.shape)}")
+    batch_size, heads, tokens, spatial = attention.shape
+    spatial_shape = tuple(int(value) for value in spatial_shape)
+    if int(torch.tensor(spatial_shape).prod()) != spatial:
+        raise ValueError("Attention spatial dimension does not match spatial_shape")
+    finite_attention = torch.isfinite(attention)
+    if spatial_valid is None:
+        spatial_valid = torch.ones((batch_size, spatial), dtype=torch.bool, device=attention.device)
+    else:
+        spatial_valid = torch.as_tensor(spatial_valid, device=attention.device).bool().reshape(batch_size, spatial)
+    if text_token_mask is None:
+        text_token_mask = torch.ones((batch_size, tokens), dtype=torch.bool, device=attention.device)
+    else:
+        text_token_mask = torch.as_tensor(text_token_mask, device=attention.device).bool()
+    log_attention = torch.log(attention.float().clamp_min(float(eps)))
+    evidence = torch.zeros_like(log_attention)
+    mad_values = torch.zeros((batch_size, heads, tokens), dtype=log_attention.dtype, device=log_attention.device)
+    valid_views = torch.ones(batch_size, dtype=torch.bool, device=attention.device)
+    invalid_reasons = [None for _ in range(batch_size)]
+    for batch_index in range(batch_size):
+        for head_index in range(heads):
+            for token_index in range(tokens):
+                mask = spatial_valid[batch_index] & finite_attention[batch_index, head_index, token_index]
+                if not bool(text_token_mask[batch_index, token_index]):
+                    continue
+                if int(mask.sum()) < int(min_valid_positions):
+                    valid_views[batch_index] = False
+                    invalid_reasons[batch_index] = "insufficient_valid_spatial_positions"
+                    continue
+                values = log_attention[batch_index, head_index, token_index, mask]
+                median = torch.median(values)
+                mad = torch.median(torch.abs(values - median))
+                mad_values[batch_index, head_index, token_index] = mad
+                if not bool(torch.isfinite(median) & torch.isfinite(mad)):
+                    valid_views[batch_index] = False
+                    invalid_reasons[batch_index] = "nonfinite_attention_statistics"
+                    continue
+                if float(mad) < float(mad_threshold):
+                    valid_views[batch_index] = False
+                    invalid_reasons[batch_index] = "attention_mad_below_threshold"
+                    continue
+                z = (log_attention[batch_index, head_index, token_index] - median) / (1.4826 * mad + float(eps))
+                evidence[batch_index, head_index, token_index] = torch.where(mask, z.relu(), torch.zeros_like(z))
+    valid_views &= text_token_mask.any(dim=1)
+    token_count = text_token_mask.sum(dim=1).clamp_min(1).view(batch_size, 1, 1)
+    evidence = evidence * text_token_mask[:, None, :, None].float()
+    evidence = evidence.sum(dim=(1, 2)) / (heads * token_count.squeeze(-1).squeeze(-1).float()).view(batch_size, 1)
+    evidence = evidence.view(batch_size, *spatial_shape)
+    evidence = torch.nan_to_num(evidence, nan=0.0, posinf=0.0, neginf=0.0)
+    evidence = torch.where(valid_views.view(batch_size, *([1] * len(spatial_shape))), evidence, torch.zeros_like(evidence))
+    mad_summary = mad_values.masked_fill(~text_token_mask[:, None, :], float("nan"))
+    attention_mad = torch.nanmean(mad_summary, dim=(1, 2))
+    attention_mad = torch.nan_to_num(attention_mad, nan=0.0, posinf=0.0, neginf=0.0)
+    for index in range(batch_size):
+        if not bool(valid_views[index]) and invalid_reasons[index] is None:
+            invalid_reasons[index] = "invalid_attention"
+    return evidence, valid_views, attention_mad, invalid_reasons
+
+
+def compute_saaf_quality(probability, evidence, epsilon=1e-6, min_mass=1e-6):
+    """Compute SAAF purity/coverage F-score with explicit invalid cases."""
+    if probability.shape != evidence.shape:
+        raise ValueError(f"Probability/evidence shape mismatch: {probability.shape} vs {evidence.shape}")
+    probability = torch.nan_to_num(probability.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+    evidence = torch.nan_to_num(evidence.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    mask_mass = probability.flatten(start_dim=1).sum(dim=1)
+    background_mass = (1.0 - probability).flatten(start_dim=1).sum(dim=1)
+    evidence_sum = evidence.flatten(start_dim=1).sum(dim=1)
+    valid = (
+        torch.isfinite(mask_mass)
+        & torch.isfinite(background_mass)
+        & torch.isfinite(evidence_sum)
+        & (mask_mass > float(min_mass))
+        & (background_mass > float(min_mass))
+        & (evidence_sum > float(min_mass))
+    )
+    product = (probability * evidence).flatten(start_dim=1).sum(dim=1)
+    mu_fg = product / (mask_mass + float(epsilon))
+    mu_bg = ((1.0 - probability) * evidence).flatten(start_dim=1).sum(dim=1) / (background_mass + float(epsilon))
+    purity = mu_fg / (mu_fg + mu_bg + float(epsilon))
+    coverage = product / (evidence_sum + float(epsilon))
+    saaf = 2 * purity * coverage / (purity + coverage + float(epsilon))
+    outputs = {
+        "purity": purity,
+        "coverage": coverage,
+        "saaf": saaf,
+        "mu_fg": mu_fg,
+        "mu_bg": mu_bg,
+        "mask_ratio": probability.mean(dim=tuple(range(1, probability.ndim))),
+        "evidence_sum": evidence_sum,
+        "valid": valid,
+    }
+    for name, value in outputs.items():
+        if torch.is_tensor(value):
+            outputs[name] = torch.where(valid, torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0), torch.zeros_like(value))
+    invalid_reasons = []
+    for index in range(probability.shape[0]):
+        if bool(valid[index]):
+            invalid_reasons.append(None)
+        elif float(evidence_sum[index]) <= float(min_mass):
+            invalid_reasons.append("evidence_mass_too_small")
+        elif float(mask_mass[index]) <= float(min_mass):
+            invalid_reasons.append("empty_soft_mask")
+        elif float(background_mass[index]) <= float(min_mass):
+            invalid_reasons.append("near_all_foreground_mask")
+        else:
+            invalid_reasons.append("nonfinite_saaf_inputs")
+    outputs["invalid_reason"] = invalid_reasons
+    return outputs
 
 
 def probability_on_feature_grid(logits, spatial_shape):

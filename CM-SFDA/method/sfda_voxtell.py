@@ -8,6 +8,7 @@ embedding. During adaptation the only optimizer parameter is the free
 from __future__ import annotations
 
 import json
+import csv
 from pathlib import Path
 from typing import Optional
 
@@ -21,9 +22,13 @@ try:
         QUALITY_MODES,
         SemanticPrototypeMemory,
         average_tie_ranks,
+        attention_evidence_map,
+        compute_saaf_quality,
         compute_semantic_quality,
         extract_case_seed_statistics,
+        first_cross_attention,
         load_quality_config,
+        mask_on_feature_grid,
         summarize_similarity_distribution,
     )
 except ImportError:  # Compatibility with direct ``from sfda_voxtell import ...``.
@@ -31,9 +36,13 @@ except ImportError:  # Compatibility with direct ``from sfda_voxtell import ...`
         QUALITY_MODES,
         SemanticPrototypeMemory,
         average_tie_ranks,
+        attention_evidence_map,
+        compute_saaf_quality,
         compute_semantic_quality,
         extract_case_seed_statistics,
+        first_cross_attention,
         load_quality_config,
+        mask_on_feature_grid,
         summarize_similarity_distribution,
     )
 
@@ -155,6 +164,7 @@ class VoxTellPromptSFDA:
         device,
         args,
         qwen_text_encoder: Optional[nn.Module] = None,
+        text_anchor: Optional[torch.Tensor] = None,
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -190,8 +200,17 @@ class VoxTellPromptSFDA:
         self.soft_prompt_embedding = nn.Parameter(initial_soft_prompt.clone())
         self.initial_soft_prompt = initial_soft_prompt.clone()
         self.teacher_soft_prompt = initial_soft_prompt.clone()
+        self.text_anchor = (initial_soft_prompt if text_anchor is None else text_anchor).detach().to(
+            device=device, dtype=torch.float32
+        )
         self.device, self.args = device, args
         self.quality_mode = str(getattr(args, "quality_mode", "cac")).lower()
+        requested_metric = getattr(args, "quality_metric", None)
+        self.quality_metric = str(requested_metric or "cac").lower()
+        if self.quality_metric not in ("cac", "saaf"):
+            raise ValueError("quality_metric must be 'cac' or 'saaf'")
+        if self.quality_metric == "saaf" and float(getattr(args, "w_quality", 0.0)) != 0.0:
+            raise ValueError("SAAF is evaluation-only in this version; use w_quality=0")
         if self.quality_mode not in QUALITY_MODES:
             raise ValueError(
                 f"quality_mode must be one of {QUALITY_MODES}, got {self.quality_mode!r}"
@@ -208,6 +227,8 @@ class VoxTellPromptSFDA:
             self.quality_config["num_prototypes"]
         )
         self.prototype_diagnostics = {}
+        self.quality_diagnostics = []
+        self._last_quality_batch_valid = None
         self.optimizer = torch.optim.AdamW(
             [self.soft_prompt_embedding], lr=args.lr, weight_decay=args.weight_decay
         )
@@ -372,8 +393,56 @@ class VoxTellPromptSFDA:
             ),
         )
 
-    def _quality_scores(self, vision_features, text_features, logits, case_ids):
-        cac = compute_cac_score(vision_features, text_features, logits)
+    @torch.no_grad()
+    def _saaf_quality(self, vision_features, logits, spatial_valid=None):
+        """Evaluate frozen ``liver`` anchor evidence on the current patch."""
+        attention, spatial_shape, token_mask = first_cross_attention(
+            self.model,
+            vision_features,
+            self.text_anchor,
+        )
+        feature_valid = None
+        if spatial_valid is not None:
+            if spatial_valid.ndim == 4:
+                spatial_valid = spatial_valid.unsqueeze(1)
+            feature_valid = mask_on_feature_grid(
+                spatial_valid, vision_features.shape[1:-1]
+            ).flatten(start_dim=1)
+        evidence, attention_valid, attention_mad, invalid_reasons = attention_evidence_map(
+            attention,
+            spatial_shape,
+            spatial_valid=feature_valid,
+            text_token_mask=token_mask,
+            eps=float(self.quality_config["epsilon"]),
+            mad_threshold=float(self.quality_config.get("attention_mad_threshold", 1e-3)),
+            min_valid_positions=int(self.quality_config.get("attention_min_valid_positions", 2)),
+        )
+        probability = torch.sigmoid(logits[:, 0].float()).permute(0, 2, 3, 1)
+        quality = compute_saaf_quality(
+            probability,
+            evidence,
+            epsilon=float(self.quality_config["epsilon"]),
+            min_mass=float(self.quality_config.get("saaf_min_mass", 1e-6)),
+        )
+        valid = quality["valid"] & attention_valid
+        quality["valid"] = valid
+        for index in range(len(invalid_reasons)):
+            if not bool(attention_valid[index]):
+                quality["invalid_reason"][index] = invalid_reasons[index]
+        for name, value in quality.items():
+            if torch.is_tensor(value):
+                quality[name] = torch.where(valid, value, torch.zeros_like(value))
+        quality["evidence"] = evidence
+        quality["attention_mad"] = attention_mad
+        return quality
+
+    def _quality_scores(
+        self, vision_features, text_features, logits, case_ids, spatial_valid=None
+    ):
+        cac = torch.nan_to_num(compute_cac_score(vision_features, text_features, logits))
+        if self.quality_metric == "saaf":
+            saaf = self._saaf_quality(vision_features, logits, spatial_valid)
+            return saaf["saaf"], cac, saaf
         semantic = None
         if self.quality_mode != "cac":
             semantic = self._semantic_quality(vision_features, logits, case_ids)
@@ -638,21 +707,91 @@ class VoxTellPromptSFDA:
             flat_case_ids = [
                 case_id for case_id in case_ids for _ in range(num_views)
             ]
-            scores, _, _ = self._quality_scores(
+            scores, cac_scores, quality_details = self._quality_scores(
                 self._cac_features["vision"],
                 self._cac_features["text"],
                 flat_logits,
                 flat_case_ids,
             )
             scores = scores.view(batch_size, num_views)
-            return select_cac_views(scores, probabilities, self.args.selection_p)
+            if quality_details is not None and self.quality_metric == "saaf":
+                valid_matrix = quality_details["valid"].view(batch_size, num_views)
+                self._last_quality_batch_valid = valid_matrix.any(dim=1)
+                scores = scores.masked_fill(~valid_matrix, float("-inf"))
+            else:
+                self._last_quality_batch_valid = torch.ones(
+                    batch_size, dtype=torch.bool, device=scores.device
+                )
+            selected = select_cac_views(scores, probabilities, self.args.selection_p)
+            entropy = _binary_view_entropy(
+                probabilities.reshape(batch_size * num_views, *probabilities.shape[2:])
+            ).view(batch_size, num_views)
+            if quality_details is not None and self.quality_metric == "saaf":
+                details = {
+                    name: value.detach().view(batch_size, num_views)
+                    for name, value in quality_details.items()
+                    if torch.is_tensor(value) and value.ndim == 1
+                }
+                for batch_index, case_id in enumerate(case_ids):
+                    chosen = set(selected[batch_index].detach().cpu().tolist())
+                    for view_index in range(num_views):
+                        reason = quality_details["invalid_reason"][batch_index * num_views + view_index]
+                        self.quality_diagnostics.append(
+                            {
+                                "case_id": str(case_id),
+                                "view_id": int(view_index),
+                                "entropy": float(entropy[batch_index, view_index].cpu()),
+                                "cac": float(cac_scores.view(batch_size, num_views)[batch_index, view_index].cpu()),
+                                "saaf": float(details["saaf"][batch_index, view_index].cpu()),
+                                "purity": float(details["purity"][batch_index, view_index].cpu()),
+                                "coverage": float(details["coverage"][batch_index, view_index].cpu()),
+                                "mu_fg": float(details["mu_fg"][batch_index, view_index].cpu()),
+                                "mu_bg": float(details["mu_bg"][batch_index, view_index].cpu()),
+                                "attention_mad": float(details["attention_mad"][batch_index, view_index].cpu()),
+                                "mask_ratio": float(details["mask_ratio"][batch_index, view_index].cpu()),
+                                "evidence_sum": float(details["evidence_sum"][batch_index, view_index].cpu()),
+                                "valid": bool(details["valid"][batch_index, view_index].cpu()),
+                                "invalid_reason": reason,
+                                "selected": view_index in chosen,
+                            }
+                        )
+            return selected
+
+    def _quality_invalid_result(self):
+        values = {
+            "loss": 0.0,
+            "bce": 0.0,
+            "dice": 0.0,
+            "entropy": 0.0,
+            "cac": 0.0,
+            "cac_loss": 0.0,
+            "quality": 0.0,
+            "quality_loss": 0.0,
+            "coverage": 0.0,
+            "selected_views": 0.0,
+            "update_skipped": 1.0,
+            "quality_invalid": 1.0,
+        }
+        if self.record_soft_prompt_grad_norm:
+            values["soft_prompt_grad_norm"] = 0.0
+        if self.quality_metric == "saaf":
+            values.update(
+                {
+                    "purity": 0.0,
+                    "completeness": 0.0,
+                    "tse": 0.0,
+                    "saaf": 0.0,
+                    "prototype_valid": 0.0,
+                }
+            )
+        return values
 
     def adapt_batch(self, weak, strong, case_ids=None):
         weak = weak.to(self.device, non_blocking=True)
         strong = strong.to(self.device, non_blocking=True)
         batch_size = weak.shape[0]
         case_ids = self._normalize_case_ids(case_ids, batch_size)
-        if self.quality_mode != "cac" and not len(self.prototype_memory):
+        if self.quality_metric != "saaf" and self.quality_mode != "cac" and not len(self.prototype_memory):
             raise RuntimeError("TSE mode requires build_prototype_memory() before adaptation")
         num_aug_views = max(1, int(getattr(self.args, "num_aug_views", 9)))
 
@@ -678,6 +817,9 @@ class VoxTellPromptSFDA:
         # with autograd so the 3-D network does not retain activations for all
         # augmented views at once.
         selected = self._select_views(views, case_ids)
+        if self.quality_metric == "saaf" and self._last_quality_batch_valid is not None:
+            if not bool(self._last_quality_batch_valid.all()):
+                return self._quality_invalid_result()
         gather_shape = (batch_size, selected.shape[1]) + (1,) * (views.ndim - 2)
         selected_views = views.gather(
             1,
@@ -719,9 +861,13 @@ class VoxTellPromptSFDA:
             loss_cac = cac_loss(selected_cac)
             loss_quality = -selected_quality.mean()
             quality_weight = (
-                self.args.w_cac
-                if self.quality_mode == "cac"
-                else float(getattr(self.args, "w_quality", 0.0))
+                0.0
+                if self.quality_metric == "saaf"
+                else (
+                    self.args.w_cac
+                    if self.quality_mode == "cac"
+                    else float(getattr(self.args, "w_quality", 0.0))
+                )
             )
             loss = (
                 self.args.w_seg * segmentation
@@ -813,7 +959,15 @@ class VoxTellPromptSFDA:
         }
         if self.record_soft_prompt_grad_norm:
             values["soft_prompt_grad_norm"] = soft_prompt_grad_norm
-        if semantic is not None:
+        if semantic is not None and self.quality_metric == "saaf":
+            values.update(
+                purity=float(semantic["purity"].detach().mean().cpu()),
+                completeness=float(semantic["coverage"].detach().mean().cpu()),
+                tse=float(semantic["saaf"].detach().mean().cpu()),
+                saaf=float(semantic["saaf"].detach().mean().cpu()),
+                prototype_valid=0.0,
+            )
+        elif semantic is not None:
             values.update(
                 purity=float(semantic["purity"].detach().mean().cpu()),
                 completeness=float(semantic["completeness"].detach().mean().cpu()),
@@ -826,15 +980,17 @@ class VoxTellPromptSFDA:
 
     def fit(self, loader, epoch_end_callback=None):
         history = []
-        if self.quality_mode != "cac":
+        if self.quality_mode != "cac" and self.quality_metric != "saaf":
             self.build_prototype_memory(loader)
         metric_names = [
             "loss", "bce", "dice", "entropy", "cac", "cac_loss", "quality",
             "quality_loss", "coverage",
             "selected_views", "update_skipped"
         ]
-        if self.quality_mode != "cac":
+        if self.quality_mode != "cac" or self.quality_metric == "saaf":
             metric_names.extend(("purity", "completeness", "tse", "prototype_valid"))
+            if self.quality_metric == "saaf":
+                metric_names.append("saaf")
         if self.record_soft_prompt_grad_norm:
             metric_names.append("soft_prompt_grad_norm")
         for epoch in range(1, self.args.epochs + 1):
@@ -851,7 +1007,7 @@ class VoxTellPromptSFDA:
                     print(
                         f"epoch {epoch}/{self.args.epochs} step {step}/{len(loader)} "
                         f"loss={totals['loss']/step:.4f} "
-                        f"{self.quality_mode}={totals['quality']/step:.4f} "
+                        f"{self.quality_metric}={totals['quality']/step:.4f} "
                         f"coverage={totals['coverage']/step:.3f} "
                         f"skipped={int(totals['update_skipped'])}"
                     )
@@ -861,6 +1017,18 @@ class VoxTellPromptSFDA:
             print(json.dumps(row, ensure_ascii=False))
             if epoch_end_callback is not None:
                 epoch_end_callback(epoch, row, history)
+        if self.quality_metric == "saaf" and self.quality_diagnostics:
+            output_dir = Path(getattr(self.args, "output_dir", "."))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "saaf_diagnostics.json").write_text(
+                json.dumps(self.quality_diagnostics, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with (output_dir / "saaf_diagnostics.csv").open("w", newline="", encoding="utf-8") as file:
+                fields = list(self.quality_diagnostics[0])
+                writer = csv.DictWriter(file, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(self.quality_diagnostics)
         return history
 
 
@@ -871,6 +1039,7 @@ def save_sfda_checkpoint(path, adapter: VoxTellPromptSFDA, args, history):
             "format": "voxtell-sfda-prompt-tse-v4",
             "soft_prompt_embedding": adapter.soft_prompt_embedding.detach().cpu(),
             "initial_soft_prompt": adapter.initial_soft_prompt.detach().cpu(),
+            "text_anchor": adapter.text_anchor.detach().cpu(),
             "teacher_soft_prompt": adapter.teacher_soft_prompt.detach().cpu(),
             # Legacy aliases preserve loading compatibility for v1/v2 tools.
             "prompt_embedding": adapter.soft_prompt_embedding.detach().cpu(),
@@ -905,6 +1074,8 @@ def load_sfda_checkpoint(path, adapter: VoxTellPromptSFDA):
     adapter.soft_prompt_embedding.data.copy_(soft_prompt.to(adapter.device))
     if "initial_soft_prompt" in checkpoint:
         adapter.initial_soft_prompt.copy_(checkpoint["initial_soft_prompt"].to(adapter.device))
+    if "text_anchor" in checkpoint:
+        adapter.text_anchor.copy_(checkpoint["text_anchor"].to(adapter.device))
     adapter.teacher_soft_prompt.copy_(teacher_soft_prompt.to(adapter.device))
     if "prototype_memory" in checkpoint:
         adapter.prototype_memory.load_state_dict(checkpoint["prototype_memory"])

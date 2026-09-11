@@ -36,7 +36,9 @@ from sfda_voxtell import (  # noqa: E402
 )
 from semantic_quality import (  # noqa: E402
     SemanticPrototypeMemory,
+    attention_evidence_map,
     average_tie_ranks,
+    compute_saaf_quality,
     compute_tse_components,
 )
 from data.sfda_voxtell import (  # noqa: E402
@@ -396,6 +398,36 @@ class SoftPromptOnlyTests(unittest.TestCase):
             values = compute_tse_components(probability, evidence)
             self.assertTrue(all(torch.isfinite(value).all() for value in values))
             self.assertTrue(all(torch.equal(value, torch.zeros_like(value)) for value in values))
+
+    def test_saaf_is_high_when_attention_evidence_is_inside_mask(self):
+        mask = torch.tensor([[0.95, 0.9, 0.05, 0.05]])
+        evidence = torch.tensor([[3.0, 2.0, 0.0, 0.0]])
+        result = compute_saaf_quality(mask, evidence)
+        self.assertTrue(bool(result["valid"].item()))
+        self.assertGreater(float(result["saaf"].item()), 0.8)
+
+    def test_saaf_coverage_drops_when_evidence_is_outside_mask(self):
+        mask = torch.tensor([[0.95, 0.05, 0.05, 0.05]])
+        inside = compute_saaf_quality(mask, torch.tensor([[3.0, 0.0, 0.0, 0.0]]))
+        outside = compute_saaf_quality(mask, torch.tensor([[0.0, 3.0, 3.0, 0.0]]))
+        self.assertLess(float(outside["coverage"].item()), float(inside["coverage"].item()))
+        self.assertLess(float(outside["saaf"].item()), float(inside["saaf"].item()))
+
+    def test_saaf_purity_drops_for_mask_without_evidence(self):
+        evidence = torch.tensor([[3.0, 0.0, 0.0, 0.0]])
+        tight = compute_saaf_quality(torch.tensor([[0.95, 0.05, 0.05, 0.05]]), evidence)
+        broad = compute_saaf_quality(torch.tensor([[0.95, 0.95, 0.95, 0.05]]), evidence)
+        self.assertLess(float(broad["purity"].item()), float(tight["purity"].item()))
+        self.assertLess(float(broad["saaf"].item()), float(tight["saaf"].item()))
+
+    def test_uniform_attention_is_invalid(self):
+        attention = torch.full((1, 2, 1, 8), 1.0 / 8.0)
+        _, valid, mad, reasons = attention_evidence_map(
+            attention, (2, 2, 2), mad_threshold=1e-5
+        )
+        self.assertFalse(bool(valid.item()))
+        self.assertEqual(reasons[0], "attention_mad_below_threshold")
+        self.assertTrue(torch.isfinite(mad).all())
 
     def test_tse_adapter_uses_cross_case_prototypes_without_nan(self):
         model = _TinyVoxTell()

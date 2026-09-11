@@ -57,6 +57,19 @@ python run_sfda_voxtell.py `
 不会把 TSE 加入训练损失。CAC 模式继续使用 `--w_cac`（`--w_contrast` 是兼容别名）。
 视图排序仍沿用原流程的 quality + entropy rank fusion，并列质量使用平均排名。
 
+SAAF 视图选择使用冻结的初始 Qwen "liver" embedding 和 VoxTell 第一层
+Transformer cross-attention（逐 head/token、log-attention median/MAD evidence），不使用
+prototype/memory。命令为：
+
+```bash
+python run_sfda_voxtell.py --data_dir /path/to/data \
+  --voxtell_root /path/to/VoxTell --model_dir /path/to/model \
+  --prompt prostate --quality_metric saaf --quality_mode cac --w_quality 0
+```
+
+若某病例所有候选视图的 attention 或 SAAF 输入无效，该病例本次更新会跳过并记录原因；
+无效视图不会静默回退到 CAC。SAAF 诊断写入 `saaf_diagnostics.json/csv`。
+
 也可以直接使用仓库内的入口脚本（参数依次为 `DATA_DIR VOXTELL_ROOT MODEL_DIR`
 以及可选的 prompt 和输出目录）：
 
@@ -88,7 +101,7 @@ sum/count 会被保留，评价某病例时只聚合其他病例（严格 leave-
 当前增强只有强度变换，空间逆变换为恒等；以后加入翻转/仿射时必须先逆变换再聚合。
 阈值、特征 hook、seed 视图数、温度和 epsilon 全部位于 `configs/tse.json`。
 
-原型和 evidence map 默认停止梯度；quality loss 仅通过当前病例预测概率反向传播。
+原型和 evidence map 默认停止梯度；SAAF 仅用于无梯度视图选择（固定 `w_quality=0`）。
 空 seed、空预测、空 evidence 均回退为有限的 0 分。prototype memory 随 checkpoint
 保存和加载，并在已初始化的 DDP 进程组中按病例同步。v1 保留 prototype 轴但只允许
 一个前景和一个背景 prototype，便于后续扩展多 prototype。
@@ -114,8 +127,8 @@ NPY/NIfTI 预测以及 ASSD/HD95；前几轮不保存 3D 预测，以控制磁�
 D:\anaconda\python.exe -m unittest discover -s CM-SFDA\tests -p "test_*.py" -v
 ```
 
-带 GT 的质量审计是独立脚本。train split 只用于无标签 prototype；test/validation 的
-GT 只在完整体积 sliding-window 推理、evidence coverage 融合和所有质量选择结束后
+带 GT 的质量审计是独立脚本。train split 不参与 SAAF（仅 legacy TSE 模式构建 prototype）；
+test/validation 的 GT 只在完整体积 sliding-window 推理、evidence 融合和所有质量选择结束后
 用于离线指标：
 
 ```powershell
@@ -124,14 +137,14 @@ python evaluate_quality_metrics.py `
   --voxtell_root D:\path\to\VoxTell_from_disk `
   --model_dir D:\path\to\VoxTell_from_disk\model `
   --prompt prostate `
-  --quality_mode tse `
+  --quality_metric saaf --quality_mode cac `
   --w_quality 0
 ```
 
-输出 `quality_audit.json`，包含 confidence、entropy、consistency、CAC、purity、completeness、TSE
-与逐视图真实 Dice 的每病例 Spearman 宏平均及全局补充相关性，并对每个滑窗 patch
-计算质量指标与候选 view GT Dice 的 Spearman；同时输出 CAC/TSE 单独选择、
-CAC+entropy/TSE+entropy 选择（以及 purity/completeness 单独选择）的完整体积 Dice、
+输出 `quality_audit.json`，包含 confidence、entropy、consistency、CAC、purity、coverage、SAAF
+（并保留 completeness/TSE 兼容别名）与逐视图真实 Dice 的每病例 Spearman 宏平均及全局补充相关性，
+并对每个滑窗 patch 计算质量指标与候选 view GT Dice 的 Spearman；同时输出 CAC/SAAF 单独选择、
+CAC+entropy/SAAF+entropy 选择（以及 purity/coverage 单独选择）的完整体积 Dice、
 patch-level selected Dice、patch-best Dice 和非负 patch-oracle gap。固定 view 的最佳完整体积
 Dice 单独记为 `best_fixed_view_dice`，不参与 patch gap。汇总包含 mean selected Dice、
 mean patch-oracle gap、best-fixed-view mean Dice、有效病例数和有效 patch 数。evidence 原图视图还输出空间 Dice、AUROC、AUPRC、均值、
