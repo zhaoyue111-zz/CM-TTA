@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 CM_SFDA = Path(__file__).resolve().parents[1]
@@ -40,6 +41,7 @@ from semantic_quality import (  # noqa: E402
     average_tie_ranks,
     compute_saaf_quality,
     compute_tse_components,
+    first_cross_attention,
 )
 from data.sfda_voxtell import (  # noqa: E402
     fuse_volume_patches,
@@ -57,6 +59,7 @@ from evaluate_quality_metrics import (  # noqa: E402
     _fuse_logits_then_sigmoid,
     _patch_oracle_stats,
     _soft_consistency,
+    _selection_indices,
     binary_auprc,
     binary_auroc,
     evidence_localization_metrics,
@@ -91,6 +94,42 @@ class _TinyVoxTell(nn.Module):
         text = self.project_text_embed(prompt)
         bias = text[0, :, 0].view(image.shape[0], 1, 1, 1, 1)
         return features[:, :1] + bias
+
+
+class _TinyAttentionVoxTell(nn.Module):
+    """Decoder-shaped test double with coarse memory and finer logits."""
+
+    def __init__(self):
+        super().__init__()
+        self.text_embedding_dim = 4
+        self.image_encoder = nn.Conv3d(1, 4, kernel_size=1, bias=False)
+        self.project_bottleneck_embed = _VisionProjection()
+        self.project_text_embed = nn.Linear(4, 4, bias=False)
+        self.pos_embed = nn.Parameter(torch.zeros(32, 1, 4))
+        layer = _TinyAttentionLayer()
+        self.transformer_decoder = nn.Module()
+        self.transformer_decoder.layers = nn.ModuleList([layer])
+
+    def forward(self, image, prompt):
+        features = self.image_encoder(image)
+        self.project_bottleneck_embed(features)
+        text = self.project_text_embed(prompt[:, 0, 0, :])[:, :1].view(
+            image.shape[0], 1, 1, 1, 1
+        )
+        logits = features[:, :1] + text
+        return F.interpolate(logits, scale_factor=2, mode="trilinear", align_corners=False)
+
+
+class _TinyAttentionLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.normalize_before = True
+        self.norm2 = nn.LayerNorm(4)
+        self.multihead_attn = nn.MultiheadAttention(4, 2, dropout=0.0)
+
+    @staticmethod
+    def with_pos_embed(tensor, pos):
+        return tensor if pos is None else tensor + pos
 
 
 class _OverflowScaler:
@@ -428,6 +467,74 @@ class SoftPromptOnlyTests(unittest.TestCase):
         self.assertFalse(bool(valid.item()))
         self.assertEqual(reasons[0], "attention_mad_below_threshold")
         self.assertTrue(torch.isfinite(mad).all())
+
+    def test_first_cross_attention_shape_and_head_normalization(self):
+        model = _TinyAttentionVoxTell().eval()
+        features = torch.randn(1, 4, 4, 2, 4)
+        with torch.no_grad():
+            attention, spatial, token_mask = first_cross_attention(
+                model, features, torch.ones(1, 1, 4)
+            )
+        self.assertEqual(tuple(attention.shape), (1, 2, 1, 32))
+        self.assertEqual(spatial, (4, 4, 2))
+        self.assertEqual(tuple(token_mask.shape), (1, 1))
+        self.assertTrue(torch.allclose(attention.sum(dim=-1), torch.ones(1, 2, 1)))
+
+    def test_saaf_quality_aligns_finer_logits_to_coarse_evidence(self):
+        args = _args(
+            quality_metric="saaf", quality_mode="cac", selection_p=0.1,
+            num_aug_views=3, batch_size=1,
+        )
+        adapter = VoxTellPromptSFDA(
+            _TinyAttentionVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), args,
+            text_anchor=torch.ones(1, 1, 4),
+        )
+        try:
+            image = torch.randn(1, 1, 2, 4, 4)
+            adapter._cac_features.clear()
+            with torch.no_grad():
+                logits = adapter.model(image, adapter._text(adapter.initial_soft_prompt, 1))
+            result = adapter._saaf_quality(
+                adapter._cac_features["vision"], logits
+            )
+            self.assertEqual(tuple(result["evidence"].shape), (1, 4, 4, 2))
+            self.assertTrue(torch.isfinite(result["saaf"]).all())
+        finally:
+            adapter.close()
+
+    def test_invalid_saaf_views_are_not_selected(self):
+        metrics = {
+            name: torch.tensor([[0.1, 0.9, 0.8]])
+            for name in ("cac", "saaf", "purity", "coverage")
+        }
+        metrics["entropy"] = torch.tensor([[0.1, 0.2, 0.3]])
+        selected, skipped = _selection_indices(metrics, torch.tensor([False, True, False]))
+        self.assertFalse(skipped)
+        self.assertTrue(all(index == 1 for index in selected.values()))
+        selected, skipped = _selection_indices(metrics, torch.tensor([False, False, False]))
+        self.assertTrue(skipped)
+        self.assertEqual(selected, {})
+        probabilities = torch.full((1, 3, 1, 2, 2, 2), 0.5)
+        selected = select_cac_views(
+            metrics["saaf"], probabilities, 0.1,
+            valid_mask=torch.tensor([[False, True, False]]),
+        )
+        self.assertTrue(torch.equal(selected, torch.tensor([[1]])))
+        with self.assertRaises(ValueError):
+            select_cac_views(
+                metrics["saaf"], probabilities, 0.1,
+                valid_mask=torch.tensor([[False, False, False]]),
+            )
+
+    def test_saaf_rejects_batch_size_greater_than_one(self):
+        with self.assertRaisesRegex(ValueError, "batch_size=1"):
+            VoxTellPromptSFDA(
+                _TinyAttentionVoxTell(),
+                torch.ones(1, 1, 4),
+                torch.device("cpu"),
+                _args(quality_metric="saaf", batch_size=2, selection_p=0.1),
+                text_anchor=torch.ones(1, 1, 4),
+            )
 
     def test_tse_adapter_uses_cross_case_prototypes_without_nan(self):
         model = _TinyVoxTell()

@@ -225,6 +225,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         evidence_sum = mmap("evidence", (num_views, *padded_shape))
         similarity_sum = mmap("similarity", (num_views, *padded_shape))
         selected_logit_sum = {name: mmap(f"selected_{name}", padded_shape) for name in selected_names}
+        selection_skipped = False
 
         for patch_index, slicer in enumerate(slicers):
             patch = padded[slicer].to(adapter.device, non_blocking=True)
@@ -283,7 +284,10 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 "completeness": semantic_coverage,
                 "tse": semantic_saaf,
             }
-            selected_indices = _selection_indices(patch_metrics)
+            selected_indices, patch_skipped = _selection_indices(
+                patch_metrics, semantic["valid"]
+            )
+            selection_skipped = selection_skipped or patch_skipped
             patch_slices = slicer[1:]
             weight = gaussian.detach().cpu()
             logits_cpu = logits[:, 0].float().detach().cpu()
@@ -295,15 +299,17 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             torch.from_numpy(evidence_sum[(..., *patch_slices)]).add_(evidence_cpu * weight)
             torch.from_numpy(similarity_sum[(..., *patch_slices)]).add_(similarity_cpu * weight)
             torch.from_numpy(gaussian_sum[patch_slices]).add_(weight)
-            for name in selected_names:
-                torch.from_numpy(selected_logit_sum[name][patch_slices]).add_(
-                    logits_cpu[selected_indices[name]] * weight
-                )
+            if not patch_skipped:
+                for name in selected_names:
+                    torch.from_numpy(selected_logit_sum[name][patch_slices]).add_(
+                        logits_cpu[selected_indices[name]] * weight
+                    )
             patch_record = {
                 "patch_index": patch_index,
                 "location": [[int(s.start), int(s.stop)] for s in patch_slices],
                 "quality": {name: [float(v) for v in patch_metrics[name].view(-1).detach().cpu()] for name in QUALITY_NAMES},
                 "selected_view": selected_indices,
+                "selection_skipped": patch_skipped,
                 "diagnostics": [
                     {
                         "case_id": case_key,
@@ -320,7 +326,9 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                         "evidence_sum": float(semantic["evidence_sum"].view(-1)[view_index].cpu()),
                         "valid": bool(semantic["valid"].view(-1)[view_index].cpu()),
                         "invalid_reason": semantic["invalid_reason"][view_index],
-                        "selected": any(index == view_index for index in selected_indices.values()),
+                        "selected": (not patch_skipped) and any(
+                            index == view_index for index in selected_indices.values()
+                        ),
                     }
                     for view_index in range(num_views)
                 ],
@@ -385,7 +393,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         selected_dice = {}
         for name, value in selected_logit_sum.items():
             selected_np = (np.asarray(value[crop], dtype=np.float32) / denominator_np).copy()
-            if target is not None:
+            if target is not None and not selection_skipped:
                 selected_probability = torch.sigmoid(torch.from_numpy(selected_np))
                 selected_dice[name] = float(
                     _dice_per_view(selected_probability[None], target.float())[0]
@@ -395,6 +403,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             "evidence": evidence_original,
             "full_metrics": {name: torch.tensor(values, dtype=torch.float32) for name, values in full_metrics.items()},
             "selected_dice": selected_dice,
+            "selection_skipped": selection_skipped,
             "patch_records": patch_records,
             "prototype_valid_fraction": prototype_valid / prototype_queries if prototype_queries else 0.0,
             "locations": slicers,
@@ -439,14 +448,40 @@ def _cac_from_full_maps(probability, similarity):
     ).flatten(start_dim=1).sum(dim=1) / bg_count
 
 
-def _selection_indices(metrics):
-    result = {name: int(metrics[name].argmax()) for name in ("cac", "saaf", "purity", "coverage")}
-    entropy_rank = average_tie_ranks(metrics["entropy"].view(1, -1), descending=False)
+def _selection_indices(metrics, saaf_valid=None, valid_mask=None):
+    """Select audit views with the same invalid-SAAF rule as training.
+
+    With a validity mask, returns ``(indices, skipped)``.  ``indices`` is empty
+    when every view is invalid; callers must record the skip instead of silently
+    selecting index 0.  Without a mask it retains the historical dict return.
+    The audit currently uses one selected view per patch, so a variable number
+    of valid views is represented by the explicit skip flag rather than padded
+    selections.
+    """
+    if saaf_valid is not None and valid_mask is not None:
+        raise ValueError("Pass only one of saaf_valid or valid_mask")
+    legacy_return = saaf_valid is None and valid_mask is None
+    saaf_valid = valid_mask if valid_mask is not None else saaf_valid
+    names = ("cac", "saaf", "purity", "coverage")
+    if saaf_valid is None:
+        valid = torch.ones_like(metrics["saaf"], dtype=torch.bool)
+    else:
+        valid = torch.as_tensor(saaf_valid, device=metrics["saaf"].device).bool().reshape(-1)
+        if valid.numel() != metrics["saaf"].numel():
+            raise ValueError("saaf_valid must contain one flag per candidate view")
+    if not bool(valid.any()):
+        return ({}, True) if not legacy_return else {}
+    masked_metrics = dict(metrics)
+    for name in names:
+        masked_metrics[name] = metrics[name].clone().masked_fill(~valid, float("-inf"))
+    entropy = metrics["entropy"].clone().masked_fill(~valid, float("inf"))
+    result = {name: int(masked_metrics[name].argmax()) for name in names}
+    entropy_rank = average_tie_ranks(entropy.view(1, -1), descending=False)
     for quality in ("cac", "saaf"):
-        quality_rank = average_tie_ranks(metrics[quality].view(1, -1), descending=True)
+        quality_rank = average_tie_ranks(masked_metrics[quality].view(1, -1), descending=True)
         combined = entropy_rank + quality_rank
         result[f"{quality}_entropy"] = int(torch.argsort(combined, dim=1, stable=True)[0, 0])
-    return result
+    return result if legacy_return else (result, False)
 
 
 def evidence_localization_metrics(evidence, target, threshold):
@@ -513,7 +548,7 @@ def parse_args():
     parser.add_argument("--data_dir", required=True)
     parser.add_argument("--voxtell_root", required=True)
     parser.add_argument("--model_dir", required=True)
-    parser.add_argument("--prompt", default="prostate")
+    parser.add_argument("--prompt", default="liver")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--quality_config", default=str(Path(__file__).parent / "configs" / "tse.json"))
     parser.add_argument(
@@ -641,6 +676,8 @@ def main():
     args = parse_args()
     if args.w_quality != 0:
         raise ValueError("Quality audit is evaluation-only; use --w_quality 0")
+    if args.quality_metric == "saaf" and str(args.prompt).lower() != "liver":
+        raise ValueError("SAAF uses the fixed prompt 'liver'; set --prompt liver")
     seed_everything(args.seed)
     device = torch.device(args.device)
     predictor = build_predictor(args.model_dir, device, args.voxtell_root)

@@ -268,7 +268,7 @@ def parse_args():
     parser.add_argument("--voxtell_root", default=DEFAULT_VOXTELL_ROOT)
     parser.add_argument("--model_dir", default=DEFAULT_MODEL_DIR)
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--prompt", default="prostate")
+    parser.add_argument("--prompt", default="liver")
     parser.add_argument("--output_dir", default="results_/voxtell_sfda")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--epochs", type=int, default=5)
@@ -318,6 +318,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.quality_metric == "saaf" and str(args.prompt).lower() != "liver":
+        raise ValueError("SAAF uses the fixed prompt 'liver'; set --prompt liver")
     if args.eval_only and not args.checkpoint:
         raise ValueError("--eval_only requires --checkpoint")
     if args.eval_interval <= 0:

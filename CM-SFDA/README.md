@@ -28,7 +28,7 @@ python run_sfda_voxtell.py `
   --data_dir D:\path\to\data `
   --voxtell_root D:\path\to\VoxTell_from_disk `
   --model_dir D:\path\to\VoxTell_from_disk\model `
-  --prompt prostate `
+  --prompt liver `
   --epochs 5
 ```
 
@@ -47,7 +47,7 @@ python run_sfda_voxtell.py `
   --data_dir D:\path\to\data `
   --voxtell_root D:\path\to\VoxTell_from_disk `
   --model_dir D:\path\to\VoxTell_from_disk\model `
-  --prompt prostate `
+  --prompt liver `
   --quality_mode tse `
   --quality_config configs\tse.json `
   --w_quality 0
@@ -64,7 +64,7 @@ prototype/memory。命令为：
 ```bash
 python run_sfda_voxtell.py --data_dir /path/to/data \
   --voxtell_root /path/to/VoxTell --model_dir /path/to/model \
-  --prompt prostate --quality_metric saaf --quality_mode cac --w_quality 0
+  --prompt liver --quality_metric saaf --quality_mode cac --w_quality 0
 ```
 
 若某病例所有候选视图的 attention 或 SAAF 输入无效，该病例本次更新会跳过并记录原因；
@@ -74,10 +74,10 @@ python run_sfda_voxtell.py --data_dir /path/to/data \
 以及可选的 prompt 和输出目录）：
 
 ```bash
-bash train_cac.sh /path/to/data /path/to/VoxTell /path/to/model prostate results_/cac
-bash train_tse.sh /path/to/data /path/to/VoxTell /path/to/model prostate results_/tse
+bash train_cac.sh /path/to/data /path/to/VoxTell /path/to/model liver results_/cac
+bash train_tse.sh /path/to/data /path/to/VoxTell /path/to/model liver results_/tse
 # Explicit historical CAC-loss baseline (w_cac=1), if needed:
-bash train_cac_baseline.sh /path/to/data /path/to/VoxTell /path/to/model prostate results_/cac_baseline
+bash train_cac_baseline.sh /path/to/data /path/to/VoxTell /path/to/model liver results_/cac_baseline
 ```
 
 `train_cac.sh` is the fair view-selection-only CAC configuration and explicitly
@@ -136,7 +136,7 @@ python evaluate_quality_metrics.py `
   --data_dir D:\path\to\data `
   --voxtell_root D:\path\to\VoxTell_from_disk `
   --model_dir D:\path\to\VoxTell_from_disk\model `
-  --prompt prostate `
+  --prompt liver `
   --quality_metric saaf --quality_mode cac `
   --w_quality 0
 ```

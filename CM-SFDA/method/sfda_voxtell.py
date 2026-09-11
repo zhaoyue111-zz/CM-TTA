@@ -29,6 +29,7 @@ try:
         first_cross_attention,
         load_quality_config,
         mask_on_feature_grid,
+        probability_on_feature_grid,
         summarize_similarity_distribution,
     )
 except ImportError:  # Compatibility with direct ``from sfda_voxtell import ...``.
@@ -43,6 +44,7 @@ except ImportError:  # Compatibility with direct ``from sfda_voxtell import ...`
         first_cross_attention,
         load_quality_config,
         mask_on_feature_grid,
+        probability_on_feature_grid,
         summarize_similarity_distribution,
     )
 
@@ -125,7 +127,7 @@ def compute_cac_score(vision_features, text_features, logits, fg_threshold=0.5):
     return fg_sim - bg_sim
 
 
-def select_cac_views(cac_scores, probabilities, selection_p):
+def select_cac_views(cac_scores, probabilities, selection_p, valid_mask=None):
     """Rank views using quality + entropy with average ranks for exact ties."""
     if cac_scores.ndim != 2:
         raise ValueError(f"Expected CAC scores (B,V), got {tuple(cac_scores.shape)}")
@@ -139,6 +141,14 @@ def select_cac_views(cac_scores, probabilities, selection_p):
         raise ValueError(f"selection_p must be in (0, 1], got {selection_p}")
 
     batch_size, num_views = cac_scores.shape
+    if valid_mask is not None:
+        valid_mask = torch.as_tensor(valid_mask, device=cac_scores.device).bool()
+        if tuple(valid_mask.shape) != (batch_size, num_views):
+            raise ValueError("valid_mask must have shape (B,V)")
+        keep = max(1, int(num_views * float(selection_p)))
+        if bool((valid_mask.sum(dim=1) < keep).any()):
+            raise ValueError("Fewer valid SAAF views than the requested selection count")
+        cac_scores = cac_scores.masked_fill(~valid_mask, float("-inf"))
     entropy = _binary_view_entropy(
         probabilities.reshape(batch_size * num_views, *probabilities.shape[2:])
     ).view(batch_size, num_views)
@@ -200,9 +210,10 @@ class VoxTellPromptSFDA:
         self.soft_prompt_embedding = nn.Parameter(initial_soft_prompt.clone())
         self.initial_soft_prompt = initial_soft_prompt.clone()
         self.teacher_soft_prompt = initial_soft_prompt.clone()
-        self.text_anchor = (initial_soft_prompt if text_anchor is None else text_anchor).detach().to(
-            device=device, dtype=torch.float32
-        )
+        anchor_source = initial_soft_prompt if text_anchor is None else text_anchor
+        if anchor_source.ndim == 2:
+            anchor_source = anchor_source.unsqueeze(1)
+        self.text_anchor = anchor_source.detach().to(device=device, dtype=torch.float32)
         self.device, self.args = device, args
         self.quality_mode = str(getattr(args, "quality_mode", "cac")).lower()
         requested_metric = getattr(args, "quality_metric", None)
@@ -211,6 +222,21 @@ class VoxTellPromptSFDA:
             raise ValueError("quality_metric must be 'cac' or 'saaf'")
         if self.quality_metric == "saaf" and float(getattr(args, "w_quality", 0.0)) != 0.0:
             raise ValueError("SAAF is evaluation-only in this version; use w_quality=0")
+        if self.quality_metric == "saaf" and str(getattr(args, "prompt", "liver")).lower() != "liver":
+            raise ValueError("SAAF uses the fixed prompt 'liver'; prompt and anchor must match")
+        if self.quality_metric == "saaf":
+            configured_batch = int(getattr(args, "batch_size", 1))
+            if configured_batch != 1:
+                raise ValueError(
+                    "SAAF currently requires batch_size=1 so invalid cases can be skipped independently"
+                )
+            num_views = int(getattr(args, "num_aug_views", 9))
+            keep = max(1, int(num_views * float(getattr(args, "selection_p", 0.1))))
+            if keep != 1:
+                raise ValueError(
+                    "SAAF currently requires selection_p*num_aug_views <= 1; "
+                    "otherwise variable per-case selection would be required"
+                )
         if self.quality_mode not in QUALITY_MODES:
             raise ValueError(
                 f"quality_mode must be one of {QUALITY_MODES}, got {self.quality_mode!r}"
@@ -417,7 +443,7 @@ class VoxTellPromptSFDA:
             mad_threshold=float(self.quality_config.get("attention_mad_threshold", 1e-3)),
             min_valid_positions=int(self.quality_config.get("attention_min_valid_positions", 2)),
         )
-        probability = torch.sigmoid(logits[:, 0].float()).permute(0, 2, 3, 1)
+        probability = probability_on_feature_grid(logits, spatial_shape)
         quality = compute_saaf_quality(
             probability,
             evidence,
@@ -722,7 +748,19 @@ class VoxTellPromptSFDA:
                 self._last_quality_batch_valid = torch.ones(
                     batch_size, dtype=torch.bool, device=scores.device
                 )
-            selected = select_cac_views(scores, probabilities, self.args.selection_p)
+            if self.quality_metric == "saaf" and not bool(self._last_quality_batch_valid.all()):
+                selected = None
+            else:
+                selected = select_cac_views(
+                    scores,
+                    probabilities,
+                    self.args.selection_p,
+                    valid_mask=(
+                        valid_matrix
+                        if self.quality_metric == "saaf"
+                        else None
+                    ),
+                )
             entropy = _binary_view_entropy(
                 probabilities.reshape(batch_size * num_views, *probabilities.shape[2:])
             ).view(batch_size, num_views)
@@ -733,7 +771,11 @@ class VoxTellPromptSFDA:
                     if torch.is_tensor(value) and value.ndim == 1
                 }
                 for batch_index, case_id in enumerate(case_ids):
-                    chosen = set(selected[batch_index].detach().cpu().tolist())
+                    chosen = (
+                        set(selected[batch_index].detach().cpu().tolist())
+                        if selected is not None
+                        else set()
+                    )
                     for view_index in range(num_views):
                         reason = quality_details["invalid_reason"][batch_index * num_views + view_index]
                         self.quality_diagnostics.append(
@@ -790,6 +832,8 @@ class VoxTellPromptSFDA:
         weak = weak.to(self.device, non_blocking=True)
         strong = strong.to(self.device, non_blocking=True)
         batch_size = weak.shape[0]
+        if self.quality_metric == "saaf" and batch_size != 1:
+            raise ValueError("SAAF currently requires runtime batch_size=1")
         case_ids = self._normalize_case_ids(case_ids, batch_size)
         if self.quality_metric != "saaf" and self.quality_mode != "cac" and not len(self.prototype_memory):
             raise RuntimeError("TSE mode requires build_prototype_memory() before adaptation")
@@ -820,6 +864,8 @@ class VoxTellPromptSFDA:
         if self.quality_metric == "saaf" and self._last_quality_batch_valid is not None:
             if not bool(self._last_quality_batch_valid.all()):
                 return self._quality_invalid_result()
+        if selected is None:
+            return self._quality_invalid_result()
         gather_shape = (batch_size, selected.shape[1]) + (1,) * (views.ndim - 2)
         selected_views = views.gather(
             1,
