@@ -74,53 +74,54 @@ def entropy_loss(logits, valid):
 @torch.no_grad()
 def apply_recall_recovery(
     teacher_prob,
-    selected_logits,
+    vote_count,
     selected_pseudo,
     selected_valid,
-    teacher_low=0.3,
-    view_threshold=0.5,
+    teacher_low=0.4,
+    min_view_votes=2,
 ):
-    """Promote teacher-uncertain foreground candidates supported by the selected view.
+    """Promote teacher-uncertain candidates supported by multiple augmented views.
 
     ``teacher_prob`` has shape (B,N,D,H,W), while selected tensors add the view
     axis and have shape (B,K,N,D,H,W). The candidate gate is detached and is
     used only to update the existing pseudo-label and validity tensors.
     """
     teacher_low = float(teacher_low)
-    view_threshold = float(view_threshold)
     if not 0.0 <= teacher_low < 0.5:
         raise ValueError("recovery_teacher_low must be in [0, 0.5)")
-    if not 0.0 <= view_threshold <= 1.0:
-        raise ValueError("recovery_view_threshold must be in [0, 1]")
-    if teacher_prob.ndim < 3 or selected_logits.ndim != teacher_prob.ndim + 1:
+    min_view_votes = int(min_view_votes)
+    if min_view_votes < 1:
+        raise ValueError("recovery_min_view_votes must be positive")
+    if teacher_prob.ndim < 3 or selected_pseudo.ndim != teacher_prob.ndim + 1:
         raise ValueError(
-            "Expected teacher probabilities (B,N,...) and selected logits (B,K,N,...), "
-            f"got {tuple(teacher_prob.shape)} and {tuple(selected_logits.shape)}"
+            "Expected teacher probabilities (B,N,...) and selected labels (B,K,N,...), "
+            f"got {tuple(teacher_prob.shape)} and {tuple(selected_pseudo.shape)}"
         )
-
-    selected_prob = torch.sigmoid(selected_logits.detach().float())
-    if selected_prob.shape[0] != teacher_prob.shape[0] or tuple(
-        selected_prob.shape[2:]
-    ) != tuple(teacher_prob.shape[1:]):
-        raise ValueError("Teacher probabilities and selected logits have incompatible shapes")
-    if selected_pseudo.shape != selected_prob.shape or selected_valid.shape != selected_prob.shape:
-        raise ValueError(
-            "Selected pseudo-labels and validity mask must match selected logits; "
-            f"got {tuple(selected_pseudo.shape)}, {tuple(selected_valid.shape)} and "
-            f"{tuple(selected_prob.shape)}"
-        )
-
-    teacher_by_view = teacher_prob.detach().float().unsqueeze(1).expand_as(selected_prob)
-    candidate = (
-        (teacher_by_view >= teacher_low)
-        & (teacher_by_view < 0.5)
-        & (selected_prob >= view_threshold)
+    if tuple(vote_count.shape) != tuple(teacher_prob.shape):
+        raise ValueError("vote_count must have the same shape as teacher_prob")
+    if selected_pseudo.shape[1] < 1:
+        raise ValueError("selected labels must contain at least one selected view")
+    selected_shape = (
+        teacher_prob.shape[0], selected_pseudo.shape[1], *teacher_prob.shape[1:]
     )
+    if tuple(selected_pseudo.shape) != selected_shape or tuple(selected_valid.shape) != selected_shape:
+        raise ValueError(
+            "Selected pseudo-labels and validity mask must match (B,K,N,...); "
+            f"got {tuple(selected_pseudo.shape)} and {tuple(selected_valid.shape)}"
+        )
+
+    candidate = (
+        (teacher_prob.detach() >= teacher_low)
+        & (teacher_prob.detach() < 0.5)
+        & (vote_count.detach() >= min_view_votes)
+    )
+    candidate_by_selected_view = candidate.unsqueeze(1).expand_as(selected_pseudo)
     recovered_pseudo = selected_pseudo.clone()
     recovered_valid = selected_valid.clone()
-    recovered_pseudo.masked_fill_(candidate, 1.0)
-    recovered_valid.masked_fill_(candidate, 1.0)
+    recovered_pseudo.masked_fill_(candidate_by_selected_view, 1.0)
+    recovered_valid.masked_fill_(candidate_by_selected_view, 1.0)
 
+    # Count the unexpanded volume candidate once, independent of selected-view K.
     candidate_voxels = candidate.sum().to(dtype=torch.float32)
     original_foreground_voxels = (teacher_prob >= 0.5).sum().to(dtype=torch.float32)
     candidate_ratio = candidate_voxels / (original_foreground_voxels + 1e-6)
@@ -397,14 +398,20 @@ class VoxTellPromptSFDA:
         self.enable_recall_recovery = bool(
             getattr(args, "enable_recall_recovery", False)
         )
-        self.recovery_teacher_low = float(getattr(args, "recovery_teacher_low", 0.3))
+        self.recovery_teacher_low = float(getattr(args, "recovery_teacher_low", 0.4))
         self.recovery_view_threshold = float(
             getattr(args, "recovery_view_threshold", 0.5)
         )
+        self.recovery_min_view_votes = int(
+            getattr(args, "recovery_min_view_votes", 2)
+        )
+        self._last_recovery_vote_count = None
         if not 0.0 <= self.recovery_teacher_low < 0.5:
             raise ValueError("recovery_teacher_low must be in [0, 0.5)")
         if not 0.0 <= self.recovery_view_threshold <= 1.0:
             raise ValueError("recovery_view_threshold must be in [0, 1]")
+        if self.recovery_min_view_votes < 1:
+            raise ValueError("recovery_min_view_votes must be positive")
         self.quality_mode = str(getattr(args, "quality_mode", "cac")).lower()
         requested_metric = getattr(args, "quality_metric", None)
         self.quality_metric = str(requested_metric or "cac").lower()
@@ -932,6 +939,7 @@ class VoxTellPromptSFDA:
 
     def _select_views(self, views, case_ids):
         """Rank every view without retaining a backward graph."""
+        self._last_recovery_vote_count = None
         batch_size, num_views = views.shape[:2]
         flat_views = views.reshape(batch_size * num_views, *views.shape[2:])
         self._cac_features.clear()
@@ -994,6 +1002,17 @@ class VoxTellPromptSFDA:
             probabilities = torch.sigmoid(probability_logits).view(
                 batch_size, num_views, *flat_logits.shape[1:]
             )
+            if self.enable_recall_recovery:
+                if self.recovery_min_view_votes > num_views:
+                    raise ValueError(
+                        "recovery_min_view_votes cannot exceed the number of views; "
+                        f"got {self.recovery_min_view_votes} for {num_views} views"
+                    )
+                # Keep only a detached per-voxel vote count; never retain all
+                # view probabilities or their graph for recall recovery.
+                self._last_recovery_vote_count = (
+                    probabilities >= self.recovery_view_threshold
+                ).sum(dim=1).detach()
             flat_case_ids = [
                 case_id for case_id in case_ids for _ in range(num_views)
             ]
@@ -1177,6 +1196,8 @@ class VoxTellPromptSFDA:
         return values
 
     def adapt_batch(self, weak, strong, case_ids=None):
+        # A batch may not reuse vote counts from an earlier selection/update.
+        self._last_recovery_vote_count = None
         weak = weak.to(self.device, non_blocking=True)
         strong = strong.to(self.device, non_blocking=True)
         batch_size = weak.shape[0]
@@ -1210,6 +1231,7 @@ class VoxTellPromptSFDA:
         # augmented views at once.
         selected = self._select_views(views, case_ids)
         if selected is None:
+            self._last_recovery_vote_count = None
             return self._quality_invalid_result()
         gather_shape = (batch_size, selected.shape[1]) + (1,) * (views.ndim - 2)
         selected_views = views.gather(
@@ -1265,6 +1287,12 @@ class VoxTellPromptSFDA:
             candidate_voxels = None
             candidate_ratio = None
             if self.enable_recall_recovery:
+                vote_count = self._last_recovery_vote_count
+                self._last_recovery_vote_count = None
+                if vote_count is None:
+                    raise RuntimeError(
+                        "Recall recovery requires vote_count from the current view selection"
+                    )
                 (
                     selected_pseudo,
                     selected_valid,
@@ -1273,11 +1301,11 @@ class VoxTellPromptSFDA:
                     candidate_ratio,
                 ) = apply_recall_recovery(
                     teacher_prob,
-                    selected_logits,
+                    vote_count,
                     selected_pseudo,
                     selected_valid,
                     teacher_low=self.recovery_teacher_low,
-                    view_threshold=self.recovery_view_threshold,
+                    min_view_votes=self.recovery_min_view_votes,
                 )
             segmentation, bce, dice = masked_segmentation_loss(
                 selected_logits, selected_pseudo, selected_valid

@@ -224,8 +224,9 @@ def _args(**overrides):
         w_cac=1.0,
         w_quality=0.0,
         enable_recall_recovery=False,
-        recovery_teacher_low=0.3,
+        recovery_teacher_low=0.4,
         recovery_view_threshold=0.5,
+        recovery_min_view_votes=2,
         quality_mode="cac",
         quality_config=str(CM_SFDA / "configs" / "tse.json"),
         grad_clip=1.0,
@@ -813,51 +814,60 @@ class SoftPromptOnlyTests(unittest.TestCase):
         finally:
             adapter.close()
 
-    def test_recall_recovery_promotes_only_teacher_candidate_with_view_support(self):
+    def test_recall_recovery_uses_multi_view_votes_and_has_no_gradient(self):
         teacher_prob = torch.tensor(
-            [0.29, 0.30, 0.40, 0.49, 0.50, 0.80], dtype=torch.float32
-        ).view(1, 1, 1, 1, 6)
-        selected_prob = torch.tensor(
-            [0.90, 0.50, 0.49, 0.90, 0.90, 0.90], dtype=torch.float32
-        ).view(1, 1, 1, 1, 1, 6)
-        selected_logits = torch.logit(selected_prob).requires_grad_()
+            [0.39, 0.40, 0.41, 0.45, 0.49, 0.50, 0.80], dtype=torch.float32
+        ).view(1, 1, 1, 1, 7)
+        # The selected view can be below 0.5 as long as enough of all views
+        # support the voxel. A vote count of one is insufficient.
+        vote_count = torch.tensor(
+            [3, 2, 1, 2, 1, 9, 9], dtype=torch.float32
+        ).view_as(teacher_prob).requires_grad_()
         teacher_confidence = torch.maximum(teacher_prob, 1 - teacher_prob)
         selected_pseudo = (teacher_prob >= 0.5).float().unsqueeze(1)
         selected_valid = (teacher_confidence >= 0.7).float().unsqueeze(1)
 
         recovered_pseudo, recovered_valid, candidate, count, ratio = apply_recall_recovery(
             teacher_prob,
-            selected_logits,
+            vote_count,
             selected_pseudo,
             selected_valid,
-            teacher_low=0.3,
-            view_threshold=0.5,
+            teacher_low=0.4,
+            min_view_votes=2,
         )
-        self.assertEqual(candidate.flatten().tolist(), [False, True, False, True, False, False])
-        self.assertEqual(recovered_pseudo.flatten().tolist(), [0, 1, 0, 1, 1, 1])
-        # p_teacher < .3 remains valid background; .3<=p<.5 candidates become
-        # positive+valid only when selected-view probability reaches threshold.
-        self.assertEqual(recovered_valid.flatten().tolist(), [1, 1, 0, 1, 0, 1])
+        self.assertEqual(
+            candidate.flatten().tolist(),
+            [False, True, False, True, False, False, False],
+        )
+        self.assertEqual(
+            recovered_pseudo.flatten().tolist(), [0, 1, 0, 1, 0, 1, 1]
+        )
+        self.assertEqual(
+            recovered_valid.flatten().tolist(), [0, 1, 0, 1, 0, 0, 1]
+        )
         self.assertEqual(float(count.item()), 2.0)
         self.assertAlmostEqual(float(ratio.item()), 1.0, places=5)
         self.assertFalse(candidate.requires_grad)
         self.assertFalse(recovered_pseudo.requires_grad)
         self.assertFalse(recovered_valid.requires_grad)
-        self.assertIsNone(selected_logits.grad)
+        self.assertIsNone(vote_count.grad)
 
-    def test_recall_recovery_is_wired_into_existing_loss_and_logs_metrics(self):
+    def test_recall_recovery_uses_votes_when_selected_view_is_below_threshold(self):
+        import sfda_voxtell
+
         model = _TinyVoxTell()
         with torch.no_grad():
             model.image_encoder.weight.zero_()
             model.image_encoder.weight[0, 0, 0, 0, 0] = 1.0
         args = _args(
             quality_metric="cac",
-            num_aug_views=1,
-            selection_p=1.0,
+            num_aug_views=3,
+            selection_p=0.34,
             confidence_threshold=0.7,
             enable_recall_recovery=True,
-            recovery_teacher_low=0.3,
+            recovery_teacher_low=0.4,
             recovery_view_threshold=0.5,
+            recovery_min_view_votes=2,
             w_cac=0.0,
         )
         adapter = VoxTellPromptSFDA(
@@ -865,24 +875,47 @@ class SoftPromptOnlyTests(unittest.TestCase):
         )
         try:
             teacher_values = torch.tensor(
-                [0.29, 0.30, 0.40, 0.49, 0.50, 0.80], dtype=torch.float32
+                [0.39, 0.41, 0.45, 0.49, 0.50, 0.80], dtype=torch.float32
             )
             weak = torch.logit(teacher_values).view(1, 1, 1, 1, 6)
+            strong_prob = torch.tensor(
+                [0.9, 0.9, 0.9, 0.1, 0.9, 0.9], dtype=torch.float32
+            )
+            extra_prob = torch.tensor(
+                [0.1, 0.1, 0.9, 0.9, 0.9, 0.9], dtype=torch.float32
+            )
+            strong = torch.logit(strong_prob).view_as(weak)
+            extra = torch.logit(extra_prob).view_as(weak)
             with torch.no_grad():
                 adapter.teacher_soft_prompt.zero_()
-                adapter.soft_prompt_embedding.fill_(1.0)
+                adapter.soft_prompt_embedding.zero_()
+            adapter._make_extra_views = lambda _weak, count: [extra][:count]
+
+            def choose_original(scores, probabilities, selection_p):
+                votes = adapter._last_recovery_vote_count
+                self.assertIsNotNone(votes)
+                self.assertFalse(votes.requires_grad)
+                self.assertEqual(votes.flatten().tolist(), [1, 1, 2, 1, 3, 3])
+                return torch.zeros((1, 1), dtype=torch.long)
+
             with mock.patch(
                 "sfda_voxtell.masked_segmentation_loss",
                 wraps=masked_segmentation_loss,
-            ) as segmentation_spy:
-                result = adapter.adapt_batch(weak, weak.clone(), ["case-recovery"])
+            ) as segmentation_spy, mock.patch.object(
+                sfda_voxtell, "select_cac_views", side_effect=choose_original
+            ):
+                result = adapter.adapt_batch(weak, strong, ["case-recovery"])
 
+            # The selected/original view predicts this candidate voxel below
+            # 0.5; its promotion is supported by the other augmented views.
+            self.assertLess(float(torch.sigmoid(model.outputs[-1]).flatten()[2]), 0.5)
             _, actual_pseudo, actual_valid = segmentation_spy.call_args.args[:3]
-            self.assertEqual(actual_pseudo.flatten().tolist(), [0, 1, 1, 1, 1, 1])
-            self.assertEqual(actual_valid.flatten().tolist(), [1, 1, 1, 1, 0, 1])
-            self.assertEqual(result["candidate_voxels"], 3.0)
-            self.assertAlmostEqual(result["candidate_ratio"], 1.5, places=5)
+            self.assertEqual(actual_pseudo.flatten().tolist(), [0, 0, 1, 0, 1, 1])
+            self.assertEqual(actual_valid.flatten().tolist(), [0, 0, 1, 0, 0, 1])
+            self.assertEqual(result["candidate_voxels"], 1.0)
+            self.assertAlmostEqual(result["candidate_ratio"], 0.5, places=5)
             self.assertEqual(result["update_skipped"], 0.0)
+            self.assertIsNone(adapter._last_recovery_vote_count)
         finally:
             adapter.close()
 
@@ -890,22 +923,24 @@ class SoftPromptOnlyTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["run_sfda_voxtell.py", "--data_dir", "/tmp/data"]):
             defaults = parse_args()
         self.assertFalse(defaults.enable_recall_recovery)
-        self.assertEqual(defaults.recovery_teacher_low, 0.3)
+        self.assertEqual(defaults.recovery_teacher_low, 0.4)
         self.assertEqual(defaults.recovery_view_threshold, 0.5)
+        self.assertEqual(defaults.recovery_min_view_votes, 2)
 
         with mock.patch.object(
             sys,
             "argv",
             [
                 "run_sfda_voxtell.py", "--data_dir", "/tmp/data",
-                "--enable_recall_recovery", "--recovery_teacher_low", "0.25",
-                "--recovery_view_threshold", "0.6",
+                "--enable_recall_recovery", "--recovery_teacher_low", "0.45",
+                "--recovery_view_threshold", "0.6", "--recovery_min_view_votes", "3",
             ],
         ):
             configured = parse_args()
         self.assertTrue(configured.enable_recall_recovery)
-        self.assertEqual(configured.recovery_teacher_low, 0.25)
+        self.assertEqual(configured.recovery_teacher_low, 0.45)
         self.assertEqual(configured.recovery_view_threshold, 0.6)
+        self.assertEqual(configured.recovery_min_view_votes, 3)
 
     def test_all_invalid_saaf_falls_back_to_original_and_updates(self):
         args = _args(

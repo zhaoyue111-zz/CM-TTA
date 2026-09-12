@@ -283,15 +283,19 @@ def parse_args():
     parser.add_argument(
         "--enable_recall_recovery",
         action="store_true",
-        help="Promote selected-view-supported teacher foreground candidates",
+        help="Promote teacher foreground candidates supported by multiple views",
     )
     parser.add_argument(
-        "--recovery_teacher_low", type=float, default=0.3,
+        "--recovery_teacher_low", type=float, default=0.4,
         help="Inclusive lower teacher probability bound for recall recovery",
     )
     parser.add_argument(
         "--recovery_view_threshold", type=float, default=0.5,
-        help="Inclusive selected-view probability threshold for recall recovery",
+        help="Inclusive per-view probability threshold used by recall-recovery voting",
+    )
+    parser.add_argument(
+        "--recovery_min_view_votes", type=int, default=2,
+        help="Minimum number of augmented views supporting a recall-recovery voxel",
     )
     parser.add_argument("--selection_p", type=float, default=0.1,
                         help="Fraction of augmented views retained by quality+entropy ranking")
@@ -338,6 +342,8 @@ def main():
         raise ValueError("--recovery_teacher_low must be in [0, 0.5)")
     if not 0.0 <= args.recovery_view_threshold <= 1.0:
         raise ValueError("--recovery_view_threshold must be in [0, 1]")
+    if args.recovery_min_view_votes < 1:
+        raise ValueError("--recovery_min_view_votes must be positive")
     if args.output_dir is None:
         args.output_dir = (
             "results_/voxtell_sfda_tdc"
