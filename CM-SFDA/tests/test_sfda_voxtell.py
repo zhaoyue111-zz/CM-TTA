@@ -29,11 +29,14 @@ from sfda_voxtell import (  # noqa: E402
     VoxTellPromptSFDA,
     cac_loss,
     compute_cac_score,
+    compute_tdc_consensus,
     entropy_loss,
     load_sfda_checkpoint,
     masked_segmentation_loss,
     save_sfda_checkpoint,
     select_cac_views,
+    select_tdc_views,
+    TDC_PAIR_NAMES,
 )
 from semantic_quality import (  # noqa: E402
     SemanticPrototypeMemory,
@@ -102,6 +105,32 @@ class _TinyVoxTell(nn.Module):
         logits = features[:, :1] + bias
         self.outputs.append(logits.detach().clone())
         return logits
+
+
+class _TinyTDCVoxTell(_TinyVoxTell):
+    def __init__(self):
+        super().__init__()
+        self.decoder_return_shapes = []
+        self.all_negative_decoders = False
+
+    def forward(self, image, prompt, return_decoder_outputs=False):
+        logits = super().forward(image, prompt)
+        if not return_decoder_outputs:
+            return logits
+        if self.all_negative_decoders:
+            logits = torch.full_like(logits, -10.0)
+        size = tuple(int(value) for value in logits.shape[2:])
+        half = tuple(max(1, value // 2) for value in size)
+        quarter = tuple(max(1, value // 4) for value in size)
+        eighth = tuple(max(1, value // 8) for value in size)
+        outputs = [
+            logits,
+            F.interpolate(logits, size=half, mode="trilinear", align_corners=False),
+            F.interpolate(logits, size=quarter, mode="trilinear", align_corners=False),
+            F.interpolate(logits, size=eighth, mode="trilinear", align_corners=False),
+        ]
+        self.decoder_return_shapes.append([tuple(output.shape) for output in outputs])
+        return outputs
 
 
 class _TinyAttentionVoxTell(nn.Module):
@@ -555,6 +584,216 @@ class SoftPromptOnlyTests(unittest.TestCase):
                 float(evaluated_prompt[0, 0, 0, 0]),
                 float(adapter.initial_soft_prompt[0, 0, 0]),
             )
+        finally:
+            adapter.close()
+
+    def test_tdc_respects_d5_first_order_and_aligns_decoder_sizes(self):
+        d5 = torch.full((1, 1, 4, 4, 4), 10.0)
+        d4 = torch.full((1, 1, 2, 2, 2), 10.0)
+        d3 = torch.full((1, 1, 1, 1, 1), 10.0)
+        d2 = torch.full((1, 1, 1, 1, 1), 10.0)
+        result = compute_tdc_consensus([d5, d4, d3, d2])
+
+        self.assertEqual(result["spatial_shape"], (4, 4, 4))
+        self.assertEqual(TDC_PAIR_NAMES, (
+            "dice_d5_d4", "dice_d5_d3", "dice_d5_d2",
+            "dice_d4_d3", "dice_d4_d2", "dice_d3_d2",
+        ))
+        self.assertEqual(tuple(result["pair_dice"].shape), (1, 6))
+        self.assertEqual(int(result["valid_pair_count"].item()), 6)
+        self.assertTrue(torch.allclose(result["pair_dice"], torch.ones(1, 6)))
+        self.assertAlmostEqual(float(result["tdc"].item()), 1.0)
+
+        # A differently ordered list would use the 1x1x1 stage as the target;
+        # this guards the VoxTell forward order [D5,D4,D3,D2].
+        reversed_result = compute_tdc_consensus([d2, d3, d4, d5])
+        self.assertEqual(reversed_result["spatial_shape"], (1, 1, 1))
+
+    def test_tdc_empty_mask_pair_rules_and_finite_outputs(self):
+        empty = torch.full((1, 1, 2, 2, 2), -100.0)
+        all_empty = compute_tdc_consensus([empty, empty.clone(), empty.clone(), empty.clone()])
+        self.assertFalse(bool(all_empty["valid"].item()))
+        self.assertEqual(all_empty["invalid_reason"], ["all_decoder_masks_empty"])
+        self.assertEqual(int(all_empty["valid_pair_count"].item()), 0)
+        self.assertTrue(torch.isfinite(all_empty["tdc"]).all())
+        self.assertTrue(torch.isfinite(all_empty["pair_dice"]).all())
+
+        nonempty = torch.full_like(empty, 100.0)
+        one_nonempty = compute_tdc_consensus(
+            [nonempty, empty, empty.clone(), empty.clone()]
+        )
+        self.assertTrue(bool(one_nonempty["valid"].item()))
+        # Three foreground/background pairs score zero; the three empty/empty
+        # pairs are omitted rather than counted as perfect Dice.
+        self.assertEqual(int(one_nonempty["valid_pair_count"].item()), 3)
+        self.assertEqual(float(one_nonempty["tdc"].item()), 0.0)
+        self.assertEqual(
+            one_nonempty["pair_valid"].tolist(),
+            [[True, True, True, False, False, False]],
+        )
+
+    def test_tdc_selection_uses_quality_plus_entropy_rank_fusion(self):
+        scores = torch.tensor([[0.9, 0.8, 0.1]])
+        probabilities = torch.stack(
+            [
+                torch.full((1, 2, 2, 2), 0.5),
+                torch.full((1, 2, 2, 2), 0.0),
+                torch.full((1, 2, 2, 2), 0.9),
+            ],
+            dim=1,
+        )
+        selected, fallback = select_tdc_views(
+            scores, probabilities, 1.0 / 3.0, torch.ones_like(scores, dtype=torch.bool)
+        )
+        # View 0 wins on TDC but loses entropy rank; rank sums select view 1.
+        self.assertEqual(selected.tolist(), [[1]])
+        self.assertFalse(bool(fallback.item()))
+
+        tied_selected, _ = select_tdc_views(
+            torch.ones(1, 3),
+            torch.full((1, 3, 1, 2, 2, 2), 0.25),
+            1.0 / 3.0,
+            torch.ones(1, 3, dtype=torch.bool),
+        )
+        self.assertEqual(tied_selected.tolist(), [[0]])
+
+    def test_tdc_selects_with_updated_prompt_and_logs_native_decoder_outputs(self):
+        args = _args(
+            quality_metric="tdc", quality_mode="cac", selection_p=0.34,
+            num_aug_views=3, batch_size=1,
+        )
+        model = _TinyTDCVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            with torch.no_grad():
+                adapter.soft_prompt_embedding.fill_(2.25)
+            views = torch.randn(1, 3, 1, 4, 4, 4)
+            selected = adapter._select_views(views, ["case-current-tdc-prompt"])
+
+            self.assertEqual(tuple(selected.shape), (1, 1))
+            self.assertEqual(model.forward_calls, [(3, False)])
+            self.assertEqual(len(model.decoder_return_shapes), 1)
+            shapes = model.decoder_return_shapes[0]
+            self.assertEqual([shape[2:] for shape in shapes], [
+                (4, 4, 4), (2, 2, 2), (1, 1, 1), (1, 1, 1)
+            ])
+            evaluated_prompt = model.prompt_calls[-1]
+            self.assertTrue(torch.equal(
+                evaluated_prompt,
+                adapter.soft_prompt_embedding.detach().expand(3, -1, -1).unsqueeze(2),
+            ))
+            self.assertEqual(len(adapter.quality_diagnostics), 3)
+            row = adapter.quality_diagnostics[0]
+            self.assertIn("tdc", row)
+            self.assertTrue(all(name in row for name in TDC_PAIR_NAMES))
+            self.assertIn("valid", row)
+            self.assertIn("selected", row)
+        finally:
+            adapter.close()
+
+    def test_all_invalid_tdc_falls_back_to_view_zero(self):
+        args = _args(
+            quality_metric="tdc", quality_mode="cac", selection_p=0.34,
+            num_aug_views=3, batch_size=1,
+        )
+        model = _TinyTDCVoxTell()
+        model.all_negative_decoders = True
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            views = torch.randn(1, 3, 1, 4, 4, 4)
+            selected = adapter._select_views(views, ["case-empty-tdc"])
+            self.assertEqual(selected.tolist(), [[0]])
+            self.assertTrue(all(not row["valid"] for row in adapter.quality_diagnostics))
+            self.assertTrue(all(row["selection_fallback"] for row in adapter.quality_diagnostics))
+            self.assertTrue(adapter.quality_diagnostics[0]["selected"])
+            self.assertEqual(
+                {row["invalid_reason"] for row in adapter.quality_diagnostics},
+                {"all_decoder_masks_empty"},
+            )
+            result = adapter.adapt_batch(
+                torch.randn(1, 1, 4, 4, 4),
+                torch.randn(1, 1, 4, 4, 4),
+                ["case-empty-tdc"],
+            )
+            self.assertEqual(result["update_skipped"], 0.0)
+        finally:
+            adapter.close()
+
+    def test_tdc_fit_writes_per_view_diagnostics(self):
+        args = _args(
+            quality_metric="tdc", quality_mode="cac", selection_p=0.34,
+            num_aug_views=3, batch_size=1,
+        )
+        with tempfile.TemporaryDirectory() as output_dir:
+            args.output_dir = output_dir
+            adapter = VoxTellPromptSFDA(
+                _TinyTDCVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), args
+            )
+            try:
+                weak = torch.zeros(1, 1, 4, 4, 4)
+                adapter.fit([(weak, weak.clone(), ["case-tdc-diagnostics"])])
+                json_path = Path(output_dir) / "tdc_diagnostics.json"
+                csv_path = Path(output_dir) / "tdc_diagnostics.csv"
+                self.assertTrue(json_path.is_file())
+                self.assertTrue(csv_path.is_file())
+                rows = json.loads(json_path.read_text(encoding="utf-8"))
+                self.assertEqual(len(rows), 3)
+                self.assertTrue(all(all(name in row for name in TDC_PAIR_NAMES) for row in rows))
+                self.assertIn("selected", rows[0])
+                self.assertIn("valid", rows[0])
+            finally:
+                adapter.close()
+
+    def test_tdc_does_not_change_teacher_thresholds_or_add_tdc_loss(self):
+        import sfda_voxtell
+
+        model = _TinyTDCVoxTell()
+        args = _args(
+            confidence_threshold=0.7, quality_metric="tdc", w_cac=1.0,
+            selection_p=0.34, num_aug_views=3,
+        )
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            with torch.no_grad():
+                adapter.teacher_soft_prompt.fill_(0.65)
+                adapter.soft_prompt_embedding.fill_(-0.35)
+            teacher_before = adapter.teacher_soft_prompt.detach().clone()
+            with mock.patch.object(
+                sfda_voxtell,
+                "masked_segmentation_loss",
+                wraps=masked_segmentation_loss,
+            ) as segmentation_spy:
+                result = adapter.adapt_batch(
+                    torch.zeros(1, 1, 4, 4, 4),
+                    torch.ones(1, 1, 4, 4, 4),
+                    ["case-tdc-loss-path"],
+                )
+            self.assertTrue(torch.equal(
+                model.prompt_calls[0],
+                teacher_before.expand(1, -1, -1).unsqueeze(2),
+            ))
+            teacher_probability = torch.sigmoid(model.outputs[0].float())
+            expected_pseudo = (teacher_probability >= 0.5).float()[:, None]
+            expected_valid = (
+                torch.maximum(teacher_probability, 1 - teacher_probability) >= 0.7
+            ).float()[:, None]
+            actual_logits, actual_pseudo, actual_valid = segmentation_spy.call_args.args[:3]
+            self.assertTrue(torch.equal(actual_pseudo, expected_pseudo))
+            self.assertTrue(torch.equal(actual_valid, expected_valid))
+            self.assertEqual(actual_logits.shape, expected_pseudo.shape)
+            self.assertAlmostEqual(result["quality_loss"], -result["cac"], places=5)
+            expected_loss = (
+                result["bce"] + 1.0 - result["dice"]
+                + args.w_entropy * result["entropy"]
+                + args.w_cac * result["quality_loss"]
+            )
+            self.assertAlmostEqual(result["loss"], expected_loss, places=5)
         finally:
             adapter.close()
 

@@ -269,7 +269,7 @@ def parse_args():
     parser.add_argument("--model_dir", default=DEFAULT_MODEL_DIR)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--prompt", default="liver")
-    parser.add_argument("--output_dir", default="results_/voxtell_sfda")
+    parser.add_argument("--output_dir", default=None)
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--eval_interval", type=int, default=5,
@@ -294,8 +294,11 @@ def parse_args():
         help="Pseudo-label quality used for view selection and optional quality loss",
     )
     parser.add_argument(
-        "--quality_metric", default="cac", choices=("cac", "saaf"),
-        help="View-selection metric; SAAF uses final-layer response for the current soft prompt",
+        "--quality_metric", default="cac", choices=("cac", "saaf", "tdc"),
+        help=(
+            "View-selection metric: CAC, final-layer-attention SAAF, or "
+            "four-decoder consensus TDC"
+        ),
     )
     parser.add_argument(
         "--quality_config",
@@ -318,6 +321,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.output_dir is None:
+        args.output_dir = (
+            "results_/voxtell_sfda_tdc"
+            if args.quality_metric == "tdc"
+            else "results_/voxtell_sfda"
+        )
     if args.quality_metric == "saaf" and str(args.prompt).lower() != "liver":
         raise ValueError("This SAAF run is configured for prompt 'liver'; set --prompt liver")
     if args.eval_only and not args.checkpoint:

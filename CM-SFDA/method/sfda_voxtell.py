@@ -1,4 +1,4 @@
-"""VoxTell SFDA with one trainable soft prompt and CAC/TSE quality.
+"""VoxTell SFDA with one trainable soft prompt and CAC/SAAF/TDC quality.
 
 The Qwen text encoder is used only before adaptation to create the initial
 embedding. During adaptation the only optimizer parameter is the free
@@ -168,6 +168,116 @@ def select_cac_views(cac_scores, probabilities, selection_p, valid_mask=None):
     return torch.argsort(combined_ranks, dim=1, stable=True)[:, :keep]
 
 
+TDC_DECODER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+TDC_PAIR_NAMES = tuple(
+    f"dice_d{5 - left}_d{5 - right}" for left, right in TDC_DECODER_PAIRS
+)
+
+
+@torch.no_grad()
+def compute_tdc_consensus(decoder_outputs, threshold=0.5):
+    """Compute Text-conditioned Decoder Consensus for ``[D5,D4,D3,D2]`` logits.
+
+    VoxTell returns decoder logits from highest to lowest resolution. D5 is the
+    reference grid; the other three outputs are trilinearly resized before
+    sigmoid and thresholding. Empty/empty pairs are omitted from the mean,
+    while one-empty pairs contribute Dice zero.
+    """
+    if not isinstance(decoder_outputs, (tuple, list)) or len(decoder_outputs) != 4:
+        raise ValueError(
+            "TDC requires exactly four VoxTell decoder outputs in [D5,D4,D3,D2] order"
+        )
+    if not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError(f"TDC threshold must be in [0, 1], got {threshold}")
+    reference = decoder_outputs[0]
+    if not torch.is_tensor(reference) or reference.ndim != 5:
+        shape = getattr(reference, "shape", None)
+        raise ValueError(f"Expected D5 logits (B,N,H,W,D), got {shape}")
+    batch, prompts = reference.shape[:2]
+    if prompts != 1:
+        raise ValueError(f"TDC expects one text prompt per view, got {prompts}")
+    spatial_shape = tuple(int(size) for size in reference.shape[2:])
+    if any(size <= 0 for size in spatial_shape):
+        raise ValueError(f"D5 must have non-empty spatial dimensions, got {spatial_shape}")
+
+    finite = torch.ones(batch, dtype=torch.bool, device=reference.device)
+    masks = []
+    for level, logits in enumerate(decoder_outputs):
+        if not torch.is_tensor(logits) or logits.ndim != 5:
+            shape = getattr(logits, "shape", None)
+            raise ValueError(f"Decoder output D{5 - level} must be (B,N,H,W,D), got {shape}")
+        if logits.shape[:2] != (batch, prompts):
+            raise ValueError("All decoder outputs must agree in batch and prompt dimensions")
+        logits = logits.float()
+        finite &= torch.isfinite(logits).flatten(start_dim=1).all(dim=1)
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)
+        if level and tuple(logits.shape[2:]) != spatial_shape:
+            logits = F.interpolate(
+                logits,
+                size=spatial_shape,
+                mode="trilinear",
+                align_corners=False,
+            )
+        masks.append(torch.sigmoid(logits) >= float(threshold))
+
+    pair_dice = reference.new_zeros((batch, len(TDC_DECODER_PAIRS)), dtype=torch.float32)
+    pair_valid = torch.zeros_like(pair_dice, dtype=torch.bool)
+    for pair_index, (left, right) in enumerate(TDC_DECODER_PAIRS):
+        mask_left = masks[left].flatten(start_dim=1)
+        mask_right = masks[right].flatten(start_dim=1)
+        count_left = mask_left.sum(dim=1)
+        count_right = mask_right.sum(dim=1)
+        nonempty_pair = (count_left + count_right) > 0
+        intersection = (mask_left & mask_right).sum(dim=1).float()
+        denominator = (count_left + count_right).float()
+        score = torch.where(
+            nonempty_pair,
+            2.0 * intersection / denominator.clamp_min(1.0),
+            torch.zeros_like(denominator),
+        )
+        pair_dice[:, pair_index] = score
+        pair_valid[:, pair_index] = nonempty_pair & finite
+
+    pair_count = pair_valid.sum(dim=1)
+    valid = (pair_count > 0) & finite
+    tdc = (pair_dice * pair_valid.float()).sum(dim=1) / pair_count.clamp_min(1)
+    tdc = torch.where(valid, tdc, torch.zeros_like(tdc))
+    invalid_reason = []
+    for index in range(batch):
+        if not bool(finite[index]):
+            invalid_reason.append("nonfinite_decoder_logits")
+        elif not bool(valid[index]):
+            invalid_reason.append("all_decoder_masks_empty")
+        else:
+            invalid_reason.append(None)
+    return {
+        "tdc": tdc,
+        "pair_dice": pair_dice,
+        "pair_valid": pair_valid,
+        "valid": valid,
+        "valid_pair_count": pair_count,
+        "invalid_reason": invalid_reason,
+        "spatial_shape": spatial_shape,
+    }
+
+
+def select_tdc_views(tdc_scores, probabilities, selection_p, valid_mask):
+    """Use TDC + entropy rank fusion, falling back per case to view zero."""
+    valid_mask = torch.as_tensor(valid_mask, device=tdc_scores.device).bool()
+    if valid_mask.shape != tdc_scores.shape:
+        raise ValueError("TDC valid_mask must have shape (B,V)")
+    fallback = ~valid_mask.any(dim=1)
+    rankable = valid_mask.clone()
+    if bool(fallback.any()):
+        # Mark only the original view as rankable for all-invalid cases. The
+        # recorded semantic validity remains false; this is a selection fallback.
+        rankable[fallback, 0] = True
+    selected = select_cac_views(
+        tdc_scores, probabilities, selection_p, valid_mask=rankable
+    )
+    return selected, fallback
+
+
 def cac_loss(cac_scores):
     """CM-TTA CAC loss: maximize foreground/background concept contrast."""
     return -cac_scores.mean()
@@ -222,8 +332,8 @@ class VoxTellPromptSFDA:
         self.quality_mode = str(getattr(args, "quality_mode", "cac")).lower()
         requested_metric = getattr(args, "quality_metric", None)
         self.quality_metric = str(requested_metric or "cac").lower()
-        if self.quality_metric not in ("cac", "saaf"):
-            raise ValueError("quality_metric must be 'cac' or 'saaf'")
+        if self.quality_metric not in ("cac", "saaf", "tdc"):
+            raise ValueError("quality_metric must be 'cac', 'saaf' or 'tdc'")
         if self.quality_metric == "saaf" and float(getattr(args, "w_quality", 0.0)) != 0.0:
             raise ValueError("SAAF is evaluation-only in this version; use w_quality=0")
         if self.quality_metric == "saaf":
@@ -756,6 +866,7 @@ class VoxTellPromptSFDA:
                 self.soft_prompt_embedding.detach(), flat_views.shape[0]
             )
             native_cross_attention = None
+            tdc_details = None
             if self.quality_metric == "saaf":
                 try:
                     model_output = self.model(
@@ -780,22 +891,48 @@ class VoxTellPromptSFDA:
                     raise RuntimeError(
                         "VoxTell diagnostics do not contain cross_attention"
                     )
+            elif self.quality_metric == "tdc":
+                try:
+                    decoder_outputs = self.model(
+                        flat_views,
+                        selection_prompt,
+                        return_decoder_outputs=True,
+                    )
+                except TypeError as error:
+                    raise RuntimeError(
+                        "TDC requires VoxTell forward(return_decoder_outputs=True)"
+                    ) from error
+                if not isinstance(decoder_outputs, (tuple, list)):
+                    raise RuntimeError(
+                        "VoxTell return_decoder_outputs=True must return a list of logits"
+                    )
+                tdc_details = compute_tdc_consensus(decoder_outputs)
+                flat_logits = decoder_outputs[0]
             else:
                 flat_logits = self.model(flat_views, selection_prompt)
-            probabilities = torch.sigmoid(flat_logits.float()).view(
+            probability_logits = flat_logits.float()
+            if self.quality_metric == "tdc":
+                probability_logits = torch.nan_to_num(
+                    probability_logits, nan=0.0, posinf=20.0, neginf=-20.0
+                )
+            probabilities = torch.sigmoid(probability_logits).view(
                 batch_size, num_views, *flat_logits.shape[1:]
             )
             flat_case_ids = [
                 case_id for case_id in case_ids for _ in range(num_views)
             ]
-            scores, cac_scores, quality_details = self._quality_scores(
+            quality_scores, cac_scores, quality_details = self._quality_scores(
                 self._cac_features["vision"],
                 self._cac_features["text"],
                 flat_logits,
                 flat_case_ids,
                 native_cross_attention=native_cross_attention,
             )
-            scores = scores.view(batch_size, num_views)
+            scores = (
+                tdc_details["tdc"].view(batch_size, num_views)
+                if tdc_details is not None
+                else quality_scores.view(batch_size, num_views)
+            )
             fallback_mask = torch.zeros(
                 batch_size, dtype=torch.bool, device=scores.device
             )
@@ -823,7 +960,64 @@ class VoxTellPromptSFDA:
                 selected = None
                 self._last_selected_quality = None
                 self._last_selected_semantic = None
-            if self.quality_metric != "saaf":
+            if self.quality_metric == "tdc":
+                valid_matrix = tdc_details["valid"].view(batch_size, num_views)
+                selected, fallback_mask = select_tdc_views(
+                    scores,
+                    probabilities,
+                    self.args.selection_p,
+                    valid_matrix,
+                )
+                details = {
+                    "tdc": tdc_details["tdc"].detach().view(batch_size, num_views),
+                    "valid": valid_matrix,
+                    "valid_pair_count": tdc_details["valid_pair_count"].detach().view(
+                        batch_size, num_views
+                    ),
+                }
+                pair_dice = tdc_details["pair_dice"].detach().view(
+                    batch_size, num_views, len(TDC_DECODER_PAIRS)
+                )
+                pair_valid = tdc_details["pair_valid"].detach().view(
+                    batch_size, num_views, len(TDC_DECODER_PAIRS)
+                )
+                entropy = _binary_view_entropy(
+                    probabilities.reshape(
+                        batch_size * num_views, *probabilities.shape[2:]
+                    )
+                ).view(batch_size, num_views)
+                for batch_index, case_id in enumerate(case_ids):
+                    chosen = set(selected[batch_index].detach().cpu().tolist())
+                    for view_index in range(num_views):
+                        flat_index = batch_index * num_views + view_index
+                        valid = bool(details["valid"][batch_index, view_index].cpu())
+                        fallback = bool(fallback_mask[batch_index].cpu())
+                        row = {
+                            "case_id": str(case_id),
+                            "view_id": int(view_index),
+                            "entropy": float(entropy[batch_index, view_index].cpu()),
+                            "tdc": float(details["tdc"][batch_index, view_index].cpu()),
+                            "valid_pair_count": int(
+                                details["valid_pair_count"][batch_index, view_index].cpu()
+                            ),
+                            "valid": valid,
+                            "invalid_reason": tdc_details["invalid_reason"][flat_index],
+                            "selected": view_index in chosen,
+                            "selection_fallback": fallback,
+                            "fallback_reason": (
+                                "all_tdc_views_invalid_original_view_selected"
+                                if fallback
+                                else None
+                            ),
+                        }
+                        for pair_index, pair_name in enumerate(TDC_PAIR_NAMES):
+                            row[pair_name] = (
+                                float(pair_dice[batch_index, view_index, pair_index].cpu())
+                                if bool(pair_valid[batch_index, view_index, pair_index].cpu())
+                                else None
+                            )
+                        self.quality_diagnostics.append(row)
+            elif self.quality_metric != "saaf":
                 selected = select_cac_views(
                     scores,
                     probabilities,
@@ -1138,10 +1332,11 @@ class VoxTellPromptSFDA:
                 for key in totals:
                     totals[key] += values[key]
                 if step % self.args.print_freq == 0 or step == len(loader):
+                    quality_label = "cac" if self.quality_metric == "tdc" else self.quality_metric
                     print(
                         f"epoch {epoch}/{self.args.epochs} step {step}/{len(loader)} "
                         f"loss={totals['loss']/step:.4f} "
-                        f"{self.quality_metric}={totals['quality']/step:.4f} "
+                        f"{quality_label}={totals['quality']/step:.4f} "
                         f"coverage={totals['coverage']/step:.3f} "
                         f"skipped={int(totals['update_skipped'])}"
                     )
@@ -1151,14 +1346,17 @@ class VoxTellPromptSFDA:
             print(json.dumps(row, ensure_ascii=False))
             if epoch_end_callback is not None:
                 epoch_end_callback(epoch, row, history)
-        if self.quality_metric == "saaf" and self.quality_diagnostics:
+        if self.quality_metric in ("saaf", "tdc") and self.quality_diagnostics:
             output_dir = Path(getattr(self.args, "output_dir", "."))
             output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "saaf_diagnostics.json").write_text(
+            metric_name = self.quality_metric
+            (output_dir / f"{metric_name}_diagnostics.json").write_text(
                 json.dumps(self.quality_diagnostics, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
-            with (output_dir / "saaf_diagnostics.csv").open("w", newline="", encoding="utf-8") as file:
+            with (output_dir / f"{metric_name}_diagnostics.csv").open(
+                "w", newline="", encoding="utf-8"
+            ) as file:
                 fields = list(self.quality_diagnostics[0])
                 writer = csv.DictWriter(file, fieldnames=fields)
                 writer.writeheader()

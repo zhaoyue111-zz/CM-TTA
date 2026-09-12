@@ -72,12 +72,28 @@ python run_sfda_voxtell.py --data_dir /path/to/data \
 attention 或 SAAF 输入无效的候选视图不会参与评分。SAAF 诊断写入
 `saaf_diagnostics.json/csv`。
 
+TDC 使用同一次 student-view VoxTell forward 返回的四级 decoder logits
+`[D5,D4,D3,D2]`。D2–D4 先以 trilinear 插值对齐到 D5，再 sigmoid/0.5 二值化；六组
+pair Dice 跳过双空组合、单空组合记 0，均值用于 `TDC rank + entropy rank` 稳定排序。
+当前 detached soft prompt 用于所有候选 view；若所有 view 都没有有效 pair，则回退 view 0。
+TDC 仅用于无梯度视图选择，不进入 loss；原有 teacher、伪标签与更新/loss 路径保持不变。
+每个 view 的 TDC、六个 pair Dice、有效性、无效原因和是否选中写入
+`tdc_diagnostics.json/csv`。训练命令为：
+
+```bash
+python run_sfda_voxtell.py --data_dir /path/to/data \
+  --voxtell_root /path/to/VoxTell --model_dir /path/to/model \
+  --prompt liver --quality_metric tdc --quality_mode cac \
+  --w_quality 0 --w_cac 0 --output_dir results_/voxtell_sfda_tdc
+```
+
 也可以直接使用仓库内的入口脚本（参数依次为 `DATA_DIR VOXTELL_ROOT MODEL_DIR`
 以及可选的 prompt 和输出目录）：
 
 ```bash
 bash train_cac.sh /path/to/data /path/to/VoxTell /path/to/model liver results_/cac
 bash train_tse.sh /path/to/data /path/to/VoxTell /path/to/model liver results_/tse
+bash train_tdc.sh /path/to/data /path/to/VoxTell /path/to/model liver results_/voxtell_sfda_tdc
 # Explicit historical CAC-loss baseline (w_cac=1), if needed:
 bash train_cac_baseline.sh /path/to/data /path/to/VoxTell /path/to/model liver results_/cac_baseline
 ```
