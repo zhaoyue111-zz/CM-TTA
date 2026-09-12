@@ -27,6 +27,7 @@ if str(CM_SFDA / "method") not in sys.path:
 
 from sfda_voxtell import (  # noqa: E402
     VoxTellPromptSFDA,
+    apply_recall_recovery,
     cac_loss,
     compute_cac_score,
     compute_tdc_consensus,
@@ -56,6 +57,7 @@ import data.sfda_voxtell as sfda_data  # noqa: E402
 from run_sfda_voxtell import (  # noqa: E402
     _native_spacing,
     binary_segmentation_metrics,
+    parse_args,
     should_evaluate_epoch,
 )
 from evaluate_quality_metrics import (  # noqa: E402
@@ -221,6 +223,9 @@ def _args(**overrides):
         w_entropy=0.01,
         w_cac=1.0,
         w_quality=0.0,
+        enable_recall_recovery=False,
+        recovery_teacher_low=0.3,
+        recovery_view_threshold=0.5,
         quality_mode="cac",
         quality_config=str(CM_SFDA / "configs" / "tse.json"),
         grad_clip=1.0,
@@ -808,6 +813,100 @@ class SoftPromptOnlyTests(unittest.TestCase):
         finally:
             adapter.close()
 
+    def test_recall_recovery_promotes_only_teacher_candidate_with_view_support(self):
+        teacher_prob = torch.tensor(
+            [0.29, 0.30, 0.40, 0.49, 0.50, 0.80], dtype=torch.float32
+        ).view(1, 1, 1, 1, 6)
+        selected_prob = torch.tensor(
+            [0.90, 0.50, 0.49, 0.90, 0.90, 0.90], dtype=torch.float32
+        ).view(1, 1, 1, 1, 1, 6)
+        selected_logits = torch.logit(selected_prob).requires_grad_()
+        teacher_confidence = torch.maximum(teacher_prob, 1 - teacher_prob)
+        selected_pseudo = (teacher_prob >= 0.5).float().unsqueeze(1)
+        selected_valid = (teacher_confidence >= 0.7).float().unsqueeze(1)
+
+        recovered_pseudo, recovered_valid, candidate, count, ratio = apply_recall_recovery(
+            teacher_prob,
+            selected_logits,
+            selected_pseudo,
+            selected_valid,
+            teacher_low=0.3,
+            view_threshold=0.5,
+        )
+        self.assertEqual(candidate.flatten().tolist(), [False, True, False, True, False, False])
+        self.assertEqual(recovered_pseudo.flatten().tolist(), [0, 1, 0, 1, 1, 1])
+        # p_teacher < .3 remains valid background; .3<=p<.5 candidates become
+        # positive+valid only when selected-view probability reaches threshold.
+        self.assertEqual(recovered_valid.flatten().tolist(), [1, 1, 0, 1, 0, 1])
+        self.assertEqual(float(count.item()), 2.0)
+        self.assertAlmostEqual(float(ratio.item()), 1.0, places=5)
+        self.assertFalse(candidate.requires_grad)
+        self.assertFalse(recovered_pseudo.requires_grad)
+        self.assertFalse(recovered_valid.requires_grad)
+        self.assertIsNone(selected_logits.grad)
+
+    def test_recall_recovery_is_wired_into_existing_loss_and_logs_metrics(self):
+        model = _TinyVoxTell()
+        with torch.no_grad():
+            model.image_encoder.weight.zero_()
+            model.image_encoder.weight[0, 0, 0, 0, 0] = 1.0
+        args = _args(
+            quality_metric="cac",
+            num_aug_views=1,
+            selection_p=1.0,
+            confidence_threshold=0.7,
+            enable_recall_recovery=True,
+            recovery_teacher_low=0.3,
+            recovery_view_threshold=0.5,
+            w_cac=0.0,
+        )
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            teacher_values = torch.tensor(
+                [0.29, 0.30, 0.40, 0.49, 0.50, 0.80], dtype=torch.float32
+            )
+            weak = torch.logit(teacher_values).view(1, 1, 1, 1, 6)
+            with torch.no_grad():
+                adapter.teacher_soft_prompt.zero_()
+                adapter.soft_prompt_embedding.fill_(1.0)
+            with mock.patch(
+                "sfda_voxtell.masked_segmentation_loss",
+                wraps=masked_segmentation_loss,
+            ) as segmentation_spy:
+                result = adapter.adapt_batch(weak, weak.clone(), ["case-recovery"])
+
+            _, actual_pseudo, actual_valid = segmentation_spy.call_args.args[:3]
+            self.assertEqual(actual_pseudo.flatten().tolist(), [0, 1, 1, 1, 1, 1])
+            self.assertEqual(actual_valid.flatten().tolist(), [1, 1, 1, 1, 0, 1])
+            self.assertEqual(result["candidate_voxels"], 3.0)
+            self.assertAlmostEqual(result["candidate_ratio"], 1.5, places=5)
+            self.assertEqual(result["update_skipped"], 0.0)
+        finally:
+            adapter.close()
+
+    def test_recall_recovery_cli_is_opt_in_with_configurable_thresholds(self):
+        with mock.patch.object(sys, "argv", ["run_sfda_voxtell.py", "--data_dir", "/tmp/data"]):
+            defaults = parse_args()
+        self.assertFalse(defaults.enable_recall_recovery)
+        self.assertEqual(defaults.recovery_teacher_low, 0.3)
+        self.assertEqual(defaults.recovery_view_threshold, 0.5)
+
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "run_sfda_voxtell.py", "--data_dir", "/tmp/data",
+                "--enable_recall_recovery", "--recovery_teacher_low", "0.25",
+                "--recovery_view_threshold", "0.6",
+            ],
+        ):
+            configured = parse_args()
+        self.assertTrue(configured.enable_recall_recovery)
+        self.assertEqual(configured.recovery_teacher_low, 0.25)
+        self.assertEqual(configured.recovery_view_threshold, 0.6)
+
     def test_all_invalid_saaf_falls_back_to_original_and_updates(self):
         args = _args(
             quality_metric="saaf", quality_mode="cac", selection_p=0.1,
@@ -861,7 +960,7 @@ class SoftPromptOnlyTests(unittest.TestCase):
                 "masked_segmentation_loss",
                 wraps=masked_segmentation_loss,
             ) as segmentation_spy:
-                adapter.adapt_batch(
+                result = adapter.adapt_batch(
                     torch.zeros(1, 1, 2, 2, 2),
                     torch.ones(1, 1, 2, 2, 2),
                     ["case-teacher"],
@@ -881,6 +980,8 @@ class SoftPromptOnlyTests(unittest.TestCase):
             self.assertTrue(torch.equal(actual_pseudo, expected_pseudo))
             self.assertTrue(torch.equal(actual_valid, expected_valid))
             self.assertEqual(actual_logits.shape, expected_pseudo.shape)
+            self.assertNotIn("candidate_voxels", result)
+            self.assertNotIn("candidate_ratio", result)
         finally:
             adapter.close()
 

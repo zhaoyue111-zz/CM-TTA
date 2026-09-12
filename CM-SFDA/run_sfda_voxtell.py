@@ -280,6 +280,19 @@ def parse_args():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--ema_momentum", type=float, default=0.99)
     parser.add_argument("--confidence_threshold", type=float, default=0.7)
+    parser.add_argument(
+        "--enable_recall_recovery",
+        action="store_true",
+        help="Promote selected-view-supported teacher foreground candidates",
+    )
+    parser.add_argument(
+        "--recovery_teacher_low", type=float, default=0.3,
+        help="Inclusive lower teacher probability bound for recall recovery",
+    )
+    parser.add_argument(
+        "--recovery_view_threshold", type=float, default=0.5,
+        help="Inclusive selected-view probability threshold for recall recovery",
+    )
     parser.add_argument("--selection_p", type=float, default=0.1,
                         help="Fraction of augmented views retained by quality+entropy ranking")
     parser.add_argument("--num_aug_views", type=int, default=9,
@@ -321,6 +334,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if not 0.0 <= args.recovery_teacher_low < 0.5:
+        raise ValueError("--recovery_teacher_low must be in [0, 0.5)")
+    if not 0.0 <= args.recovery_view_threshold <= 1.0:
+        raise ValueError("--recovery_view_threshold must be in [0, 1]")
     if args.output_dir is None:
         args.output_dir = (
             "results_/voxtell_sfda_tdc"

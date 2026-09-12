@@ -71,6 +71,62 @@ def entropy_loss(logits, valid):
     return (entropy * valid).sum() / valid.sum().clamp_min(1.0)
 
 
+@torch.no_grad()
+def apply_recall_recovery(
+    teacher_prob,
+    selected_logits,
+    selected_pseudo,
+    selected_valid,
+    teacher_low=0.3,
+    view_threshold=0.5,
+):
+    """Promote teacher-uncertain foreground candidates supported by the selected view.
+
+    ``teacher_prob`` has shape (B,N,D,H,W), while selected tensors add the view
+    axis and have shape (B,K,N,D,H,W). The candidate gate is detached and is
+    used only to update the existing pseudo-label and validity tensors.
+    """
+    teacher_low = float(teacher_low)
+    view_threshold = float(view_threshold)
+    if not 0.0 <= teacher_low < 0.5:
+        raise ValueError("recovery_teacher_low must be in [0, 0.5)")
+    if not 0.0 <= view_threshold <= 1.0:
+        raise ValueError("recovery_view_threshold must be in [0, 1]")
+    if teacher_prob.ndim < 3 or selected_logits.ndim != teacher_prob.ndim + 1:
+        raise ValueError(
+            "Expected teacher probabilities (B,N,...) and selected logits (B,K,N,...), "
+            f"got {tuple(teacher_prob.shape)} and {tuple(selected_logits.shape)}"
+        )
+
+    selected_prob = torch.sigmoid(selected_logits.detach().float())
+    if selected_prob.shape[0] != teacher_prob.shape[0] or tuple(
+        selected_prob.shape[2:]
+    ) != tuple(teacher_prob.shape[1:]):
+        raise ValueError("Teacher probabilities and selected logits have incompatible shapes")
+    if selected_pseudo.shape != selected_prob.shape or selected_valid.shape != selected_prob.shape:
+        raise ValueError(
+            "Selected pseudo-labels and validity mask must match selected logits; "
+            f"got {tuple(selected_pseudo.shape)}, {tuple(selected_valid.shape)} and "
+            f"{tuple(selected_prob.shape)}"
+        )
+
+    teacher_by_view = teacher_prob.detach().float().unsqueeze(1).expand_as(selected_prob)
+    candidate = (
+        (teacher_by_view >= teacher_low)
+        & (teacher_by_view < 0.5)
+        & (selected_prob >= view_threshold)
+    )
+    recovered_pseudo = selected_pseudo.clone()
+    recovered_valid = selected_valid.clone()
+    recovered_pseudo.masked_fill_(candidate, 1.0)
+    recovered_valid.masked_fill_(candidate, 1.0)
+
+    candidate_voxels = candidate.sum().to(dtype=torch.float32)
+    original_foreground_voxels = (teacher_prob >= 0.5).sum().to(dtype=torch.float32)
+    candidate_ratio = candidate_voxels / (original_foreground_voxels + 1e-6)
+    return recovered_pseudo, recovered_valid, candidate, candidate_voxels, candidate_ratio
+
+
 def _binary_view_entropy(prob):
     prob = prob.float().clamp(1e-6, 1 - 1e-6)
     entropy = -(prob * prob.log() + (1 - prob) * (1 - prob).log())
@@ -338,6 +394,17 @@ class VoxTellPromptSFDA:
         self.initial_soft_prompt = initial_soft_prompt.clone()
         self.teacher_soft_prompt = initial_soft_prompt.clone()
         self.device, self.args = device, args
+        self.enable_recall_recovery = bool(
+            getattr(args, "enable_recall_recovery", False)
+        )
+        self.recovery_teacher_low = float(getattr(args, "recovery_teacher_low", 0.3))
+        self.recovery_view_threshold = float(
+            getattr(args, "recovery_view_threshold", 0.5)
+        )
+        if not 0.0 <= self.recovery_teacher_low < 0.5:
+            raise ValueError("recovery_teacher_low must be in [0, 0.5)")
+        if not 0.0 <= self.recovery_view_threshold <= 1.0:
+            raise ValueError("recovery_view_threshold must be in [0, 1]")
         self.quality_mode = str(getattr(args, "quality_mode", "cac")).lower()
         requested_metric = getattr(args, "quality_metric", None)
         self.quality_metric = str(requested_metric or "cac").lower()
@@ -1105,6 +1172,8 @@ class VoxTellPromptSFDA:
                     "prototype_valid": 0.0,
                 }
             )
+        if self.enable_recall_recovery:
+            values.update(candidate_voxels=0.0, candidate_ratio=0.0)
         return values
 
     def adapt_batch(self, weak, strong, case_ids=None):
@@ -1193,6 +1262,23 @@ class VoxTellPromptSFDA:
             )
             selected_pseudo = pseudo[:, None].expand_as(selected_logits)
             selected_valid = valid[:, None].expand_as(selected_logits)
+            candidate_voxels = None
+            candidate_ratio = None
+            if self.enable_recall_recovery:
+                (
+                    selected_pseudo,
+                    selected_valid,
+                    _candidate,
+                    candidate_voxels,
+                    candidate_ratio,
+                ) = apply_recall_recovery(
+                    teacher_prob,
+                    selected_logits,
+                    selected_pseudo,
+                    selected_valid,
+                    teacher_low=self.recovery_teacher_low,
+                    view_threshold=self.recovery_view_threshold,
+                )
             segmentation, bce, dice = masked_segmentation_loss(
                 selected_logits, selected_pseudo, selected_valid
             )
@@ -1298,6 +1384,11 @@ class VoxTellPromptSFDA:
         }
         if self.record_soft_prompt_grad_norm:
             values["soft_prompt_grad_norm"] = soft_prompt_grad_norm
+        if self.enable_recall_recovery:
+            values.update(
+                candidate_voxels=float(candidate_voxels.detach().cpu()),
+                candidate_ratio=float(candidate_ratio.detach().cpu()),
+            )
         if semantic is not None and self.quality_metric == "saaf":
             values.update(
                 purity=float(semantic["purity"].detach().mean().cpu()),
@@ -1332,6 +1423,8 @@ class VoxTellPromptSFDA:
                 metric_names.append("saaf")
         if self.record_soft_prompt_grad_norm:
             metric_names.append("soft_prompt_grad_norm")
+        if self.enable_recall_recovery:
+            metric_names.extend(("candidate_voxels", "candidate_ratio"))
         for epoch in range(1, self.args.epochs + 1):
             totals = {key: 0.0 for key in metric_names}
             for step, batch in enumerate(loader, start=1):
@@ -1344,12 +1437,18 @@ class VoxTellPromptSFDA:
                     totals[key] += values[key]
                 if step % self.args.print_freq == 0 or step == len(loader):
                     quality_label = "cac" if self.quality_metric == "tdc" else self.quality_metric
+                    recovery_log = ""
+                    if self.enable_recall_recovery:
+                        recovery_log = (
+                            f" candidate_voxels={totals['candidate_voxels']/step:.1f}"
+                            f" candidate_ratio={totals['candidate_ratio']/step:.6f}"
+                        )
                     print(
                         f"epoch {epoch}/{self.args.epochs} step {step}/{len(loader)} "
                         f"loss={totals['loss']/step:.4f} "
                         f"{quality_label}={totals['quality']/step:.4f} "
                         f"coverage={totals['coverage']/step:.3f} "
-                        f"skipped={int(totals['update_skipped'])}"
+                        f"skipped={int(totals['update_skipped'])}{recovery_log}"
                     )
             row = {key: value / max(1, len(loader)) for key, value in totals.items()}
             row["epoch"] = epoch
