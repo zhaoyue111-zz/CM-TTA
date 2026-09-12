@@ -41,7 +41,7 @@ from semantic_quality import (  # noqa: E402
     average_tie_ranks,
     compute_saaf_quality,
     compute_tse_components,
-    first_cross_attention,
+    final_decoder_attention,
 )
 from data.sfda_voxtell import (  # noqa: E402
     fuse_volume_patches,
@@ -89,18 +89,23 @@ class _TinyVoxTell(nn.Module):
         self.project_bottleneck_embed = _VisionProjection()
         self.project_text_embed = _TextProjection()
         self.forward_calls = []
+        self.prompt_calls = []
+        self.outputs = []
 
     def forward(self, image, prompt):
         self.forward_calls.append((image.shape[0], torch.is_grad_enabled()))
+        self.prompt_calls.append(prompt.detach().clone())
         features = self.image_encoder(image)
         self.project_bottleneck_embed(features)
         text = self.project_text_embed(prompt)
         bias = text[0, :, 0].view(image.shape[0], 1, 1, 1, 1)
-        return features[:, :1] + bias
+        logits = features[:, :1] + bias
+        self.outputs.append(logits.detach().clone())
+        return logits
 
 
 class _TinyAttentionVoxTell(nn.Module):
-    """Decoder-shaped test double with coarse memory and finer logits."""
+    """VoxTell-shaped model exposing native attention from multiple layers."""
 
     def __init__(self):
         super().__init__()
@@ -108,31 +113,38 @@ class _TinyAttentionVoxTell(nn.Module):
         self.image_encoder = nn.Conv3d(1, 4, kernel_size=1, bias=False)
         self.project_bottleneck_embed = _VisionProjection()
         self.project_text_embed = nn.Linear(4, 4, bias=False)
-        self.pos_embed = nn.Parameter(torch.zeros(32, 1, 4))
-        layer = _TinyAttentionLayer()
-        self.transformer_decoder = nn.Module()
-        self.transformer_decoder.layers = nn.ModuleList([layer])
+        self.prompt_calls = []
+        self.uniform_attention = False
+        self.forward_outputs = []
 
-    def forward(self, image, prompt):
+    def forward(self, image, prompt, return_diagnostics=False):
+        self.prompt_calls.append(prompt.detach().clone())
         features = self.image_encoder(image)
-        self.project_bottleneck_embed(features)
-        text = self.project_text_embed(prompt[:, 0, 0, :])[:, :1].view(
-            image.shape[0], 1, 1, 1, 1
-        )
-        logits = features[:, :1] + text
-        return F.interpolate(logits, scale_factor=2, mode="trilinear", align_corners=False)
-
-
-class _TinyAttentionLayer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.normalize_before = True
-        self.norm2 = nn.LayerNorm(4)
-        self.multihead_attn = nn.MultiheadAttention(4, 2, dropout=0.0)
-
-    @staticmethod
-    def with_pos_embed(tensor, pos):
-        return tensor if pos is None else tensor + pos
+        vision = self.project_bottleneck_embed(features)
+        text = self.project_text_embed(prompt[:, 0, 0, :].unsqueeze(0))
+        bias = text[0, :, 0].view(image.shape[0], 1, 1, 1, 1)
+        logits = features[:, :1] + bias
+        logits = F.interpolate(logits, scale_factor=2, mode="trilinear", align_corners=False)
+        self.forward_outputs.append(logits.detach().clone())
+        if not return_diagnostics:
+            return logits
+        spatial_count = int(np.prod(vision.shape[1:-1]))
+        position = torch.arange(spatial_count, device=image.device, dtype=torch.float32)
+        prompt_shift = prompt[:, 0, 0, 0].float() * 2.0
+        center_first = torch.full_like(prompt_shift, 3.0) - prompt_shift
+        center_last = torch.full_like(prompt_shift, spatial_count * 0.8) + prompt_shift
+        if self.uniform_attention:
+            first = torch.full(
+                (image.shape[0], 1, spatial_count), 1.0 / spatial_count,
+                device=image.device,
+            )
+            last = first.clone()
+        else:
+            first_logits = -torch.abs(position[None, None] - center_first[:, None, None]) / 5.0
+            last_logits = -torch.abs(position[None, None] - center_last[:, None, None]) / 5.0
+            first = first_logits.softmax(dim=-1)
+            last = last_logits.softmax(dim=-1)
+        return logits, {"cross_attention": [first, last]}
 
 
 class _OverflowScaler:
@@ -471,39 +483,13 @@ class SoftPromptOnlyTests(unittest.TestCase):
         self.assertEqual(reasons[0], "attention_mad_below_threshold")
         self.assertTrue(torch.isfinite(mad).all())
 
-    def test_first_cross_attention_shape_and_head_normalization(self):
-        model = _TinyAttentionVoxTell().eval()
-        features = torch.randn(1, 4, 4, 2, 4)
-        with torch.no_grad():
-            attention, spatial, token_mask = first_cross_attention(
-                model, features, torch.ones(1, 1, 4)
-            )
-        self.assertEqual(tuple(attention.shape), (1, 2, 1, 32))
-        self.assertEqual(spatial, (4, 4, 2))
-        self.assertEqual(tuple(token_mask.shape), (1, 1))
-        self.assertTrue(torch.allclose(attention.sum(dim=-1), torch.ones(1, 2, 1)))
-
-    def test_first_cross_attention_head_mean_matches_native_attention(self):
-        model = _TinyAttentionVoxTell().eval()
-        features = torch.randn(1, 4, 4, 2, 4)
-        anchor = torch.randn(1, 1, 4)
-        with torch.no_grad():
-            attention, spatial, _ = first_cross_attention(model, features, anchor)
-            memory = features.reshape(1, -1, 4).permute(1, 0, 2)
-            tgt = model.project_text_embed(anchor.permute(1, 0, 2))
-            layer = model.transformer_decoder.layers[0]
-            query = layer.norm2(tgt)
-            key = layer.with_pos_embed(memory, model.pos_embed)
-            _, native = layer.multihead_attn(
-                query=query,
-                key=key,
-                value=memory,
-                need_weights=True,
-                average_attn_weights=False,
-            )
-            native = native.mean(dim=1).permute(1, 0, 2).reshape(1, 1, -1)
-        self.assertEqual(spatial, (4, 4, 2))
-        self.assertTrue(torch.allclose(attention.mean(dim=1), native, atol=1e-6, rtol=1e-5))
+    def test_final_decoder_attention_extracts_native_last_layer(self):
+        first = torch.full((2, 1, 32), 1.0 / 32)
+        last = torch.zeros_like(first)
+        last[..., 7] = 1.0
+        result = final_decoder_attention([first, last])
+        self.assertEqual(tuple(result.shape), (2, 1, 1, 32))
+        self.assertTrue(torch.equal(result[:, 0], last))
 
     def test_saaf_quality_aligns_finer_logits_to_coarse_evidence(self):
         args = _args(
@@ -512,18 +498,139 @@ class SoftPromptOnlyTests(unittest.TestCase):
         )
         adapter = VoxTellPromptSFDA(
             _TinyAttentionVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), args,
-            text_anchor=torch.ones(1, 1, 4),
         )
         try:
             image = torch.randn(1, 1, 2, 4, 4)
             adapter._cac_features.clear()
             with torch.no_grad():
-                logits = adapter.model(image, adapter._text(adapter.initial_soft_prompt, 1))
+                logits, diagnostics = adapter.model(
+                    image,
+                    adapter._text(adapter.initial_soft_prompt, 1),
+                    return_diagnostics=True,
+                )
             result = adapter._saaf_quality(
-                adapter._cac_features["vision"], logits
+                adapter._cac_features["vision"], logits,
+                diagnostics["cross_attention"],
             )
             self.assertEqual(tuple(result["evidence"].shape), (1, 4, 4, 2))
             self.assertTrue(torch.isfinite(result["saaf"]).all())
+            last_evidence, _, _, _ = attention_evidence_map(
+                final_decoder_attention(diagnostics["cross_attention"]),
+                (4, 4, 2),
+                mad_threshold=adapter.quality_config["attention_mad_threshold"],
+            )
+            first_evidence, _, _, _ = attention_evidence_map(
+                diagnostics["cross_attention"][0].unsqueeze(1),
+                (4, 4, 2),
+                mad_threshold=adapter.quality_config["attention_mad_threshold"],
+            )
+            self.assertTrue(torch.allclose(result["evidence"], last_evidence))
+            self.assertFalse(torch.allclose(last_evidence, first_evidence))
+        finally:
+            adapter.close()
+
+    def test_saaf_selection_uses_updated_student_prompt(self):
+        args = _args(
+            quality_metric="saaf", quality_mode="cac", selection_p=0.1,
+            num_aug_views=3, batch_size=1,
+        )
+        model = _TinyAttentionVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            with torch.no_grad():
+                adapter.soft_prompt_embedding.fill_(2.25)
+            views = torch.randn(1, 3, 1, 2, 4, 4)
+            selected = adapter._select_views(views, ["case-current-prompt"])
+            self.assertEqual(tuple(selected.shape), (1, 1))
+            evaluated_prompt = model.prompt_calls[-1]
+            self.assertTrue(
+                torch.equal(
+                    evaluated_prompt,
+                    adapter.soft_prompt_embedding.detach().expand(3, -1, -1).unsqueeze(2),
+                )
+            )
+            self.assertNotEqual(
+                float(evaluated_prompt[0, 0, 0, 0]),
+                float(adapter.initial_soft_prompt[0, 0, 0]),
+            )
+        finally:
+            adapter.close()
+
+    def test_all_invalid_saaf_falls_back_to_original_and_updates(self):
+        args = _args(
+            quality_metric="saaf", quality_mode="cac", selection_p=0.1,
+            num_aug_views=3, batch_size=1, confidence_threshold=0.7,
+        )
+        model = _TinyAttentionVoxTell()
+        model.uniform_attention = True
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            views = torch.stack(
+                [torch.zeros(1, 2, 4, 4), torch.ones(1, 2, 4, 4), torch.full((1, 2, 4, 4), 2.0)],
+                dim=0,
+            ).unsqueeze(0)
+            selected = adapter._select_views(views, ["case-invalid"])
+            self.assertEqual(selected.tolist(), [[0]])
+            self.assertTrue(all(row["selection_fallback"] for row in adapter.quality_diagnostics))
+            self.assertTrue(all(not row["valid"] for row in adapter.quality_diagnostics))
+            self.assertTrue(adapter.quality_diagnostics[0]["selected"])
+
+            adapter.quality_diagnostics.clear()
+            calls_before_adapt = len(model.prompt_calls)
+            result = adapter.adapt_batch(
+                torch.randn(1, 1, 2, 4, 4),
+                torch.randn(1, 1, 2, 4, 4),
+                ["case-invalid"],
+            )
+            self.assertEqual(result["update_skipped"], 0.0)
+            self.assertNotIn("quality_invalid", result)
+            self.assertEqual(len(model.prompt_calls), calls_before_adapt + 3)
+            self.assertTrue(np.isfinite(result["loss"]))
+        finally:
+            adapter.close()
+
+    def test_teacher_pseudo_label_prompt_thresholds_and_loss_path_unchanged(self):
+        import sfda_voxtell
+
+        model = _TinyVoxTell()
+        args = _args(confidence_threshold=0.7, quality_metric="cac", w_cac=0.0)
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            with torch.no_grad():
+                adapter.teacher_soft_prompt.fill_(0.65)
+                adapter.soft_prompt_embedding.fill_(-0.35)
+            teacher_prompt_before = adapter.teacher_soft_prompt.detach().clone()
+            with mock.patch.object(
+                sfda_voxtell,
+                "masked_segmentation_loss",
+                wraps=masked_segmentation_loss,
+            ) as segmentation_spy:
+                adapter.adapt_batch(
+                    torch.zeros(1, 1, 2, 2, 2),
+                    torch.ones(1, 1, 2, 2, 2),
+                    ["case-teacher"],
+                )
+            self.assertTrue(
+                torch.equal(
+                    model.prompt_calls[0],
+                    teacher_prompt_before.expand(1, -1, -1).unsqueeze(2),
+                )
+            )
+            teacher_probability = torch.sigmoid(model.outputs[0].float())
+            expected_pseudo = (teacher_probability >= 0.5).float()[:, None]
+            expected_valid = (
+                torch.maximum(teacher_probability, 1 - teacher_probability) >= 0.7
+            ).float()[:, None]
+            actual_logits, actual_pseudo, actual_valid = segmentation_spy.call_args.args[:3]
+            self.assertTrue(torch.equal(actual_pseudo, expected_pseudo))
+            self.assertTrue(torch.equal(actual_valid, expected_valid))
+            self.assertEqual(actual_logits.shape, expected_pseudo.shape)
         finally:
             adapter.close()
 
@@ -637,7 +744,6 @@ class SoftPromptOnlyTests(unittest.TestCase):
                 torch.ones(1, 1, 4),
                 torch.device("cpu"),
                 _args(quality_metric="saaf", batch_size=2, selection_p=0.1),
-                text_anchor=torch.ones(1, 1, 4),
             )
 
     def test_tse_adapter_uses_cross_case_prototypes_without_nan(self):
@@ -800,9 +906,10 @@ class SoftPromptOnlyTests(unittest.TestCase):
                 path = Path(directory) / "checkpoint.pt"
                 save_sfda_checkpoint(path, adapter, adapter.args, [{"epoch": 1}])
                 checkpoint = load_sfda_checkpoint(path, restored)
-                self.assertEqual(checkpoint["format"], "voxtell-sfda-prompt-tse-v4")
+                self.assertEqual(checkpoint["format"], "voxtell-sfda-prompt-tse-v5")
                 self.assertIn("soft_prompt_embedding", checkpoint)
                 self.assertIn("teacher_soft_prompt", checkpoint)
+                self.assertNotIn("text_anchor", checkpoint)
                 self.assertIn("prototype_memory", checkpoint)
                 self.assertEqual(restored.prototype_memory.contributors(), ["case-a"])
                 self.assertTrue(torch.equal(adapter.soft_prompt_embedding, restored.soft_prompt_embedding))

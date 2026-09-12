@@ -20,7 +20,6 @@ from data.sfda_voxtell import (
 from method.semantic_quality import (
     average_tie_ranks,
     compute_saaf_quality,
-    first_cross_attention,
     text_similarity_map,
 )
 from method.sfda_voxtell import VoxTellPromptSFDA
@@ -254,15 +253,16 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             views = _training_style_views(patch, num_views, seed + patch_index)
             valid_views = valid_patch.expand(num_views, -1, -1, -1, -1)
             adapter._cac_features.clear()
-            native_attention_match = None
             with torch.no_grad(), torch.autocast(
                 device_type=adapter.device.type, enabled=adapter.device.type == "cuda"
             ):
                 prompt = adapter._text(adapter.initial_soft_prompt, num_views)
                 try:
                     model_output = adapter.model(views, prompt, return_diagnostics=True)
-                except TypeError:
-                    model_output = adapter.model(views, prompt)
+                except TypeError as error:
+                    raise RuntimeError(
+                        "SAAF audit requires VoxTell forward(return_diagnostics=True)"
+                    ) from error
                 if (
                     isinstance(model_output, tuple)
                     and len(model_output) == 2
@@ -270,30 +270,12 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 ):
                     logits, model_diagnostics = model_output
                     native_cross = model_diagnostics.get("cross_attention")
-                    if isinstance(native_cross, (list, tuple)) and native_cross:
-                        native_first = native_cross[0]
-                        if torch.is_tensor(native_first):
-                            # VoxTell's native MHA diagnostics are averaged
-                            # over heads; compare against our exact per-head
-                            # reconstruction before using the latter for SAAF.
-                            try:
-                                recomputed, _, _ = first_cross_attention(
-                                    adapter.model,
-                                    adapter._cac_features["vision"],
-                                    adapter.text_anchor,
-                                )
-                                native_attention_match = bool(
-                                    torch.allclose(
-                                        native_first.float(),
-                                        recomputed.mean(dim=1).float(),
-                                        atol=1e-5,
-                                        rtol=1e-4,
-                                    )
-                                )
-                            except (AttributeError, RuntimeError, ValueError):
-                                native_attention_match = False
+                    if native_cross is None:
+                        raise RuntimeError("VoxTell diagnostics do not contain cross_attention")
                 else:
-                    logits = model_output
+                    raise RuntimeError(
+                        "VoxTell diagnostics must return (logits, diagnostics)"
+                    )
             flat_case_ids = [case_key] * num_views
             current_text_features = adapter._cac_features["text"]
             _quality, cac, semantic = adapter._quality_scores(
@@ -301,19 +283,23 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 adapter._cac_features["text"],
                 logits,
                 flat_case_ids,
+                native_cross_attention=native_cross,
                 spatial_valid=valid_views,
             )
             # SAAF evidence is audited for both modes.  Legacy purity/TSE
-            # details are intentionally not reused: they are prototype-based,
-            # whereas this audit always measures the frozen ``liver`` anchor.
+            # details are intentionally not reused: they are prototype-based;
+            # this audit always measures the same forward's prompt response.
             if adapter.quality_metric == "saaf":
                 saaf_details = semantic
             else:
                 saaf_details = adapter._saaf_quality(
-                    adapter._cac_features["vision"], logits, valid_views
+                    adapter._cac_features["vision"],
+                    logits,
+                    native_cross,
+                    valid_views,
                 )
             if saaf_details is None:
-                raise RuntimeError("SAAF audit did not produce anchor evidence details")
+                raise RuntimeError("SAAF audit did not produce final-layer evidence details")
             semantic = saaf_details
             probability = torch.sigmoid(logits[:, 0].float())
             evidence = semantic["evidence"]
@@ -401,7 +387,6 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                         "selected": view_index == selected_indices.get(
                             "saaf" if adapter.quality_metric == "saaf" else "cac"
                         ),
-                        "native_attention_match": native_attention_match,
                     }
                     for view_index in range(num_views)
                 ],
@@ -827,13 +812,12 @@ def main():
     if args.w_quality != 0:
         raise ValueError("Quality audit is evaluation-only; use --w_quality 0")
     if args.quality_metric == "saaf" and str(args.prompt).lower() != "liver":
-        raise ValueError("SAAF uses the fixed prompt 'liver'; set --prompt liver")
+        raise ValueError("This SAAF audit is configured for prompt 'liver'; set --prompt liver")
     seed_everything(args.seed)
     device = torch.device(args.device)
     predictor = build_predictor(args.model_dir, device, args.voxtell_root)
     with torch.no_grad():
         initial_prompt = predictor.embed_text_prompts([args.prompt]).detach()
-        text_anchor = predictor.embed_text_prompts(["liver"]).detach()
     output = Path(args.output)
     adapter_args = argparse.Namespace(
         **vars(args),
@@ -848,7 +832,6 @@ def main():
         initial_prompt,
         device,
         adapter_args,
-        text_anchor=text_anchor,
     )
     adapter.predictor = predictor
     train_loader = make_target_loader(args.data_dir, tuple(predictor.patch_size), args.batch_size, args.num_workers)

@@ -295,7 +295,7 @@ def parse_args():
     )
     parser.add_argument(
         "--quality_metric", default="cac", choices=("cac", "saaf"),
-        help="View-selection metric; SAAF uses frozen text anchor 'liver' and w_quality must be 0",
+        help="View-selection metric; SAAF uses final-layer response for the current soft prompt",
     )
     parser.add_argument(
         "--quality_config",
@@ -319,7 +319,7 @@ def parse_args():
 def main():
     args = parse_args()
     if args.quality_metric == "saaf" and str(args.prompt).lower() != "liver":
-        raise ValueError("SAAF uses the fixed prompt 'liver'; set --prompt liver")
+        raise ValueError("This SAAF run is configured for prompt 'liver'; set --prompt liver")
     if args.eval_only and not args.checkpoint:
         raise ValueError("--eval_only requires --checkpoint")
     if args.eval_interval <= 0:
@@ -347,7 +347,6 @@ def main():
     # free soft prompt. It is not retained in the adaptation optimizer.
     with torch.no_grad():
         initial_soft_prompt = predictor.embed_text_prompts([args.prompt]).detach()
-        text_anchor = predictor.embed_text_prompts(["liver"]).detach()
     print(
         f"VoxTell: {args.model_dir}\n"
         "Adaptation: soft_prompt_embedding only\n"
@@ -360,7 +359,6 @@ def main():
         device,
         args,
         qwen_text_encoder=qwen_text_encoder,
-        text_anchor=text_anchor,
     )
     checkpoint = None
     if args.checkpoint:

@@ -26,7 +26,7 @@ try:
         compute_saaf_quality,
         compute_semantic_quality,
         extract_case_seed_statistics,
-        first_cross_attention,
+        final_decoder_attention,
         load_quality_config,
         mask_on_feature_grid,
         probability_on_feature_grid,
@@ -41,7 +41,7 @@ except ImportError:  # Compatibility with direct ``from sfda_voxtell import ...`
         compute_saaf_quality,
         compute_semantic_quality,
         extract_case_seed_statistics,
-        first_cross_attention,
+        final_decoder_attention,
         load_quality_config,
         mask_on_feature_grid,
         probability_on_feature_grid,
@@ -183,7 +183,6 @@ class VoxTellPromptSFDA:
         device,
         args,
         qwen_text_encoder: Optional[nn.Module] = None,
-        text_anchor: Optional[torch.Tensor] = None,
     ):
         self.model = model.to(device)
         self.model.eval()
@@ -219,10 +218,6 @@ class VoxTellPromptSFDA:
         self.soft_prompt_embedding = nn.Parameter(initial_soft_prompt.clone())
         self.initial_soft_prompt = initial_soft_prompt.clone()
         self.teacher_soft_prompt = initial_soft_prompt.clone()
-        anchor_source = initial_soft_prompt if text_anchor is None else text_anchor
-        if anchor_source.ndim == 2:
-            anchor_source = anchor_source.unsqueeze(1)
-        self.text_anchor = anchor_source.detach().to(device=device, dtype=torch.float32)
         self.device, self.args = device, args
         self.quality_mode = str(getattr(args, "quality_mode", "cac")).lower()
         requested_metric = getattr(args, "quality_metric", None)
@@ -231,8 +226,6 @@ class VoxTellPromptSFDA:
             raise ValueError("quality_metric must be 'cac' or 'saaf'")
         if self.quality_metric == "saaf" and float(getattr(args, "w_quality", 0.0)) != 0.0:
             raise ValueError("SAAF is evaluation-only in this version; use w_quality=0")
-        if self.quality_metric == "saaf" and str(getattr(args, "prompt", "liver")).lower() != "liver":
-            raise ValueError("SAAF uses the fixed prompt 'liver'; prompt and anchor must match")
         if self.quality_metric == "saaf":
             configured_batch = int(getattr(args, "batch_size", 1))
             if configured_batch != 1:
@@ -263,7 +256,8 @@ class VoxTellPromptSFDA:
         )
         self.prototype_diagnostics = {}
         self.quality_diagnostics = []
-        self._last_quality_batch_valid = None
+        self._last_selected_quality = None
+        self._last_selected_semantic = None
         self.optimizer = torch.optim.AdamW(
             [self.soft_prompt_embedding], lr=args.lr, weight_decay=args.weight_decay
         )
@@ -296,8 +290,8 @@ class VoxTellPromptSFDA:
             getattr(args, "record_soft_prompt_grad_norm", False)
         )
 
-        # These hooks reuse the projected VoxTell bottleneck and fixed-prompt
-        # text representation for both CAC and TSE; no extra decoder is run.
+        # These hooks reuse the projected VoxTell bottleneck and current
+        # soft-prompt representation for CAC/TSE; no extra decoder is run.
         hook_model = getattr(self.model, "_orig_mod", self.model)
         hook_model = getattr(hook_model, "module", hook_model)
         vision_layer = self.quality_config["feature_layer"]
@@ -429,12 +423,23 @@ class VoxTellPromptSFDA:
         )
 
     @torch.no_grad()
-    def _saaf_quality(self, vision_features, logits, spatial_valid=None):
-        """Evaluate frozen ``liver`` anchor evidence on the current patch."""
-        attention, spatial_shape, token_mask = first_cross_attention(
-            self.model,
-            vision_features,
-            self.text_anchor,
+    def _saaf_quality(
+        self, vision_features, logits, native_cross_attention, spatial_valid=None
+    ):
+        """Score logits against the same forward's final-layer text response."""
+        if vision_features.ndim != 5:
+            raise ValueError(
+                "Expected projected VoxTell memory (B,H,W,D,C), got "
+                f"{tuple(vision_features.shape)}"
+            )
+        spatial_shape = tuple(int(size) for size in vision_features.shape[1:-1])
+        attention = final_decoder_attention(native_cross_attention)
+        if attention.shape[0] != logits.shape[0]:
+            raise ValueError("Native cross-attention and logits batch sizes must agree")
+        token_mask = torch.ones(
+            (attention.shape[0], attention.shape[2]),
+            dtype=torch.bool,
+            device=attention.device,
         )
         feature_valid = None
         if spatial_valid is not None:
@@ -472,11 +477,26 @@ class VoxTellPromptSFDA:
         return quality
 
     def _quality_scores(
-        self, vision_features, text_features, logits, case_ids, spatial_valid=None
+        self,
+        vision_features,
+        text_features,
+        logits,
+        case_ids,
+        spatial_valid=None,
+        native_cross_attention=None,
     ):
         cac = torch.nan_to_num(compute_cac_score(vision_features, text_features, logits))
         if self.quality_metric == "saaf":
-            saaf = self._saaf_quality(vision_features, logits, spatial_valid)
+            if native_cross_attention is None:
+                raise ValueError(
+                    "SAAF requires cross_attention from the same VoxTell forward"
+                )
+            saaf = self._saaf_quality(
+                vision_features,
+                logits,
+                native_cross_attention,
+                spatial_valid,
+            )
             return saaf["saaf"], cac, saaf
         semantic = None
         if self.quality_mode != "cac":
@@ -735,7 +755,33 @@ class VoxTellPromptSFDA:
             selection_prompt = self._text(
                 self.soft_prompt_embedding.detach(), flat_views.shape[0]
             )
-            flat_logits = self.model(flat_views, selection_prompt)
+            native_cross_attention = None
+            if self.quality_metric == "saaf":
+                try:
+                    model_output = self.model(
+                        flat_views, selection_prompt, return_diagnostics=True
+                    )
+                except TypeError as error:
+                    raise RuntimeError(
+                        "SAAF requires VoxTell forward(return_diagnostics=True) "
+                        "to reuse native decoder cross-attention"
+                    ) from error
+                if (
+                    not isinstance(model_output, tuple)
+                    or len(model_output) != 2
+                    or not isinstance(model_output[1], dict)
+                ):
+                    raise RuntimeError(
+                        "VoxTell diagnostics must return (logits, diagnostics)"
+                    )
+                flat_logits, diagnostics = model_output
+                native_cross_attention = diagnostics.get("cross_attention")
+                if native_cross_attention is None:
+                    raise RuntimeError(
+                        "VoxTell diagnostics do not contain cross_attention"
+                    )
+            else:
+                flat_logits = self.model(flat_views, selection_prompt)
             probabilities = torch.sigmoid(flat_logits.float()).view(
                 batch_size, num_views, *flat_logits.shape[1:]
             )
@@ -747,28 +793,41 @@ class VoxTellPromptSFDA:
                 self._cac_features["text"],
                 flat_logits,
                 flat_case_ids,
+                native_cross_attention=native_cross_attention,
             )
             scores = scores.view(batch_size, num_views)
+            fallback_mask = torch.zeros(
+                batch_size, dtype=torch.bool, device=scores.device
+            )
             if quality_details is not None and self.quality_metric == "saaf":
                 valid_matrix = quality_details["valid"].view(batch_size, num_views)
-                self._last_quality_batch_valid = valid_matrix.any(dim=1)
                 scores = scores.masked_fill(~valid_matrix, float("-inf"))
-            else:
-                self._last_quality_batch_valid = torch.ones(
-                    batch_size, dtype=torch.bool, device=scores.device
+                has_valid = valid_matrix.any(dim=1)
+                fallback_mask = ~has_valid
+                best = scores.argmax(dim=1)
+                # Invalid SAAF views are never selected. If all are invalid,
+                # preserve the original view so the case still updates.
+                selected = torch.where(has_valid, best, torch.zeros_like(best)).view(
+                    batch_size, 1
                 )
-            if self.quality_metric == "saaf" and not bool(self._last_quality_batch_valid.all()):
-                selected = None
+                def select_detail(name):
+                    matrix = quality_details[name].detach().view(batch_size, num_views)
+                    return matrix.gather(1, selected).reshape(-1)
+
+                self._last_selected_quality = select_detail("saaf")
+                self._last_selected_semantic = {
+                    name: select_detail(name)
+                    for name in ("saaf", "purity", "coverage", "valid")
+                }
             else:
+                selected = None
+                self._last_selected_quality = None
+                self._last_selected_semantic = None
+            if self.quality_metric != "saaf":
                 selected = select_cac_views(
                     scores,
                     probabilities,
                     self.args.selection_p,
-                    valid_mask=(
-                        valid_matrix
-                        if self.quality_metric == "saaf"
-                        else None
-                    ),
                 )
             entropy = _binary_view_entropy(
                 probabilities.reshape(batch_size * num_views, *probabilities.shape[2:])
@@ -804,6 +863,12 @@ class VoxTellPromptSFDA:
                                 "valid": bool(details["valid"][batch_index, view_index].cpu()),
                                 "invalid_reason": reason,
                                 "selected": view_index in chosen,
+                                "selection_fallback": bool(fallback_mask[batch_index]),
+                                "fallback_reason": (
+                                    "all_saaf_views_invalid_original_view_selected"
+                                    if bool(fallback_mask[batch_index])
+                                    else None
+                                ),
                             }
                         )
             return selected
@@ -870,9 +935,6 @@ class VoxTellPromptSFDA:
         # with autograd so the 3-D network does not retain activations for all
         # augmented views at once.
         selected = self._select_views(views, case_ids)
-        if self.quality_metric == "saaf" and self._last_quality_batch_valid is not None:
-            if not bool(self._last_quality_batch_valid.all()):
-                return self._quality_invalid_result()
         if selected is None:
             return self._quality_invalid_result()
         gather_shape = (batch_size, selected.shape[1]) + (1,) * (views.ndim - 2)
@@ -896,12 +958,29 @@ class VoxTellPromptSFDA:
             selected_case_ids = [
                 case_id for case_id in case_ids for _ in range(selected.shape[1])
             ]
-            selected_quality, selected_cac_flat, semantic = self._quality_scores(
-                self._cac_features["vision"],
-                self._cac_features["text"],
-                flat_logits,
-                selected_case_ids,
-            )
+            if self.quality_metric == "saaf":
+                # SAAF is an evaluation-only selector (w_quality=0). Reuse the
+                # no-grad, detached-current-prompt score from _select_views;
+                # this optimization forward remains the original logits/loss
+                # path and does not recompute text evidence with a live prompt.
+                selected_quality = self._last_selected_quality
+                semantic = self._last_selected_semantic
+                if selected_quality is None or semantic is None:
+                    raise RuntimeError("SAAF selection diagnostics were not retained")
+                selected_cac_flat = torch.nan_to_num(
+                    compute_cac_score(
+                        self._cac_features["vision"],
+                        self._cac_features["text"],
+                        flat_logits,
+                    )
+                )
+            else:
+                selected_quality, selected_cac_flat, semantic = self._quality_scores(
+                    self._cac_features["vision"],
+                    self._cac_features["text"],
+                    flat_logits,
+                    selected_case_ids,
+                )
             selected_quality = selected_quality.view(batch_size, selected.shape[1])
             selected_cac = selected_cac_flat.view(batch_size, selected.shape[1])
             selected_logits = flat_logits.view(
@@ -1091,10 +1170,9 @@ def save_sfda_checkpoint(path, adapter: VoxTellPromptSFDA, args, history):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "format": "voxtell-sfda-prompt-tse-v4",
+            "format": "voxtell-sfda-prompt-tse-v5",
             "soft_prompt_embedding": adapter.soft_prompt_embedding.detach().cpu(),
             "initial_soft_prompt": adapter.initial_soft_prompt.detach().cpu(),
-            "text_anchor": adapter.text_anchor.detach().cpu(),
             "teacher_soft_prompt": adapter.teacher_soft_prompt.detach().cpu(),
             # Legacy aliases preserve loading compatibility for v1/v2 tools.
             "prompt_embedding": adapter.soft_prompt_embedding.detach().cpu(),
@@ -1118,6 +1196,7 @@ def load_sfda_checkpoint(path, adapter: VoxTellPromptSFDA):
         "voxtell-sfda-prompt-cac-v2",
         "voxtell-sfda-soft-prompt-cac-v3",
         "voxtell-sfda-prompt-tse-v4",
+        "voxtell-sfda-prompt-tse-v5",
     }:
         raise ValueError(f"Unsupported checkpoint format: {checkpoint.get('format')}")
     soft_prompt = checkpoint.get("soft_prompt_embedding", checkpoint.get("prompt_embedding"))
@@ -1129,8 +1208,6 @@ def load_sfda_checkpoint(path, adapter: VoxTellPromptSFDA):
     adapter.soft_prompt_embedding.data.copy_(soft_prompt.to(adapter.device))
     if "initial_soft_prompt" in checkpoint:
         adapter.initial_soft_prompt.copy_(checkpoint["initial_soft_prompt"].to(adapter.device))
-    if "text_anchor" in checkpoint:
-        adapter.text_anchor.copy_(checkpoint["text_anchor"].to(adapter.device))
     adapter.teacher_soft_prompt.copy_(teacher_soft_prompt.to(adapter.device))
     if "prototype_memory" in checkpoint:
         adapter.prototype_memory.load_state_dict(checkpoint["prototype_memory"])

@@ -44,7 +44,6 @@ def load_quality_config(path):
         "attention_mad_threshold",
         "attention_min_valid_positions",
         "saaf_min_mass",
-        "saaf_text_anchor",
     }
     missing = sorted(required.difference(config))
     if missing:
@@ -63,8 +62,6 @@ def load_quality_config(path):
         raise ValueError("evidence_threshold must be in [0, 1]")
     if int(config["similarity_histogram_bins"]) < 2:
         raise ValueError("similarity_histogram_bins must be at least 2")
-    if str(config["saaf_text_anchor"]).lower() != "liver":
-        raise ValueError("SAAF text anchor is fixed to the exact prompt 'liver'")
     if float(config["attention_mad_threshold"]) < 0 or int(config["attention_min_valid_positions"]) < 2:
         raise ValueError("attention MAD threshold must be non-negative and valid positions >= 2")
     if float(config["saaf_min_mass"]) <= 0:
@@ -112,114 +109,29 @@ def text_similarity_map(vision_features, text_features):
     return (vision * text[:, None, None, None, :]).sum(dim=-1)
 
 
-def first_cross_attention(
-    model,
-    vision_features,
-    text_anchor,
-    text_token_mask=None,
-    memory_key_padding_mask=None,
-):
-    """Recompute VoxTell decoder layer-0 cross-attention without approximations.
+def final_decoder_attention(cross_attention):
+    """Return VoxTell's native last-layer cross-attention as (B,1,T,S).
 
-    ``vision_features`` must be the output of VoxTell's
-    ``project_bottleneck_embed`` hook, i.e. ``(B,H,W,D,C)``.  The operation
-    mirrors VoxTell's own decoder: project the anchor with
-    ``project_text_embed``, use the decoder layer's ``norm2``, add the model's
-    ``pos_embed`` to keys, and call the original ``multihead_attn`` with
-    ``average_attn_weights=False``.  No decoder parameters are copied or
-    modified, and the returned attention is detached by the caller.
+    VoxTell currently returns one already head-averaged ``(B,T,S)`` tensor
+    per decoder layer.  A four-dimensional per-head result is also accepted
+    for compatible forks, without recomputing query/key projections.
     """
-    if not torch.is_tensor(vision_features) or vision_features.ndim != 5:
-        raise ValueError(f"Expected projected image memory (B,H,W,D,C), got {getattr(vision_features, 'shape', None)}")
-    base = getattr(model, "_orig_mod", model)
-    base = getattr(base, "module", base)
-    required = ("project_text_embed", "transformer_decoder", "pos_embed")
-    missing = [name for name in required if not hasattr(base, name)]
-    if missing:
-        raise AttributeError("VoxTell model lacks first cross-attention components: " + ", ".join(missing))
-    batch_size = vision_features.shape[0]
-    channels = vision_features.shape[-1]
-    memory_spatial = tuple(int(value) for value in vision_features.shape[1:-1])
-    # Keep the projected-memory dtype used by VoxTell's forward (autocast may
-    # make this fp16/bf16); the attention module therefore sees identical
-    # inputs and scaling.  Robust statistics are promoted to fp32 below.
-    memory = vision_features.reshape(batch_size, -1, channels).permute(1, 0, 2)
-    anchor = torch.as_tensor(text_anchor, device=vision_features.device).float()
-    if anchor.ndim == 4:
-        if anchor.shape[2] != 1:
-            raise ValueError(f"Expected anchor shape (B,N,1,C), got {tuple(anchor.shape)}")
-        anchor = anchor.squeeze(2)
-    if anchor.ndim != 3 or anchor.shape[-1] != getattr(base, "text_embedding_dim", anchor.shape[-1]):
-        raise ValueError(f"Expected raw text anchor (B,N,C), got {tuple(anchor.shape)}")
-    if anchor.shape[0] == 1:
-        anchor = anchor.expand(batch_size, -1, -1)
-    if anchor.shape[0] != batch_size:
-        raise ValueError("Text anchor batch must be one or match image memory batch")
-    tokens = anchor.shape[1]
-    tgt = base.project_text_embed(anchor.permute(1, 0, 2))
-    position = base.pos_embed.to(device=vision_features.device)
-    if position.shape[0] != memory.shape[0]:
-        raise ValueError(
-            "VoxTell positional encoding and projected image memory disagree: "
-            f"{position.shape[0]} vs {memory.shape[0]}"
-        )
-    layer = base.transformer_decoder.layers[0]
-    # VoxTell inference may run under autocast (half image memory with float
-    # decoder weights).  The standalone diagnostic call must present q/k/v in
-    # the same dtype as the native attention module to avoid a mixed-dtype
-    # projection error while preserving its exact projections and scaling.
-    attention_parameters = list(layer.multihead_attn.parameters())
-    attention_dtype = attention_parameters[0].dtype if attention_parameters else memory.dtype
-    memory = memory.to(dtype=attention_dtype)
-    tgt = tgt.to(dtype=attention_dtype)
-    position = base.pos_embed.to(device=vision_features.device, dtype=attention_dtype)
-    query_pos = None
-    if getattr(layer, "normalize_before", False):
-        query = layer.norm2(tgt)
+    if isinstance(cross_attention, (list, tuple)):
+        if not cross_attention:
+            raise ValueError("VoxTell returned an empty cross_attention list")
+        attention = cross_attention[-1]
     else:
-        # Match VoxTell's post-norm branch exactly, including its self-attention
-        # call before norm1.  The returned self-attention weights are discarded.
-        layer.self_attn(
-            layer.with_pos_embed(tgt, query_pos),
-            layer.with_pos_embed(tgt, query_pos),
-            tgt,
-            key_padding_mask=None,
-            need_weights=False,
-        )
-        query = layer.norm1(tgt)
-    key = layer.with_pos_embed(memory, position)
-    try:
-        _, attention = layer.multihead_attn(
-            query=layer.with_pos_embed(query, query_pos),
-            key=key,
-            value=memory,
-            key_padding_mask=memory_key_padding_mask,
-            need_weights=True,
-            average_attn_weights=False,
-        )
-    except TypeError as error:
-        raise RuntimeError(
-            "VoxTell first cross-attention module does not support per-head weights"
-        ) from error
+        attention = cross_attention
+    if not torch.is_tensor(attention):
+        raise TypeError("VoxTell cross_attention must contain tensors")
+    if attention.ndim == 3:
+        attention = attention.unsqueeze(1)
     if attention.ndim != 4:
-        raise RuntimeError(
-            "Expected per-head cross-attention shape (B,heads,tokens,spatial), "
+        raise ValueError(
+            "Expected native final cross-attention (B,T,S) or (B,H,T,S), "
             f"got {tuple(attention.shape)}"
         )
-    if attention.shape[0] != batch_size or attention.shape[2] != tokens or attention.shape[3] != memory.shape[0]:
-        raise RuntimeError(
-            "Unexpected first cross-attention dimensions: "
-            f"{tuple(attention.shape)} for memory {tuple(memory.shape)}"
-        )
-    if text_token_mask is None:
-        text_token_mask = torch.ones((batch_size, tokens), dtype=torch.bool, device=attention.device)
-    else:
-        text_token_mask = torch.as_tensor(text_token_mask, device=attention.device).bool()
-        if text_token_mask.ndim == 1:
-            text_token_mask = text_token_mask.unsqueeze(0).expand(batch_size, -1)
-        if tuple(text_token_mask.shape) != (batch_size, tokens):
-            raise ValueError("text_token_mask must have shape (B,tokens)")
-    return attention, memory_spatial, text_token_mask
+    return attention
 
 
 def attention_evidence_map(

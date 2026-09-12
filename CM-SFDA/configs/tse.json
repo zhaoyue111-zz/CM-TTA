@@ -19,6 +19,5 @@
   "similarity_histogram_bins": 50,
   "attention_mad_threshold": 0.001,
   "attention_min_valid_positions": 2,
-  "saaf_min_mass": 1e-6,
-  "saaf_text_anchor": "liver"
+  "saaf_min_mass": 1e-6
 }

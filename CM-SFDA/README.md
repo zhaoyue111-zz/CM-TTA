@@ -57,9 +57,11 @@ python run_sfda_voxtell.py `
 不会把 TSE 加入训练损失。CAC 模式继续使用 `--w_cac`（`--w_contrast` 是兼容别名）。
 视图排序仍沿用原流程的 quality + entropy rank fusion，并列质量使用平均排名。
 
-SAAF 视图选择使用冻结的初始 Qwen "liver" embedding 和 VoxTell 第一层
-Transformer cross-attention（逐 head/token、log-attention median/MAD evidence），不使用
-prototype/memory。命令为：
+SAAF 视图选择对每个候选 student view 使用当前 `soft_prompt_embedding.detach()`，并从
+同一次 VoxTell forward 读取最后一层原生 Transformer cross-attention（log-attention
+median/MAD evidence）；不会固定初始文本 anchor，也不额外重算 decoder query。Teacher
+伪标签仍使用原有 `teacher_soft_prompt`。有效视图中选择 SAAF 最高者；若全部视图无效则
+回退到原始视图继续更新。命令为：
 
 ```bash
 python run_sfda_voxtell.py --data_dir /path/to/data \
@@ -67,8 +69,8 @@ python run_sfda_voxtell.py --data_dir /path/to/data \
   --prompt liver --quality_metric saaf --quality_mode cac --w_quality 0
 ```
 
-若某病例所有候选视图的 attention 或 SAAF 输入无效，该病例本次更新会跳过并记录原因；
-无效视图不会静默回退到 CAC。SAAF 诊断写入 `saaf_diagnostics.json/csv`。
+attention 或 SAAF 输入无效的候选视图不会参与评分。SAAF 诊断写入
+`saaf_diagnostics.json/csv`。
 
 也可以直接使用仓库内的入口脚本（参数依次为 `DATA_DIR VOXTELL_ROOT MODEL_DIR`
 以及可选的 prompt 和输出目录）：
