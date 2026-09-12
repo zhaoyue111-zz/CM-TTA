@@ -72,8 +72,9 @@ python run_sfda_voxtell.py --data_dir /path/to/data \
 attention 或 SAAF 输入无效的候选视图不会参与评分。SAAF 诊断写入
 `saaf_diagnostics.json/csv`。
 
-TDC 使用同一次 student-view VoxTell forward 返回的四级 decoder logits
-`[D5,D4,D3,D2]`。D2–D4 先以 trilinear 插值对齐到 D5，再 sigmoid/0.5 二值化；六组
+TDC 使用同一次 student-view VoxTell forward 返回的 decoder logits。当前 VoxTell 配置
+实际返回五级 `[D5,D4,D3,D2,D1]`；TDC 按定义取最高分辨率开始的前四级
+`[D5,D4,D3,D2]`，忽略最粗的 D1。D2–D4 先以 trilinear 插值对齐到 D5，再 sigmoid/0.5 二值化；六组
 pair Dice 跳过双空组合、单空组合记 0，均值用于 `TDC rank + entropy rank` 稳定排序。
 当前 detached soft prompt 用于所有候选 view；若所有 view 都没有有效 pair，则回退 view 0。
 TDC 仅用于无梯度视图选择，不进入 loss；原有 teacher、伪标签与更新/loss 路径保持不变。

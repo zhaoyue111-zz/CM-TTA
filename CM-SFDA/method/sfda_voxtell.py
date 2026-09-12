@@ -183,12 +183,19 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5):
     sigmoid and thresholding. Empty/empty pairs are omitted from the mean,
     while one-empty pairs contribute Dice zero.
     """
-    if not isinstance(decoder_outputs, (tuple, list)) or len(decoder_outputs) != 4:
+    if not isinstance(decoder_outputs, (tuple, list)) or len(decoder_outputs) < 4:
         raise ValueError(
-            "TDC requires exactly four VoxTell decoder outputs in [D5,D4,D3,D2] order"
+            "TDC requires at least four VoxTell decoder outputs; the first four "
+            "must be [D5,D4,D3,D2]"
         )
     if not 0.0 <= float(threshold) <= 1.0:
         raise ValueError(f"TDC threshold must be in [0, 1], got {threshold}")
+    # The current VoxTell predictor is built with n_stages=6 and
+    # num_maskformer_stages=5, so return_decoder_outputs=True yields five
+    # tensors [D5,D4,D3,D2,D1] (highest to lowest resolution). TDC is defined
+    # over D5..D2; intentionally leave out the coarsest D1 output.
+    decoder_output_count = len(decoder_outputs)
+    decoder_outputs = decoder_outputs[:4]
     reference = decoder_outputs[0]
     if not torch.is_tensor(reference) or reference.ndim != 5:
         shape = getattr(reference, "shape", None)
@@ -258,6 +265,8 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5):
         "valid_pair_count": pair_count,
         "invalid_reason": invalid_reason,
         "spatial_shape": spatial_shape,
+        "decoder_output_count": decoder_output_count,
+        "tdc_decoder_count": len(decoder_outputs),
     }
 
 
@@ -997,6 +1006,8 @@ class VoxTellPromptSFDA:
                             "view_id": int(view_index),
                             "entropy": float(entropy[batch_index, view_index].cpu()),
                             "tdc": float(details["tdc"][batch_index, view_index].cpu()),
+                            "decoder_output_count": tdc_details["decoder_output_count"],
+                            "tdc_decoder_count": tdc_details["tdc_decoder_count"],
                             "valid_pair_count": int(
                                 details["valid_pair_count"][batch_index, view_index].cpu()
                             ),

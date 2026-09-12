@@ -128,6 +128,12 @@ class _TinyTDCVoxTell(_TinyVoxTell):
             F.interpolate(logits, size=half, mode="trilinear", align_corners=False),
             F.interpolate(logits, size=quarter, mode="trilinear", align_corners=False),
             F.interpolate(logits, size=eighth, mode="trilinear", align_corners=False),
+            F.interpolate(
+                logits,
+                size=tuple(max(1, value // 16) for value in size),
+                mode="trilinear",
+                align_corners=False,
+            ),
         ]
         self.decoder_return_shapes.append([tuple(output.shape) for output in outputs])
         return outputs
@@ -592,9 +598,12 @@ class SoftPromptOnlyTests(unittest.TestCase):
         d4 = torch.full((1, 1, 2, 2, 2), 10.0)
         d3 = torch.full((1, 1, 1, 1, 1), 10.0)
         d2 = torch.full((1, 1, 1, 1, 1), 10.0)
-        result = compute_tdc_consensus([d5, d4, d3, d2])
+        d1 = torch.full((1, 1, 1, 1, 1), -10.0)
+        result = compute_tdc_consensus([d5, d4, d3, d2, d1])
 
         self.assertEqual(result["spatial_shape"], (4, 4, 4))
+        self.assertEqual(result["decoder_output_count"], 5)
+        self.assertEqual(result["tdc_decoder_count"], 4)
         self.assertEqual(TDC_PAIR_NAMES, (
             "dice_d5_d4", "dice_d5_d3", "dice_d5_d2",
             "dice_d4_d3", "dice_d4_d2", "dice_d3_d2",
@@ -606,7 +615,7 @@ class SoftPromptOnlyTests(unittest.TestCase):
 
         # A differently ordered list would use the 1x1x1 stage as the target;
         # this guards the VoxTell forward order [D5,D4,D3,D2].
-        reversed_result = compute_tdc_consensus([d2, d3, d4, d5])
+        reversed_result = compute_tdc_consensus([d2, d3, d4, d5, d1])
         self.assertEqual(reversed_result["spatial_shape"], (1, 1, 1))
 
     def test_tdc_empty_mask_pair_rules_and_finite_outputs(self):
@@ -677,7 +686,7 @@ class SoftPromptOnlyTests(unittest.TestCase):
             self.assertEqual(len(model.decoder_return_shapes), 1)
             shapes = model.decoder_return_shapes[0]
             self.assertEqual([shape[2:] for shape in shapes], [
-                (4, 4, 4), (2, 2, 2), (1, 1, 1), (1, 1, 1)
+                (4, 4, 4), (2, 2, 2), (1, 1, 1), (1, 1, 1), (1, 1, 1)
             ])
             evaluated_prompt = model.prompt_calls[-1]
             self.assertTrue(torch.equal(
@@ -690,6 +699,8 @@ class SoftPromptOnlyTests(unittest.TestCase):
             self.assertTrue(all(name in row for name in TDC_PAIR_NAMES))
             self.assertIn("valid", row)
             self.assertIn("selected", row)
+            self.assertEqual(row["decoder_output_count"], 5)
+            self.assertEqual(row["tdc_decoder_count"], 4)
         finally:
             adapter.close()
 
