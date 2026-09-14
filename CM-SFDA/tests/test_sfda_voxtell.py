@@ -64,13 +64,18 @@ from evaluate_quality_metrics import (  # noqa: E402
     _fuse_logits_then_sigmoid,
     _fuse_evidence_with_valid_weights,
     _full_volume_selection_valid,
+    _ground_truth_metrics_per_view,
+    _labeled_audit_entries,
     _patch_oracle_stats,
+    _project_prompt_features,
     _soft_consistency,
     _selection_indices,
     binary_auprc,
     binary_auroc,
     evidence_localization_metrics,
+    compute_tra_score,
     summarize_quality_audit,
+    summarize_tra_cac,
     spearman,
 )
 
@@ -252,6 +257,109 @@ def _make_adapter():
 
 
 class SoftPromptOnlyTests(unittest.TestCase):
+    def test_tra_uses_native_text_projection_and_is_detached(self):
+        model = _TinyAttentionVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), _args()
+        )
+        try:
+            prompt = torch.arange(4, dtype=torch.float32).view(1, 1, 4).requires_grad_()
+            projected = _project_prompt_features(adapter, prompt, batch_size=3)
+            native_input = adapter._text(prompt.detach(), 3).squeeze(2)
+            native_input = native_input.permute(1, 0, 2).contiguous()
+            expected = model.project_text_embed(native_input)
+            self.assertEqual(tuple(projected.shape), (1, 3, 4))
+            self.assertTrue(torch.allclose(projected, expected))
+            self.assertFalse(projected.requires_grad)
+        finally:
+            adapter.close()
+
+    def test_tra_correlation_handles_finite_and_constant_maps(self):
+        similarity = torch.tensor([0.1, 0.2, float("nan"), 0.4])
+        probability = torch.tensor([0.1, 0.3, 0.5, 0.8])
+        self.assertAlmostEqual(compute_tra_score(similarity, probability), 1.0)
+        self.assertIsNone(compute_tra_score(torch.ones(4), probability))
+        self.assertIsNone(compute_tra_score(similarity, torch.ones(4)))
+        with self.assertRaises(ValueError):
+            compute_tra_score(torch.ones(3), torch.ones(4))
+
+    def test_tra_cac_summary_excludes_invalid_scores_and_reports_gt_selection(self):
+        rows = [
+            {
+                "case": "a", "view": 0, "cac": 0.1, "cac_valid": True,
+                "tra_teacher": 0.2, "tra_teacher_valid": True,
+                "tra_original": 0.4, "tra_original_valid": True,
+                "dice": 0.1, "recall": 0.2, "precision": 0.3,
+                "selected_cac": False, "selected_tra_teacher": False,
+                "selected_tra_original": True,
+            },
+            {
+                "case": "a", "view": 1, "cac": 0.3, "cac_valid": True,
+                "tra_teacher": None, "tra_teacher_valid": False,
+                "tra_original": 0.2, "tra_original_valid": True,
+                "dice": 0.3, "recall": 0.6, "precision": 0.8,
+                "selected_cac": True, "selected_tra_teacher": False,
+                "selected_tra_original": False,
+            },
+            {
+                "case": "a", "view": 2, "cac": 0.2, "cac_valid": True,
+                "tra_teacher": 0.6, "tra_teacher_valid": True,
+                "tra_original": 0.1, "tra_original_valid": True,
+                "dice": 0.2, "recall": 0.4, "precision": 0.6,
+                "selected_cac": False, "selected_tra_teacher": True,
+                "selected_tra_original": False,
+            },
+            {
+                "case": "b", "view": 0, "cac": 0.5, "cac_valid": True,
+                "tra_teacher": None, "tra_teacher_valid": False,
+                "tra_original": 0.7, "tra_original_valid": True,
+                "dice": 0.8, "recall": 0.7, "precision": 0.9,
+                "selected_cac": True, "selected_tra_teacher": False,
+                "selected_tra_original": True,
+            },
+        ]
+        summary = summarize_tra_cac(rows, checkpoint_loaded=True)
+        self.assertEqual(summary["global_mixed_view_valid_views"]["cac"]["dice"], 4)
+        self.assertEqual(summary["global_mixed_view_valid_views"]["tra_teacher"]["dice"], 2)
+        self.assertEqual(summary["within_case_valid_cases"]["tra_teacher"]["dice"], 1)
+        self.assertAlmostEqual(
+            summary["selected_view_mean_gt_metrics"]["tra_teacher"]["dice"], 0.2
+        )
+        self.assertEqual(summary["selected_view_valid_cases"]["tra_teacher"], 1)
+        self.assertIn("EMA", summary["protocol"]["tra_teacher_prompt"])
+
+    def test_ground_truth_metrics_are_per_view_and_use_only_final_masks(self):
+        target = torch.zeros(1, 2, 2, 2)
+        target[0, 0, 0, 0] = 1
+        probability = torch.zeros(2, 2, 2, 2)
+        probability[0, 0, 0, 0] = 0.9
+        probability[1, 1, 1, 1] = 0.9
+        values = _ground_truth_metrics_per_view(probability, target)
+        self.assertEqual(values[0], {"dice": 1.0, "recall": 1.0, "precision": 1.0})
+        self.assertEqual(values[1]["dice"], 0.0)
+        self.assertEqual(values[1]["recall"], 0.0)
+        self.assertEqual(values[1]["precision"], 0.0)
+
+    def test_offline_gt_audit_pairs_train_and_test_without_changing_loader(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            train_image = root / "images" / "P0" / "train.nii.gz"
+            test_image = root / "images" / "P0" / "test.nii.gz"
+            train_label = root / "labels" / "P0" / train_image.name
+            test_label = root / "labels" / "P0" / test_image.name
+            train_label.parent.mkdir(parents=True)
+            train_label.write_bytes(b"offline-only")
+            test_label.write_bytes(b"offline-only")
+            with mock.patch(
+                "evaluate_quality_metrics.read_image_entries",
+                side_effect=[[(train_image, None)], [(test_image, test_label)]],
+            ):
+                entries = _labeled_audit_entries(root)
+        self.assertEqual(
+            [(entry[0].name, entry[2]) for entry in entries],
+            [("test.nii.gz", "test"), ("train.nii.gz", "train")],
+        )
+
     def test_quality_audit_entry_uses_current_sliding_window_signature(self):
         source = inspect.getsource(__import__("evaluate_quality_metrics").main)
         signature = inspect.signature(__import__("evaluate_quality_metrics")._voxtell_sliding_window_views)

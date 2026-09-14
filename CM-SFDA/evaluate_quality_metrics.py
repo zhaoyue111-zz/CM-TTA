@@ -1,8 +1,9 @@
-"""Full-volume, GT-only audit of VoxTell CAC and target semantic evidence."""
+"""Full-volume, GT-only audit of VoxTell CAC, TRA and semantic evidence."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import tempfile
@@ -22,14 +23,17 @@ from method.semantic_quality import (
     compute_saaf_quality,
     text_similarity_map,
 )
-from method.sfda_voxtell import VoxTellPromptSFDA
-from run_sfda_voxtell import build_predictor, seed_everything
+from method.sfda_voxtell import VoxTellPromptSFDA, load_sfda_checkpoint
+from run_sfda_voxtell import binary_segmentation_metrics, build_predictor, seed_everything
 
 
 QUALITY_NAMES = (
     "confidence", "entropy", "consistency", "cac", "purity", "coverage", "saaf",
     "completeness", "tse",
 )
+TRA_NAMES = ("tra_teacher", "tra_original")
+TRA_GT_NAMES = ("dice", "recall", "precision")
+TRA_COMPARISON_NAMES = ("cac", *TRA_NAMES)
 SELECTION_NAMES = ("cac", "saaf", "purity", "coverage", "cac_entropy", "saaf_entropy")
 
 
@@ -81,6 +85,155 @@ def spearman(values, dice):
     if first.std() == 0 or second.std() == 0:
         return None
     return float(np.corrcoef(first, second)[0, 1])
+
+
+def compute_tra_score(similarity_map, probability_map):
+    """Spearman TRA between a prompt-similarity map and final foreground probability.
+
+    Constant maps and maps with fewer than two finite paired voxels are
+    undefined and return ``None``. Ground truth is deliberately not an input.
+    """
+    similarity_map = torch.as_tensor(similarity_map).detach().float().cpu()
+    probability_map = torch.as_tensor(probability_map).detach().float().cpu()
+    if tuple(similarity_map.shape) != tuple(probability_map.shape):
+        raise ValueError(
+            "TRA similarity/probability maps must have equal shapes; got "
+            f"{tuple(similarity_map.shape)} and {tuple(probability_map.shape)}"
+        )
+    return spearman(similarity_map.reshape(-1).numpy(), probability_map.reshape(-1).numpy())
+
+
+@torch.no_grad()
+def _project_prompt_features(adapter, prompt, batch_size):
+    """Use VoxTell's native frozen text projection on (tokens,batch,channels)."""
+    network = getattr(adapter.model, "_orig_mod", adapter.model)
+    network = getattr(network, "module", network)
+    if not hasattr(network, "project_text_embed"):
+        raise AttributeError("VoxTell network is missing project_text_embed")
+    text = adapter._text(prompt.detach(), batch_size).squeeze(2)
+    text = text.permute(1, 0, 2).contiguous()
+    with torch.autocast(
+        device_type=adapter.device.type,
+        enabled=adapter.device.type == "cuda",
+    ):
+        projected = network.project_text_embed(text)
+    if not torch.is_tensor(projected) or projected.ndim != 3:
+        shape = getattr(projected, "shape", None)
+        raise ValueError(f"Expected projected prompt features (N,B,C), got {shape}")
+    if projected.shape[1] != batch_size:
+        raise ValueError(
+            "Projected prompt batch does not match view batch: "
+            f"{projected.shape[1]} vs {batch_size}"
+        )
+    return projected.detach()
+
+
+def summarize_tra_cac(view_rows, checkpoint_loaded=False):
+    """Compare CAC/TRA against full-volume Dice, recall and precision."""
+    cases = {}
+    for row in view_rows:
+        cases.setdefault(row["case"], []).append(row)
+
+    within_case = {}
+    within_valid_cases = {}
+    within_valid_views = {}
+    global_spearman = {}
+    global_valid_views = {}
+    selected_values = {
+        name: {metric: [] for metric in TRA_GT_NAMES}
+        for name in TRA_COMPARISON_NAMES
+    }
+    selected_valid_cases = {name: 0 for name in TRA_COMPARISON_NAMES}
+    for score_name in TRA_COMPARISON_NAMES:
+        within_case[score_name] = {}
+        within_valid_cases[score_name] = {}
+        within_valid_views[score_name] = {}
+        global_spearman[score_name] = {}
+        global_valid_views[score_name] = {}
+        for gt_name in TRA_GT_NAMES:
+            case_correlations = []
+            n_within_views = 0
+            for rows in cases.values():
+                valid_rows = [
+                    row for row in rows
+                    if row.get(f"{score_name}_valid", False)
+                    and row.get(score_name) is not None
+                    and np.isfinite(row[score_name])
+                    and np.isfinite(row[gt_name])
+                ]
+                n_within_views += len(valid_rows)
+                correlation = spearman(
+                    [row[score_name] for row in valid_rows],
+                    [row[gt_name] for row in valid_rows],
+                )
+                if correlation is not None:
+                    case_correlations.append(correlation)
+            within_case[score_name][gt_name] = (
+                float(np.mean(case_correlations)) if case_correlations else None
+            )
+            within_valid_cases[score_name][gt_name] = len(case_correlations)
+            within_valid_views[score_name][gt_name] = n_within_views
+
+            valid_rows = [
+                row for row in view_rows
+                if row.get(f"{score_name}_valid", False)
+                and row.get(score_name) is not None
+                and np.isfinite(row[score_name])
+                and np.isfinite(row[gt_name])
+            ]
+            global_spearman[score_name][gt_name] = spearman(
+                [row[score_name] for row in valid_rows],
+                [row[gt_name] for row in valid_rows],
+            )
+            global_valid_views[score_name][gt_name] = len(valid_rows)
+
+            selected_rows = [row for row in view_rows if row.get(f"selected_{score_name}", False)]
+            selected_values[score_name][gt_name].extend(
+                float(row[gt_name]) for row in selected_rows if np.isfinite(row[gt_name])
+            )
+        selected_valid_cases[score_name] = len(
+            [row for row in view_rows if row.get(f"selected_{score_name}", False)]
+        )
+
+    return {
+        "protocol": {
+            "probability_prompt": (
+                "checkpoint soft_prompt_embedding (standard adapted inference)"
+                if checkpoint_loaded
+                else "initial Qwen source prompt (no adapted checkpoint supplied)"
+            ),
+            "tra_teacher_prompt": (
+                "detached checkpoint EMA teacher_soft_prompt"
+                if checkpoint_loaded
+                else "adapter-initialized teacher prompt; equals original prompt because no checkpoint was loaded"
+            ),
+            "tra_original_prompt": "checkpoint initial_soft_prompt when loaded; otherwise initial Qwen source prompt",
+            "similarity": "voxelwise cosine between frozen project_bottleneck_embed output and native project_text_embed output",
+            "correlation": "full-volume finite-pair Spearman(similarity, final foreground probability); constant maps are invalid",
+            "view_selection": "per-case argmax score over valid views; CAC uses finite scores, TRA uses finite defined correlations",
+            "gt_usage": "GT from train/test splits is accessed only in this offline audit for Dice/recall/precision evaluation and correlations; neither prompt maps, predictions nor selection use GT",
+            "checkpoint_loaded": bool(checkpoint_loaded),
+        },
+        "within_case_spearman_macro": within_case,
+        "within_case_valid_cases": within_valid_cases,
+        "within_case_valid_views": within_valid_views,
+        "global_mixed_view_spearman": global_spearman,
+        "global_mixed_view_valid_views": global_valid_views,
+        "selected_view_mean_gt_metrics": {
+            name: {
+                metric: float(np.mean(values)) if values else None
+                for metric, values in metrics.items()
+            }
+            for name, metrics in selected_values.items()
+        },
+        "selected_view_valid_cases": selected_valid_cases,
+        "view_rows": len(view_rows),
+        "cases": len(cases),
+        "split_case_counts": {
+            split: len({row["case"] for row in view_rows if row.get("split") == split})
+            for split in ("train", "test")
+        },
+    }
 
 
 def binary_auroc(scores, target):
@@ -242,6 +395,8 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         evidence_sum = mmap("evidence", (num_views, *padded_shape))
         evidence_weight_sum = mmap("evidence_weight", (num_views, *padded_shape))
         similarity_sum = mmap("similarity", (num_views, *padded_shape))
+        tra_teacher_similarity_sum = mmap("tra_teacher_similarity", (num_views, *padded_shape))
+        tra_original_similarity_sum = mmap("tra_original_similarity", (num_views, *padded_shape))
         selected_logit_sum = {name: mmap(f"selected_{name}", padded_shape) for name in selected_names}
         selected_weight_sum = {name: mmap(f"selected_weight_{name}", padded_shape) for name in selected_names}
         selection_skipped = {name: False for name in selected_names}
@@ -256,7 +411,9 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             with torch.no_grad(), torch.autocast(
                 device_type=adapter.device.type, enabled=adapter.device.type == "cuda"
             ):
-                prompt = adapter._text(adapter.initial_soft_prompt, num_views)
+                # The final probability map follows standard VoxTell SFDA
+                # inference and uses the adapted student prompt from checkpoint.
+                prompt = adapter._text(adapter.soft_prompt_embedding.detach(), num_views)
                 try:
                     model_output = adapter.model(views, prompt, return_diagnostics=True)
                 except TypeError as error:
@@ -277,9 +434,10 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                         "VoxTell diagnostics must return (logits, diagnostics)"
                     )
             flat_case_ids = [case_key] * num_views
+            vision_features = adapter._cac_features["vision"]
             current_text_features = adapter._cac_features["text"]
             _quality, cac, semantic = adapter._quality_scores(
-                adapter._cac_features["vision"],
+                vision_features,
                 adapter._cac_features["text"],
                 logits,
                 flat_case_ids,
@@ -293,7 +451,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                 saaf_details = semantic
             else:
                 saaf_details = adapter._saaf_quality(
-                    adapter._cac_features["vision"],
+                    vision_features,
                     logits,
                     native_cross,
                     valid_views,
@@ -304,10 +462,28 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             probability = torch.sigmoid(logits[:, 0].float())
             evidence = semantic["evidence"]
             similarity = text_similarity_map(
-                adapter._cac_features["vision"], current_text_features
+                vision_features, current_text_features
+            )
+            teacher_text_features = _project_prompt_features(
+                adapter, adapter.teacher_soft_prompt.detach(), num_views
+            )
+            original_text_features = _project_prompt_features(
+                adapter, adapter.initial_soft_prompt.detach(), num_views
+            )
+            tra_teacher_similarity = text_similarity_map(
+                vision_features, teacher_text_features
+            )
+            tra_original_similarity = text_similarity_map(
+                vision_features, original_text_features
             )
             evidence = _resize_patch_map(evidence.permute(0, 3, 1, 2), tuple(predictor.patch_size))
             similarity = _resize_patch_map(similarity.permute(0, 3, 1, 2), tuple(predictor.patch_size))
+            tra_teacher_similarity = _resize_patch_map(
+                tra_teacher_similarity.permute(0, 3, 1, 2), tuple(predictor.patch_size)
+            )
+            tra_original_similarity = _resize_patch_map(
+                tra_original_similarity.permute(0, 3, 1, 2), tuple(predictor.patch_size)
+            )
             probability = _resize_patch_map(probability, tuple(predictor.patch_size))
             cac = cac.detach().view(1, num_views)
             semantic_purity = semantic["purity"].detach().view(1, num_views)
@@ -337,6 +513,8 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             logits_cpu = logits[:, 0].float().detach().cpu()
             evidence_cpu = evidence.detach().cpu()
             similarity_cpu = similarity.detach().cpu()
+            tra_teacher_similarity_cpu = tra_teacher_similarity.detach().cpu()
+            tra_original_similarity_cpu = tra_original_similarity.detach().cpu()
             # Keep the original torch float32 accumulation order while using
             # writable memmap-backed storage instead of resident tensors.
             torch.from_numpy(logit_sum[(..., *patch_slices)]).add_(logits_cpu * weight)
@@ -349,6 +527,12 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
                     )
                     torch.from_numpy(evidence_weight_sum[(view_index, *patch_slices)]).add_(weight)
             torch.from_numpy(similarity_sum[(..., *patch_slices)]).add_(similarity_cpu * weight)
+            torch.from_numpy(tra_teacher_similarity_sum[(..., *patch_slices)]).add_(
+                tra_teacher_similarity_cpu * weight
+            )
+            torch.from_numpy(tra_original_similarity_sum[(..., *patch_slices)]).add_(
+                tra_original_similarity_cpu * weight
+            )
             torch.from_numpy(gaussian_sum[patch_slices]).add_(weight)
             for name in selected_names:
                 if patch_skipped[name]:
@@ -424,6 +608,7 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         )
         evidence_original = torch.from_numpy(evidence_original_np.copy())
         full_metrics = {name: [] for name in QUALITY_NAMES}
+        full_metrics.update({name: [] for name in TRA_NAMES})
         full_consistency = _soft_consistency(probability)
         full_view_valid = torch.zeros(num_views, dtype=torch.bool)
         view_invalid_reasons = [None for _ in range(num_views)]
@@ -436,6 +621,18 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             evidence_view = torch.from_numpy(evidence_view_np.copy())
             similarity_view = torch.from_numpy(
                 (np.asarray(similarity_sum[(view_index, *crop)], dtype=np.float32) / denominator_np).copy()
+            )
+            tra_teacher_similarity_view = torch.from_numpy(
+                (
+                    np.asarray(tra_teacher_similarity_sum[(view_index, *crop)], dtype=np.float32)
+                    / denominator_np
+                ).copy()
+            )
+            tra_original_similarity_view = torch.from_numpy(
+                (
+                    np.asarray(tra_original_similarity_sum[(view_index, *crop)], dtype=np.float32)
+                    / denominator_np
+                ).copy()
             )
             view_probability = probability[view_index:view_index + 1]
             clipped = view_probability.clamp(1e-6, 1 - 1e-6)
@@ -460,6 +657,18 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             full_metrics["saaf"].append(float(saaf["saaf"][0]))
             full_metrics["completeness"].append(float(saaf["coverage"][0]))
             full_metrics["tse"].append(float(saaf["saaf"][0]))
+            tra_teacher = compute_tra_score(
+                tra_teacher_similarity_view, view_probability[0]
+            )
+            tra_original = compute_tra_score(
+                tra_original_similarity_view, view_probability[0]
+            )
+            full_metrics["tra_teacher"].append(
+                float(tra_teacher) if tra_teacher is not None else float("nan")
+            )
+            full_metrics["tra_original"].append(
+                float(tra_original) if tra_original is not None else float("nan")
+            )
         selected_dice = {}
         selection_diagnostics = {}
         for name, value in selected_logit_sum.items():
@@ -528,6 +737,54 @@ def _dice_per_view(probability, target):
         prediction.flatten(start_dim=1).sum(dim=1) + target.flatten(start_dim=1).sum(dim=1)
     ).float()
     return torch.where(denominator > 0, 2 * intersection / denominator, torch.ones_like(denominator))
+
+
+def _ground_truth_metrics_per_view(probability, target):
+    """Compute binary GT metrics after prediction maps have been finalized."""
+    target_tensor = target.detach().cpu()
+    if target_tensor.ndim == 4 and target_tensor.shape[0] == 1:
+        target_tensor = target_tensor[0]
+    elif target_tensor.ndim == 5 and target_tensor.shape[:2] == (1, 1):
+        target_tensor = target_tensor[0, 0]
+    target_array = target_tensor.numpy().astype(bool)
+    rows = []
+    for view_probability in probability:
+        prediction = view_probability.detach().cpu().numpy() >= 0.5
+        metrics = binary_segmentation_metrics(prediction, target_array)
+        rows.append({name: float(metrics[name]) for name in TRA_GT_NAMES})
+    return rows
+
+
+def _best_finite_view(scores, valid=None):
+    scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    mask = np.isfinite(scores)
+    if valid is not None:
+        valid = np.asarray(valid, dtype=bool).reshape(-1)
+        if valid.shape != mask.shape:
+            raise ValueError("View score validity mask has the wrong shape")
+        mask &= valid
+    if not mask.any():
+        return None
+    return int(np.argmax(np.where(mask, scores, -np.inf)))
+
+
+def _labeled_audit_entries(data_dir):
+    """Pair both image splits with GT for this offline-only evaluation pass."""
+    root = Path(data_dir)
+    entries = []
+    for split in ("train", "test"):
+        for image_path, _split_label in read_image_entries(root, split):
+            # Training loaders intentionally expose no labels. The offline
+            # auditor pairs them here, after adaptation/prototype inputs have
+            # been separated from GT, solely for final metric computation.
+            label_path = root / "labels" / image_path.parent.name / image_path.name
+            if not label_path.is_file():
+                raise FileNotFoundError(
+                    f"Offline GT audit requires a matching label: {label_path}"
+                )
+            entries.append((image_path, label_path, split))
+    entries.sort(key=lambda entry: (entry[0].parent.name, entry[0].name))
+    return entries
 
 
 def _patch_oracle_stats(candidate_dice, selected_index):
@@ -670,6 +927,10 @@ def parse_args():
     parser.add_argument("--data_dir", required=True)
     parser.add_argument("--voxtell_root", required=True)
     parser.add_argument("--model_dir", required=True)
+    parser.add_argument(
+        "--checkpoint", default=None,
+        help="Optional CM-SFDA checkpoint supplying student, EMA teacher and original prompts",
+    )
     parser.add_argument("--prompt", default="liver")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--quality_config", default=str(Path(__file__).parent / "configs" / "tse.json"))
@@ -689,6 +950,10 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--visualize_cases", type=int, default=5)
     parser.add_argument("--output", default="results_/voxtell_sfda/quality_audit.json")
+    parser.add_argument(
+        "--views_csv", default=None,
+        help="Per-case/view CAC and TRA table (defaults next to --output)",
+    )
     parser.add_argument("--seed", type=int, default=1377)
     return parser.parse_args()
 
@@ -834,6 +1099,8 @@ def main():
         adapter_args,
     )
     adapter.predictor = predictor
+    if args.checkpoint:
+        load_sfda_checkpoint(args.checkpoint, adapter)
     train_loader = make_target_loader(args.data_dir, tuple(predictor.patch_size), args.batch_size, args.num_workers)
     if args.quality_metric != "saaf" and args.quality_mode != "cac":
         adapter.build_prototype_memory(train_loader)
@@ -847,9 +1114,10 @@ def main():
     best_fixed_view_dice = []
     patch_spearman_case = {name: [] for name in QUALITY_NAMES}
     invalid_evidence_cases = []
+    tra_cac_view_rows = []
     try:
-        test_entries = read_image_entries(args.data_dir, "test")
-        for case_index, (image_path, label_path) in enumerate(test_entries):
+        audit_entries = _labeled_audit_entries(args.data_dir)
+        for case_index, (image_path, label_path, split_name) in enumerate(audit_entries):
             volume, target = load_preprocessed_labeled_case(image_path, label_path)
             target = _align_target_to_volume(target, volume)
             inference = _voxtell_sliding_window_views(
@@ -864,16 +1132,41 @@ def main():
                 inference["probability"], inference["evidence"], inference["full_metrics"]
             )
             view_valid = inference.get("view_valid", torch.ones(args.num_aug_views, dtype=torch.bool))
+            comparison_scores = {
+                name: metrics[name].detach().cpu().numpy().reshape(-1)
+                for name in TRA_COMPARISON_NAMES
+            }
+            selected_full_views = {
+                name: _best_finite_view(scores)
+                for name, scores in comparison_scores.items()
+            }
+            # GT is first read by metric computation after every view selection
+            # decision above is fixed from CAC/TRA scores alone.
             dice = _dice_per_view(probability, target.float())
+            gt_metrics = _ground_truth_metrics_per_view(probability, target)
             fixed_index, fixed_dice = int(dice.argmax()), float(dice.max())
             best_fixed_view_dice.append(fixed_dice)
             per_view = []
             for view_index in range(args.num_aug_views):
+                finite_scores = {}
+                for name in TRA_NAMES:
+                    score = float(comparison_scores[name][view_index])
+                    finite_scores[name] = score if np.isfinite(score) else None
                 row = {
                     "case": image_path.name,
                     "view": view_index,
                     "dice": float(dice[view_index]),
-                    **{name: float(values[view_index]) for name, values in metrics.items()},
+                    **{
+                        name: (
+                            float(values[view_index])
+                            if np.isfinite(float(values[view_index]))
+                            else None
+                        )
+                        for name, values in metrics.items()
+                        if name not in TRA_NAMES
+                    },
+                    **gt_metrics[view_index],
+                    **finite_scores,
                 }
                 valid_semantic = bool(view_valid[view_index])
                 row["valid_metrics"] = {
@@ -882,6 +1175,21 @@ def main():
                 }
                 per_view.append(row)
                 mixed_views.append(row)
+                comparison_row = {
+                    "case": image_path.name,
+                    "split": split_name,
+                    "view": int(view_index),
+                    "cac": float(comparison_scores["cac"][view_index])
+                    if np.isfinite(comparison_scores["cac"][view_index]) else None,
+                    **finite_scores,
+                    **gt_metrics[view_index],
+                }
+                for name in TRA_COMPARISON_NAMES:
+                    comparison_row[f"{name}_valid"] = comparison_row[name] is not None
+                    comparison_row[f"selected_{name}"] = (
+                        selected_full_views[name] == view_index
+                    )
+                tra_cac_view_rows.append(comparison_row)
             correlations = {
                 name: spearman(
                     [row[name] for row in per_view if row["valid_metrics"][name]],
@@ -987,6 +1295,18 @@ def main():
                     "views": per_view,
                     "within_case_spearman": correlations,
                     "within_case_valid_views": valid_view_counts,
+                    "tra_cac_within_case_spearman": {
+                        name: {
+                            gt_name: spearman(
+                                [row[name] for row in tra_cac_view_rows
+                                 if row["case"] == image_path.name and row[f"{name}_valid"]],
+                                [row[gt_name] for row in tra_cac_view_rows
+                                 if row["case"] == image_path.name and row[f"{name}_valid"]],
+                            )
+                            for gt_name in TRA_GT_NAMES
+                        }
+                        for name in TRA_COMPARISON_NAMES
+                    },
                     "patch_spearman": {
                         name: {
                             "mean": float(np.mean([v for v in values if v is not None])) if any(v is not None for v in values) else None,
@@ -999,6 +1319,7 @@ def main():
                     "patch_count": len(inference["patch_records"]),
                     "patches": inference["patch_records"],
                     "selections": selections,
+                    "tra_cac_selected_views": selected_full_views,
                     "evidence_localization_original_view": localization,
                     "evidence_statistics_original_view": _tensor_statistics(evidence),
                     "prototype_valid_fraction": inference["prototype_valid_fraction"],
@@ -1032,6 +1353,31 @@ def main():
         adapter.prototype_diagnostics,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
+    views_csv = (
+        Path(args.views_csv)
+        if args.views_csv
+        else output.with_name(f"{output.stem}_tra_cac_views.csv")
+    )
+    views_csv.parent.mkdir(parents=True, exist_ok=True)
+    csv_fields = (
+        "case", "split", "view", "cac", "tra_teacher", "tra_original",
+        "dice", "recall", "precision",
+        "cac_valid", "tra_teacher_valid", "tra_original_valid",
+        "selected_cac", "selected_tra_teacher", "selected_tra_original",
+    )
+    with views_csv.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=csv_fields)
+        writer.writeheader()
+        writer.writerows(tra_cac_view_rows)
+    result["tra_cac_comparison"] = summarize_tra_cac(
+        tra_cac_view_rows, checkpoint_loaded=bool(args.checkpoint)
+    )
+    result["tra_cac_comparison"]["protocol"]["num_aug_views"] = int(args.num_aug_views)
+    result["tra_cac_comparison"]["protocol"]["checkpoint_path"] = args.checkpoint
+    result["tra_cac_comparison"]["protocol"]["view_generation"] = (
+        "per-case seeded training-style scale/offset/noise views; all scores use the same candidates"
+    )
+    result["tra_cac_views_csv"] = str(views_csv)
     output.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key != "cases"}, indent=2))
 
