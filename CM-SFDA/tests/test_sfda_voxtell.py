@@ -68,11 +68,14 @@ from evaluate_quality_metrics import (  # noqa: E402
     _labeled_audit_entries,
     _patch_oracle_stats,
     _project_prompt_features,
+    _write_case_global_views,
+    _crop_case_global_views,
     _soft_consistency,
     _selection_indices,
     binary_auprc,
     binary_auroc,
     evidence_localization_metrics,
+    parse_args as parse_quality_args,
     compute_tra_score,
     summarize_quality_audit,
     summarize_tra_cac,
@@ -257,6 +260,39 @@ def _make_adapter():
 
 
 class SoftPromptOnlyTests(unittest.TestCase):
+    def test_case_global_views_are_deterministic_and_overlap_consistently(self):
+        volume = torch.arange(1 * 4 * 5 * 6, dtype=torch.float32).reshape(1, 4, 5, 6)
+        stored = np.empty((4, *volume.shape), dtype=np.float32)
+        repeated = np.empty_like(stored)
+        _write_case_global_views(volume, 4, seed=731, destination=stored)
+        _write_case_global_views(volume, 4, seed=731, destination=repeated)
+        np.testing.assert_array_equal(stored, repeated)
+
+        first = _crop_case_global_views(
+            stored,
+            (slice(None), slice(0, 3), slice(0, 3), slice(0, 4)),
+        )
+        second = _crop_case_global_views(
+            stored,
+            (slice(None), slice(1, 4), slice(2, 5), slice(2, 6)),
+        )
+        # The patches overlap at full-volume coordinates D=1:3, H=2:3, W=2:4.
+        torch.testing.assert_close(first[:, :, 1:3, 2:3, 2:4], second[:, :, 0:2, 0:1, 0:2])
+        self.assertTrue(torch.any(first[1:] != first[:1]))
+
+    def test_quality_audit_requires_an_adapted_checkpoint(self):
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "evaluate_quality_metrics.py", "--data_dir", "/tmp/data",
+                "--voxtell_root", "/tmp/voxtell", "--model_dir", "/tmp/model",
+            ],
+        ):
+            with self.assertRaises(SystemExit) as error:
+                parse_quality_args()
+        self.assertEqual(error.exception.code, 2)
+
     def test_tra_uses_native_text_projection_and_is_detached(self):
         model = _TinyAttentionVoxTell()
         adapter = VoxTellPromptSFDA(
@@ -327,6 +363,8 @@ class SoftPromptOnlyTests(unittest.TestCase):
         )
         self.assertEqual(summary["selected_view_valid_cases"]["tra_teacher"], 1)
         self.assertIn("EMA", summary["protocol"]["tra_teacher_prompt"])
+        with self.assertRaisesRegex(ValueError, "requires an adapted"):
+            summarize_tra_cac(rows, checkpoint_loaded=False)
 
     def test_ground_truth_metrics_are_per_view_and_use_only_final_masks(self):
         target = torch.zeros(1, 2, 2, 2)

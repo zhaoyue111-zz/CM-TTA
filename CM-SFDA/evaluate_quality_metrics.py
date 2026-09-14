@@ -128,8 +128,10 @@ def _project_prompt_features(adapter, prompt, batch_size):
     return projected.detach()
 
 
-def summarize_tra_cac(view_rows, checkpoint_loaded=False):
+def summarize_tra_cac(view_rows, checkpoint_loaded):
     """Compare CAC/TRA against full-volume Dice, recall and precision."""
+    if not checkpoint_loaded:
+        raise ValueError("TRA/CAC comparison requires an adapted CM-SFDA checkpoint")
     cases = {}
     for row in view_rows:
         cases.setdefault(row["case"], []).append(row)
@@ -197,22 +199,14 @@ def summarize_tra_cac(view_rows, checkpoint_loaded=False):
 
     return {
         "protocol": {
-            "probability_prompt": (
-                "checkpoint soft_prompt_embedding (standard adapted inference)"
-                if checkpoint_loaded
-                else "initial Qwen source prompt (no adapted checkpoint supplied)"
-            ),
-            "tra_teacher_prompt": (
-                "detached checkpoint EMA teacher_soft_prompt"
-                if checkpoint_loaded
-                else "adapter-initialized teacher prompt; equals original prompt because no checkpoint was loaded"
-            ),
-            "tra_original_prompt": "checkpoint initial_soft_prompt when loaded; otherwise initial Qwen source prompt",
+            "probability_prompt": "checkpoint soft_prompt_embedding (standard adapted inference)",
+            "tra_teacher_prompt": "detached checkpoint EMA teacher_soft_prompt",
+            "tra_original_prompt": "checkpoint initial_soft_prompt",
             "similarity": "voxelwise cosine between frozen project_bottleneck_embed output and native project_text_embed output",
             "correlation": "full-volume finite-pair Spearman(similarity, final foreground probability); constant maps are invalid",
             "view_selection": "per-case argmax score over valid views; CAC uses finite scores, TRA uses finite defined correlations",
             "gt_usage": "GT from train/test splits is accessed only in this offline audit for Dice/recall/precision evaluation and correlations; neither prompt maps, predictions nor selection use GT",
-            "checkpoint_loaded": bool(checkpoint_loaded),
+            "checkpoint_loaded": True,
         },
         "within_case_spearman_macro": within_case,
         "within_case_valid_cases": within_valid_cases,
@@ -304,33 +298,56 @@ def _add_spatial_patch(accumulator, patch, location):
     accumulator[(..., *slices)] += patch
 
 
-def _training_style_views(volume, num_views, seed):
-    """Reproduce dataset strong augmentation and adapter extra-view sampling."""
-    generator = torch.Generator(device=volume.device)
+def _training_style_view_specs(num_views, seed):
+    """Sample one reproducible set of train-style transforms per case/view."""
+    num_views = int(num_views)
+    if num_views < 1:
+        raise ValueError("num_views must be at least one")
+    generator = torch.Generator(device="cpu")
     generator.manual_seed(int(seed) % (2**63 - 1))
+    specs = [(1.0, 0.0, None)]
+    for _ in range(1, num_views):
+        scale = 1.0
+        if bool(torch.rand((), generator=generator) < 0.8):
+            scale = float(torch.empty(()).uniform_(0.85, 1.15, generator=generator))
+        offset = 0.0
+        if bool(torch.rand((), generator=generator) < 0.8):
+            offset = float(torch.empty(()).uniform_(-0.15, 0.15, generator=generator))
+        noise_seed = None
+        if bool(torch.rand((), generator=generator) < 0.5):
+            noise_seed = int(torch.randint(0, 2**31 - 1, (), generator=generator))
+        specs.append((scale, offset, noise_seed))
+    return specs
 
-    def augment(base):
-        result = base.clone()
-        if bool(torch.rand((), generator=generator, device=volume.device) < 0.8):
-            scale = torch.empty((), device=volume.device).uniform_(
-                0.85, 1.15, generator=generator
-            )
-            result = result * scale
-        if bool(torch.rand((), generator=generator, device=volume.device) < 0.8):
-            offset = torch.empty((), device=volume.device).uniform_(
-                -0.15, 0.15, generator=generator
-            )
-            result = result + offset
-        if bool(torch.rand((), generator=generator, device=volume.device) < 0.5):
-            result = result + torch.randn(
-                result.shape, generator=generator, device=volume.device
-            ) * 0.05
-        return result.contiguous()
 
-    views = [volume, augment(volume)]
-    while len(views) < int(num_views):
-        views.append(augment(volume))
-    return torch.stack(views[: int(num_views)], dim=0)
+def _write_case_global_views(volume, num_views, seed, destination):
+    """Materialize case-wide views once, so every patch sees the same transform.
+
+    ``destination`` is normally a disk-backed array with shape
+    ``(num_views, C, D, H, W)``. Noise is sampled over the full preprocessed
+    volume and therefore remains spatially aligned across overlapping patches.
+    """
+    base = volume.detach().to(device="cpu", dtype=torch.float32).contiguous()
+    expected_shape = (int(num_views), *tuple(base.shape))
+    if tuple(destination.shape) != expected_shape:
+        raise ValueError(f"Expected case-view storage {expected_shape}, got {destination.shape}")
+    specs = _training_style_view_specs(num_views, seed)
+    for view_index, (scale, offset, noise_seed) in enumerate(specs):
+        view = base * scale + offset
+        if noise_seed is not None:
+            noise_generator = torch.Generator(device="cpu")
+            noise_generator.manual_seed(noise_seed)
+            view = view + torch.randn(view.shape, generator=noise_generator) * 0.05
+        destination[view_index] = view.contiguous().numpy()
+    if hasattr(destination, "flush"):
+        destination.flush()
+    return specs
+
+
+def _crop_case_global_views(case_views, slicer):
+    """Crop all case-wide views at one predictor sliding-window location."""
+    patch_views = np.array(case_views[(slice(None), *slicer)], dtype=np.float32, copy=True)
+    return torch.from_numpy(patch_views)
 
 
 def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None, target=None):
@@ -392,6 +409,8 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
             return np.memmap(Path(cache_dir) / f"{name}.bin", mode="w+", dtype=np.float32, shape=shape)
 
         logit_sum = mmap("logits", (num_views, *padded_shape))
+        case_views = mmap("case_views", (num_views, *tuple(padded.shape)))
+        _write_case_global_views(padded, num_views, seed, case_views)
         evidence_sum = mmap("evidence", (num_views, *padded_shape))
         evidence_weight_sum = mmap("evidence_weight", (num_views, *padded_shape))
         similarity_sum = mmap("similarity", (num_views, *padded_shape))
@@ -405,7 +424,9 @@ def _voxtell_sliding_window_views(adapter, volume, num_views, seed, case_id=None
         for patch_index, slicer in enumerate(slicers):
             patch = padded[slicer].to(adapter.device, non_blocking=True)
             valid_patch = padded_valid[slicer].to(adapter.device, non_blocking=True)
-            views = _training_style_views(patch, num_views, seed + patch_index)
+            views = _crop_case_global_views(case_views, slicer).to(
+                adapter.device, non_blocking=True
+            )
             valid_views = valid_patch.expand(num_views, -1, -1, -1, -1)
             adapter._cac_features.clear()
             with torch.no_grad(), torch.autocast(
@@ -928,8 +949,8 @@ def parse_args():
     parser.add_argument("--voxtell_root", required=True)
     parser.add_argument("--model_dir", required=True)
     parser.add_argument(
-        "--checkpoint", default=None,
-        help="Optional CM-SFDA checkpoint supplying student, EMA teacher and original prompts",
+        "--checkpoint", required=True,
+        help="Required adapted CM-SFDA checkpoint supplying student, EMA teacher and original prompts",
     )
     parser.add_argument("--prompt", default="liver")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1074,6 +1095,11 @@ def summarize_quality_audit(
 
 def main():
     args = parse_args()
+    checkpoint_path = Path(args.checkpoint).expanduser()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Adapted CM-SFDA checkpoint is required for TRA evaluation: {checkpoint_path}"
+        )
     if args.w_quality != 0:
         raise ValueError("Quality audit is evaluation-only; use --w_quality 0")
     if args.quality_metric == "saaf" and str(args.prompt).lower() != "liver":
@@ -1099,8 +1125,7 @@ def main():
         adapter_args,
     )
     adapter.predictor = predictor
-    if args.checkpoint:
-        load_sfda_checkpoint(args.checkpoint, adapter)
+    load_sfda_checkpoint(str(checkpoint_path), adapter)
     train_loader = make_target_loader(args.data_dir, tuple(predictor.patch_size), args.batch_size, args.num_workers)
     if args.quality_metric != "saaf" and args.quality_mode != "cac":
         adapter.build_prototype_memory(train_loader)
@@ -1370,12 +1395,12 @@ def main():
         writer.writeheader()
         writer.writerows(tra_cac_view_rows)
     result["tra_cac_comparison"] = summarize_tra_cac(
-        tra_cac_view_rows, checkpoint_loaded=bool(args.checkpoint)
+        tra_cac_view_rows, checkpoint_loaded=True
     )
     result["tra_cac_comparison"]["protocol"]["num_aug_views"] = int(args.num_aug_views)
     result["tra_cac_comparison"]["protocol"]["checkpoint_path"] = args.checkpoint
     result["tra_cac_comparison"]["protocol"]["view_generation"] = (
-        "per-case seeded training-style scale/offset/noise views; all scores use the same candidates"
+        "the case seed generates all training-style scale/offset/noise views once over the full padded volume; every sliding-window patch crops those same aligned views"
     )
     result["tra_cac_views_csv"] = str(views_csv)
     output.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
