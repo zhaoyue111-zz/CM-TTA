@@ -35,6 +35,7 @@ TRA_NAMES = ("tra_teacher", "tra_original")
 TRA_GT_NAMES = ("dice", "recall", "precision")
 TRA_COMPARISON_NAMES = ("cac", *TRA_NAMES)
 SELECTION_NAMES = ("cac", "saaf", "purity", "coverage", "cac_entropy", "saaf_entropy")
+STATISTICS_MAX_QUANTILE_SAMPLES = 1_000_000
 
 
 def _fuse_logits_then_sigmoid(logits, denominator):
@@ -902,9 +903,35 @@ def evidence_localization_metrics(evidence, target, threshold):
     }
 
 
-def _tensor_statistics(values):
+def _tensor_statistics(values, max_quantile_samples=STATISTICS_MAX_QUANTILE_SAMPLES):
     values = values.detach().float().cpu().reshape(-1)
-    quantiles = torch.quantile(values, torch.tensor([0.05, 0.25, 0.5, 0.75, 0.95]))
+    if values.numel() == 0:
+        return {
+            "mean": None,
+            "std": None,
+            "min": None,
+            "max": None,
+            "quantiles": {name: None for name in ("q05", "q25", "q50", "q75", "q95")},
+            "quantile_sample_count": 0,
+            "quantiles_exact": True,
+        }
+    max_quantile_samples = max(1, int(max_quantile_samples))
+    exact_quantiles = values.numel() <= max_quantile_samples
+    if exact_quantiles:
+        quantile_values = values
+    else:
+        # Exact torch.quantile sorts/copies its input and can exceed PyTorch's
+        # tensor-size limit for full 3-D volumes. Use a bounded, deterministic
+        # sample for quantiles while retaining exact full-volume reductions below.
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(0)
+        indices = torch.randint(
+            values.numel(), (max_quantile_samples,), generator=generator
+        )
+        quantile_values = values.index_select(0, indices)
+    quantiles = torch.quantile(
+        quantile_values, torch.tensor([0.05, 0.25, 0.5, 0.75, 0.95])
+    )
     return {
         "mean": float(values.mean()),
         "std": float(values.std(unbiased=False)),
@@ -914,6 +941,8 @@ def _tensor_statistics(values):
             name: float(value)
             for name, value in zip(("q05", "q25", "q50", "q75", "q95"), quantiles)
         },
+        "quantile_sample_count": int(quantile_values.numel()),
+        "quantiles_exact": bool(exact_quantiles),
     }
 
 
@@ -1143,6 +1172,7 @@ def main():
     try:
         audit_entries = _labeled_audit_entries(args.data_dir)
         for case_index, (image_path, label_path, split_name) in enumerate(audit_entries):
+            print(f"[{case_index + 1}/{len(audit_entries)}] {image_path.name}", flush=True)
             volume, target = load_preprocessed_labeled_case(image_path, label_path)
             target = _align_target_to_volume(target, volume)
             inference = _voxtell_sliding_window_views(

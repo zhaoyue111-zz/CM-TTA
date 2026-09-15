@@ -68,6 +68,7 @@ from evaluate_quality_metrics import (  # noqa: E402
     _labeled_audit_entries,
     _patch_oracle_stats,
     _project_prompt_features,
+    _tensor_statistics,
     _write_case_global_views,
     _crop_case_global_views,
     _soft_consistency,
@@ -260,6 +261,16 @@ def _make_adapter():
 
 
 class SoftPromptOnlyTests(unittest.TestCase):
+    def test_full_volume_statistics_bound_quantile_work_deterministically(self):
+        values = torch.arange(10_000, dtype=torch.float32)
+        first = _tensor_statistics(values, max_quantile_samples=256)
+        second = _tensor_statistics(values, max_quantile_samples=256)
+        self.assertAlmostEqual(first["mean"], 4999.5)
+        self.assertAlmostEqual(first["std"], float(values.std(unbiased=False)), places=3)
+        self.assertFalse(first["quantiles_exact"])
+        self.assertEqual(first["quantile_sample_count"], 256)
+        self.assertEqual(first["quantiles"], second["quantiles"])
+
     def test_case_global_views_are_deterministic_and_overlap_consistently(self):
         volume = torch.arange(1 * 4 * 5 * 6, dtype=torch.float32).reshape(1, 4, 5, 6)
         stored = np.empty((4, *volume.shape), dtype=np.float32)
