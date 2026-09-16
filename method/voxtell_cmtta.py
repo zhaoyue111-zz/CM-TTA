@@ -875,7 +875,9 @@ class VoxTellCMTTA:
                             input_mask_batch[selected_index:selected_index + 1],
                         )
                         local_tensors.append(local_entropy_sum)
-                        local_gradients.append(entropy_derivatives[0] * scale)
+                        local_gradients.append(
+                            entropy_derivatives[0] * scale * self.w_entropy
+                        )
                 differentiable = [
                     (tensor, gradient)
                     for tensor, gradient in zip(local_tensors, local_gradients)

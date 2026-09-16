@@ -11,6 +11,8 @@ from method.voxtell_cmtta import (
     avg_entropy,
     cac_from_features,
     cac_from_components,
+    masked_dice_components,
+    masked_entropy_components,
     select_cac_view,
     soft_dice_loss,
 )
@@ -324,10 +326,46 @@ class VoxTellCMTTATest(unittest.TestCase):
             )
             return dice, entropy, adapter.soft_prompt.grad.detach().clone()
 
+        def direct_run(adapter, patches, masks):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            dice_stats = None
+            entropy_sum = None
+            entropy_mass = None
+            for patch, mask in zip(patches, masks):
+                selected = adapter._make_view_batch(patch, params, mask, 1, 2)
+                with torch.no_grad():
+                    pseudo = torch.sigmoid(
+                        adapter._forward(selected, adapter.soft_prompt.detach())[:, :1]
+                    )
+                views = adapter._make_view_batch(patch, params, mask, 0, 2)
+                prompt = adapter.soft_prompt.detach().clone() + (
+                    adapter.soft_prompt - adapter.soft_prompt.detach()
+                )
+                probabilities = torch.sigmoid(adapter._forward(views, prompt)[:, :1])
+                local_mask = mask.unsqueeze(0).expand(2, -1, -1, -1)
+                local_dice = masked_dice_components(
+                    probabilities, pseudo, local_mask.unsqueeze(1)
+                )
+                dice_stats = adapter._add_components(dice_stats, local_dice)
+                local_entropy, local_mass = masked_entropy_components(
+                    probabilities[1:2], local_mask[1:2]
+                )
+                entropy_sum = local_entropy[0] if entropy_sum is None else entropy_sum + local_entropy[0]
+                entropy_mass = local_mass[0] if entropy_mass is None else entropy_mass + local_mass[0]
+            dice = 1.0 - 2.0 * dice_stats["intersection"] / (
+                dice_stats["prediction_mass"] + dice_stats["pseudo_mass"] + 1e-8
+            )
+            dice = dice.mean()
+            entropy = entropy_sum / entropy_mass.clamp_min(1.0)
+            (dice + adapter.w_entropy * entropy).backward()
+            return float(dice.detach()), float(entropy.detach()), adapter.soft_prompt.grad.detach().clone()
+
         unsplit = make_adapter()
         split = make_adapter()
+        direct = make_adapter()
         try:
             full_result = run(unsplit, [full_patch], [full_mask])
+            direct_result = direct_run(direct, [full_patch], [full_mask])
             split_result = run(
                 split,
                 [full_patch[:, :2], full_patch[:, 2:]],
@@ -336,10 +374,14 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             unsplit.close()
             split.close()
+            direct.close()
 
         self.assertAlmostEqual(full_result[0], split_result[0], places=6)
         self.assertAlmostEqual(full_result[1], split_result[1], places=6)
         self.assertTrue(torch.allclose(full_result[2], split_result[2], atol=1e-6))
+        self.assertAlmostEqual(full_result[0], direct_result[0], places=6)
+        self.assertAlmostEqual(full_result[1], direct_result[1], places=6)
+        self.assertTrue(torch.allclose(full_result[2], direct_result[2], atol=1e-6))
 
         with_padding = make_adapter()
         try:
@@ -353,6 +395,20 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertAlmostEqual(full_result[0], padded_result[0], places=6)
         self.assertAlmostEqual(full_result[1], padded_result[1], places=6)
         self.assertTrue(torch.allclose(full_result[2], padded_result[2], atol=1e-6))
+
+        zero_weight = make_adapter()
+        zero_weight.w_entropy = 0.0
+        zero_direct = make_adapter()
+        zero_direct.w_entropy = 0.0
+        try:
+            zero_result = run(zero_weight, [full_patch], [full_mask])
+            zero_direct_result = direct_run(zero_direct, [full_patch], [full_mask])
+        finally:
+            zero_weight.close()
+            zero_direct.close()
+        self.assertAlmostEqual(zero_result[0], zero_direct_result[0], places=6)
+        self.assertAlmostEqual(zero_result[1], zero_direct_result[1], places=6)
+        self.assertTrue(torch.allclose(zero_result[2], zero_direct_result[2], atol=1e-6))
 
     def test_selected_view_is_pseudo_label_source_and_case_has_one_step(self):
         model = TinyVoxTell()
