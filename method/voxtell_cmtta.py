@@ -54,37 +54,78 @@ def avg_entropy(
 binary_entropy = avg_entropy
 
 
-def soft_dice_loss(
+def _broadcast_valid_mask(
+    reference: torch.Tensor, valid_mask: Optional[torch.Tensor]
+) -> torch.Tensor:
+    if valid_mask is None:
+        return torch.ones_like(reference)
+    valid_mask = valid_mask.to(device=reference.device, dtype=reference.dtype)
+    if valid_mask.ndim == reference.ndim - 1:
+        valid_mask = valid_mask.unsqueeze(1)
+    if tuple(valid_mask.shape) != tuple(reference.shape):
+        raise ValueError(
+            "valid_mask must match tensor shape (apart from a singleton channel), "
+            f"got {tuple(valid_mask.shape)} vs {tuple(reference.shape)}"
+        )
+    return valid_mask
+
+
+def masked_dice_components(
     predictions: torch.Tensor,
     pseudo_label: torch.Tensor,
     valid_mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """DSPU soft Dice over every view, with a detached soft pseudo-label."""
+) -> dict[str, torch.Tensor]:
+    """Return per-view masked Dice statistics before the final case reduction."""
     if predictions.ndim != 5 or pseudo_label.ndim != 5:
         raise ValueError(
             "Expected predictions (V,1,D,H,W) and pseudo_label (1,1,D,H,W), "
             f"got {tuple(predictions.shape)} and {tuple(pseudo_label.shape)}"
         )
     target = pseudo_label.expand(predictions.shape[0], *pseudo_label.shape[1:])
-    if valid_mask is None:
-        valid_mask = torch.ones_like(predictions)
-    else:
-        valid_mask = valid_mask.to(device=predictions.device, dtype=predictions.dtype)
-        if valid_mask.ndim == predictions.ndim - 1:
-            valid_mask = valid_mask.unsqueeze(1)
-        if tuple(valid_mask.shape) != tuple(predictions.shape):
-            raise ValueError(
-                "valid_mask must match predictions (apart from a singleton channel), "
-                f"got {tuple(valid_mask.shape)} vs {tuple(predictions.shape)}"
-            )
+    valid_mask = _broadcast_valid_mask(predictions, valid_mask)
     pred_flat = predictions.float().flatten(start_dim=1)
     target_flat = target.float().flatten(start_dim=1)
     valid_flat = valid_mask.float().flatten(start_dim=1)
     pred_flat = pred_flat * valid_flat
     target_flat = target_flat * valid_flat
-    numerator = 2.0 * (pred_flat * target_flat).sum(dim=1)
-    denominator = pred_flat.sum(dim=1) + target_flat.sum(dim=1) + EPS
-    return (1.0 - numerator / denominator).mean()
+    return {
+        "intersection": (pred_flat * target_flat).sum(dim=1),
+        "prediction_mass": pred_flat.sum(dim=1),
+        "pseudo_mass": target_flat.sum(dim=1),
+    }
+
+
+def soft_dice_loss(
+    predictions: torch.Tensor,
+    pseudo_label: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """DSPU soft Dice over every view, with a detached soft pseudo-label."""
+    components = masked_dice_components(predictions, pseudo_label, valid_mask)
+    dice = 1.0 - 2.0 * components["intersection"] / (
+        components["prediction_mass"] + components["pseudo_mass"] + EPS
+    )
+    return dice.mean()
+
+
+def masked_entropy_components(
+    probabilities: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+    eps: float = EPS,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return entropy sum and valid mass for exact case-level reduction."""
+    probabilities = probabilities.float()
+    safe_eps = max(float(eps), float(torch.finfo(probabilities.dtype).eps))
+    probabilities = probabilities.clamp(safe_eps, 1.0 - safe_eps)
+    entropy = -(
+        probabilities * probabilities.log()
+        + (1.0 - probabilities) * (1.0 - probabilities).log()
+    )
+    valid_mask = _broadcast_valid_mask(probabilities, valid_mask).float()
+    return (
+        (entropy * valid_mask).flatten(start_dim=1).sum(dim=1),
+        valid_mask.flatten(start_dim=1).sum(dim=1),
+    )
 
 
 def cac_from_features(
@@ -658,6 +699,195 @@ class VoxTellCMTTA:
         )
         return selected, scores
 
+    def _forward_case_supervision_stats(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        params: list[dict[str, float]],
+        selected_view: int,
+        short_value: torch.Tensor,
+        short_current_weight: float,
+        long_prompt: torch.Tensor,
+        autocast_enabled: bool,
+    ) -> dict[str, torch.Tensor]:
+        """Collect global Dice/entropy statistics without retaining graphs."""
+        total_views = len(params)
+        dice_stats = None
+        entropy_sum = None
+        entropy_mass = None
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                input_mask = valid_mask.unsqueeze(0).to(
+                    self.device, non_blocking=True
+                )
+                with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                    pseudo_logits = self._forward(selected, long_prompt)
+                    pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                for start in range(0, total_views, self.view_batch_size):
+                    end = min(total_views, start + self.view_batch_size)
+                    view_batch = self._make_view_batch(
+                        patch, params, valid_mask, start, end
+                    ).to(self.device, non_blocking=True)
+                    input_mask_batch = valid_mask.unsqueeze(0).to(
+                        self.device, non_blocking=True
+                    ).expand(end - start, -1, -1, -1)
+                    with torch.autocast(
+                        device_type=self.device.type, enabled=autocast_enabled
+                    ):
+                        student_prompt = short_value + short_current_weight * (
+                            self.soft_prompt - self.soft_prompt.detach()
+                        )
+                        student_logits = self._forward(view_batch, student_prompt)
+                        probabilities = torch.sigmoid(student_logits[:, :1])
+                        local_dice = masked_dice_components(
+                            probabilities,
+                            pseudo_label,
+                            input_mask_batch.unsqueeze(1),
+                        )
+                        local_entropy, local_mass = masked_entropy_components(
+                            probabilities[
+                                max(0, selected_view - start) :
+                                max(0, selected_view - start) + 1
+                            ]
+                            if start <= selected_view < end
+                            else probabilities[:1],
+                            input_mask_batch[
+                                max(0, selected_view - start) :
+                                max(0, selected_view - start) + 1
+                            ]
+                            if start <= selected_view < end
+                            else input_mask_batch[:1],
+                        )
+                    if dice_stats is None:
+                        dice_stats = {
+                            key: torch.zeros(
+                                (total_views, *value.shape[1:]),
+                                device=value.device,
+                                dtype=value.dtype,
+                            )
+                            for key, value in local_dice.items()
+                        }
+                    for key, value in local_dice.items():
+                        dice_stats[key][start:end].add_(value)
+                    if start <= selected_view < end:
+                        if entropy_sum is None:
+                            entropy_sum = torch.zeros_like(local_entropy[0])
+                            entropy_mass = torch.zeros_like(local_mass[0])
+                        entropy_sum.add_(local_entropy[0])
+                        entropy_mass.add_(local_mass[0])
+        if dice_stats is None or entropy_sum is None or entropy_mass is None:
+            raise RuntimeError("Case supervision accumulation produced no statistics")
+        return {
+            **dice_stats,
+            "entropy_sum": entropy_sum,
+            "entropy_mass": entropy_mass,
+        }
+
+    def _backward_case_supervision(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        params: list[dict[str, float]],
+        selected_view: int,
+        short_value: torch.Tensor,
+        short_current_weight: float,
+        long_prompt: torch.Tensor,
+        autocast_enabled: bool,
+    ) -> tuple[float, float]:
+        """Backpropagate case-level Dice and entropy with one patch graph."""
+        stats = self._forward_case_supervision_stats(
+            patches,
+            valid_masks,
+            params,
+            selected_view,
+            short_value,
+            short_current_weight,
+            long_prompt,
+            autocast_enabled,
+        )
+        global_dice_inputs = tuple(
+            stats[key].detach().requires_grad_(True)
+            for key in ("intersection", "prediction_mass", "pseudo_mass")
+        )
+        global_dice = (
+            1.0
+            - 2.0 * global_dice_inputs[0]
+            / (global_dice_inputs[1] + global_dice_inputs[2] + EPS)
+        ).mean()
+        dice_derivatives = torch.autograd.grad(global_dice, global_dice_inputs)
+        global_entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
+        global_entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
+        global_entropy = global_entropy_sum / global_entropy_mass.clamp_min(1.0)
+        entropy_derivatives = torch.autograd.grad(
+            global_entropy, (global_entropy_sum, global_entropy_mass)
+        )
+
+        scale = float(self.scaler.get_scale())
+        total_views = len(params)
+        for patch, valid_mask in zip(patches, valid_masks):
+            selected = self._make_view_batch(
+                patch, params, valid_mask, selected_view, selected_view + 1
+            ).to(self.device, non_blocking=True)
+            input_mask = valid_mask.unsqueeze(0).to(
+                self.device, non_blocking=True
+            )
+            with torch.no_grad(), torch.autocast(
+                device_type=self.device.type, enabled=autocast_enabled
+            ):
+                pseudo_logits = self._forward(selected, long_prompt)
+                pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+            for start in range(0, total_views, self.view_batch_size):
+                end = min(total_views, start + self.view_batch_size)
+                view_batch = self._make_view_batch(
+                    patch, params, valid_mask, start, end
+                ).to(self.device, non_blocking=True)
+                input_mask_batch = valid_mask.unsqueeze(0).to(
+                    self.device, non_blocking=True
+                ).expand(end - start, -1, -1, -1)
+                with torch.autocast(
+                    device_type=self.device.type, enabled=autocast_enabled
+                ):
+                    student_prompt = short_value + short_current_weight * (
+                        self.soft_prompt - self.soft_prompt.detach()
+                    )
+                    student_logits = self._forward(view_batch, student_prompt)
+                    probabilities = torch.sigmoid(student_logits[:, :1])
+                    local_dice = masked_dice_components(
+                        probabilities,
+                        pseudo_label,
+                        input_mask_batch.unsqueeze(1),
+                    )
+                    local_tensors = [
+                        local_dice["intersection"],
+                        local_dice["prediction_mass"],
+                    ]
+                    local_gradients = [
+                        dice_derivatives[0][start:end] * scale,
+                        dice_derivatives[1][start:end] * scale,
+                    ]
+                    if start <= selected_view < end:
+                        selected_index = selected_view - start
+                        local_entropy_sum, local_entropy_mass = masked_entropy_components(
+                            probabilities[selected_index:selected_index + 1],
+                            input_mask_batch[selected_index:selected_index + 1],
+                        )
+                        local_tensors.append(local_entropy_sum)
+                        local_gradients.append(entropy_derivatives[0] * scale)
+                differentiable = [
+                    (tensor, gradient)
+                    for tensor, gradient in zip(local_tensors, local_gradients)
+                    if tensor.requires_grad
+                ]
+                if differentiable:
+                    local_objective = sum(
+                        (tensor * gradient).sum() for tensor, gradient in differentiable
+                    )
+                    local_objective.backward()
+        return float(global_dice.detach().cpu()), float(global_entropy.detach().cpu())
+
     def _backward_case_cac(
         self,
         patches: list[torch.Tensor],
@@ -746,7 +976,11 @@ class VoxTellCMTTA:
                     text_factor = 1.0 / len(patches) if local is local_text else 1.0
                     local_gradients.append(derivative * (scale * text_factor))
             if local_tensors:
-                torch.autograd.backward(local_tensors, local_gradients)
+                local_objective = sum(
+                    (tensor * gradient).sum()
+                    for tensor, gradient in zip(local_tensors, local_gradients)
+                )
+                local_objective.backward()
         return float(cac_loss.cpu())
 
     def adapt_case(
@@ -793,57 +1027,19 @@ class VoxTellCMTTA:
         self.optimizer.zero_grad(set_to_none=True)
         sums = {"soft_dice": 0.0, "cac_loss": 0.0, "entropy_loss": 0.0, "loss": 0.0}
         autocast_enabled = self.device.type == "cuda"
-        total_views = 1 + self.num_aug_views
-        for patch, valid_mask in zip(patches, valid_masks):
-            selected = self._make_view_batch(
-                patch, params, valid_mask, selected_view, selected_view + 1
-            ).to(self.device, non_blocking=True)
-            with torch.no_grad(), torch.autocast(
-                device_type=self.device.type, enabled=autocast_enabled
-            ):
-                long_logits = self._forward(selected, long)
-                pseudo_label = torch.sigmoid(long_logits[:, :1]).detach()
-
-            # Forward small view batches so the 10-view 192^3 graph is never
-            # resident at once.  Backward accumulates into the same prompt
-            # gradient; optimizer.step remains exactly once per case.
-            for start in range(0, total_views, self.view_batch_size):
-                end = min(total_views, start + self.view_batch_size)
-                view_batch = self._make_view_batch(
-                    patch, params, valid_mask, start, end
-                ).to(self.device, non_blocking=True)
-                input_mask_batch = valid_mask.unsqueeze(0).to(
-                    self.device, non_blocking=True
-                ).expand(end - start, -1, -1, -1)
-                with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
-                    # Rebuild this tiny fusion graph for every chunk.  Reusing
-                    # a non-leaf short prompt graph would require retain_graph
-                    # and defeat the memory-saving per-view backward.
-                    student_prompt = short_value + short_current_weight * (
-                        self.soft_prompt - self.soft_prompt.detach()
-                    )
-                    student_logits = self._forward(view_batch, student_prompt)
-                    student_probabilities = torch.sigmoid(student_logits[:, :1])
-                    soft_dice = soft_dice_loss(
-                        student_probabilities,
-                        pseudo_label,
-                        valid_mask=input_mask_batch.unsqueeze(1),
-                    )
-                    chunk_weight = (end - start) / total_views
-                    loss = soft_dice * chunk_weight
-                    entropy_loss = student_probabilities.new_zeros(())
-                    if start <= selected_view < end:
-                        selected_index = selected_view - start
-                        entropy_loss = avg_entropy(
-                            student_probabilities[selected_index:selected_index + 1],
-                            valid_mask=input_mask_batch[selected_index:selected_index + 1],
-                        )
-                        loss = loss + self.w_entropy * entropy_loss
-
-                self.scaler.scale(loss / len(patches)).backward()
-                sums["soft_dice"] += float(soft_dice.detach().cpu()) * chunk_weight / len(patches)
-                sums["entropy_loss"] += float(entropy_loss.detach().cpu()) / len(patches)
-                sums["loss"] += float(loss.detach().cpu()) / len(patches)
+        soft_dice, entropy_loss = self._backward_case_supervision(
+            patches,
+            valid_masks,
+            params,
+            selected_view,
+            short_value,
+            short_current_weight,
+            long,
+            autocast_enabled,
+        )
+        sums["soft_dice"] = soft_dice
+        sums["entropy_loss"] = entropy_loss
+        sums["loss"] = soft_dice + self.w_entropy * entropy_loss
 
         cac_loss = self._backward_case_cac(
             patches,

@@ -288,6 +288,72 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertGreater(float(visual_probability_gradient.norm()), 0.0)
         self.assertGreater(float(text_gradient.norm()), 0.0)
 
+    def test_case_dice_entropy_and_gradient_are_patch_partition_invariant(self):
+        full_patch = torch.tensor(
+            [[[[0.0, 0.2], [0.4, 0.6]], [[0.8, 1.0], [0.3, 0.1]],
+              [[0.1, 0.3], [0.5, 0.7]], [[0.9, 0.6], [0.2, 0.0]]]]
+        )
+        full_mask = torch.ones(4, 2, 2)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+        ]
+
+        def make_adapter():
+            model = TinyVoxTell()
+            with torch.no_grad():
+                model.project_text_embed.weight.copy_(torch.eye(2))
+            return VoxTellCMTTA(
+                model,
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(num_aug_views=1, view_batch_size=1),
+            )
+
+        def run(adapter, patches, masks):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            dice, entropy = adapter._backward_case_supervision(
+                patches,
+                masks,
+                params,
+                1,
+                adapter.soft_prompt.detach().clone(),
+                1.0,
+                adapter.soft_prompt.detach().clone(),
+                False,
+            )
+            return dice, entropy, adapter.soft_prompt.grad.detach().clone()
+
+        unsplit = make_adapter()
+        split = make_adapter()
+        try:
+            full_result = run(unsplit, [full_patch], [full_mask])
+            split_result = run(
+                split,
+                [full_patch[:, :2], full_patch[:, 2:]],
+                [full_mask[:2], full_mask[2:]],
+            )
+        finally:
+            unsplit.close()
+            split.close()
+
+        self.assertAlmostEqual(full_result[0], split_result[0], places=6)
+        self.assertAlmostEqual(full_result[1], split_result[1], places=6)
+        self.assertTrue(torch.allclose(full_result[2], split_result[2], atol=1e-6))
+
+        with_padding = make_adapter()
+        try:
+            padded_result = run(
+                with_padding,
+                [full_patch[:, :2], full_patch[:, 2:], torch.full_like(full_patch, 99.0)],
+                [full_mask[:2], full_mask[2:], torch.zeros_like(full_mask)],
+            )
+        finally:
+            with_padding.close()
+        self.assertAlmostEqual(full_result[0], padded_result[0], places=6)
+        self.assertAlmostEqual(full_result[1], padded_result[1], places=6)
+        self.assertTrue(torch.allclose(full_result[2], padded_result[2], atol=1e-6))
+
     def test_selected_view_is_pseudo_label_source_and_case_has_one_step(self):
         model = TinyVoxTell()
         adapter = VoxTellCMTTA(
