@@ -93,8 +93,10 @@ def preprocess_for_voxtell(path: Path, predictor) -> Tuple[torch.Tensor, Tuple, 
     return predictor.preprocess(image)
 
 
-def pad_to_patch_grid(volume: torch.Tensor, patch_size) -> Tuple[torch.Tensor, Tuple[int, ...]]:
-    """Right-pad (C,D,H,W) to VoxTell's patch grid."""
+def pad_to_patch_grid(
+    volume: torch.Tensor, patch_size
+) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...]]:
+    """Right-pad (C,D,H,W) and return a matching valid voxel mask."""
     if volume.ndim != 4 or len(patch_size) != 3:
         raise ValueError(f"Expected volume (C,D,H,W), got {tuple(volume.shape)}")
     patch_size = tuple(int(value) for value in patch_size)
@@ -106,7 +108,10 @@ def pad_to_patch_grid(volume: torch.Tensor, patch_size) -> Tuple[torch.Tensor, T
     padding = []
     for current, target in zip(reversed(original_shape), reversed(target_shape)):
         padding.extend((0, target - current))
-    return F.pad(volume, padding, value=0.0).contiguous(), original_shape
+    padded = F.pad(volume, padding, value=0.0).contiguous()
+    valid = torch.zeros((1, *target_shape), dtype=torch.float32, device=volume.device)
+    valid[(slice(None), *(slice(0, size) for size in original_shape))] = 1.0
+    return padded, valid, original_shape
 
 
 def nonoverlapping_patch_locations(volume_shape, patch_size):
@@ -131,7 +136,8 @@ def extract_volume_patch(volume: torch.Tensor, location, patch_size) -> torch.Te
 
 
 def make_case_patches(volume: torch.Tensor, patch_size):
-    padded, original_shape = pad_to_patch_grid(volume, patch_size)
+    padded, valid, original_shape = pad_to_patch_grid(volume, patch_size)
     locations = nonoverlapping_patch_locations(padded.shape[-3:], patch_size)
     patches = [extract_volume_patch(padded, location, patch_size) for location in locations]
-    return patches, locations, original_shape
+    valid_masks = [extract_volume_patch(valid, location, patch_size)[0] for location in locations]
+    return patches, valid_masks, locations, original_shape

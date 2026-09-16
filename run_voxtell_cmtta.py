@@ -125,16 +125,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--seed", type=int, default=1377)
 
-    # CM-TTA optimization parameters.  Both lr and weight_decay are explicit:
-    # VoxTellCMTTA must not rely on missing attributes at startup.
+    # CM-TTA uses the paper's one-step Adam configuration.
     parser.add_argument("--lr", type=float, default=5e-3)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--ema_momentum", type=float, default=0.99)
     parser.add_argument("--amp_init_scale", type=float, default=1024.0)
     parser.add_argument("--short_memory_length", type=int, default=16)
     parser.add_argument("--selection_p", type=float, default=0.1)
     parser.add_argument("--num_aug_views", type=int, default=9)
+    parser.add_argument("--view_batch_size", type=int, default=1)
     parser.add_argument("--w_cac", type=float, default=1.0)
     parser.add_argument("--w_entropy", type=float, default=0.1)
     parser.add_argument("--print_freq", type=int, default=1)
@@ -190,11 +189,13 @@ def main() -> None:
         for case_index, (image_path, label_path) in enumerate(entries, start=1):
             image = load_ras_image(str(image_path))
             data, bbox, original_shape = predictor.preprocess(image)
-            patches, _locations, _padded_shape = make_case_patches(data, predictor.patch_size)
+            patches, valid_masks, _locations, _padded_shape = make_case_patches(
+                data, predictor.patch_size
+            )
 
             # One complete case is one adaptation time step.  adapt_case sums
             # all patch losses and performs exactly one optimizer/LSPM update.
-            trace = adapter.adapt_case(patches)
+            trace = adapter.adapt_case(patches, valid_masks)
             row = evaluate_case(
                 predictor,
                 image_path,

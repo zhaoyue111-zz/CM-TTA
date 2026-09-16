@@ -9,6 +9,7 @@ case, after losses from all of that case's patches have been accumulated.
 from __future__ import annotations
 
 from collections import deque
+from pathlib import Path
 from typing import Iterable, Optional
 
 import numpy as np
@@ -20,21 +21,42 @@ from torch import nn
 EPS = 1e-8
 
 
-def avg_entropy(probabilities: torch.Tensor, eps: float = EPS) -> torch.Tensor:
-    """CM-TTA's binary pixel/voxel entropy, flattened over 3-D space."""
+def avg_entropy(
+    probabilities: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+    eps: float = EPS,
+) -> torch.Tensor:
+    """CM-TTA binary entropy, averaged over valid 3-D voxels."""
     probabilities = probabilities.float().clamp(eps, 1.0 - eps)
     entropy = -(
         probabilities * probabilities.log()
         + (1.0 - probabilities) * (1.0 - probabilities).log()
     )
-    return entropy.flatten(start_dim=1).mean(dim=1).sum()
+    if valid_mask is None:
+        valid_mask = torch.ones_like(probabilities)
+    else:
+        valid_mask = valid_mask.to(device=probabilities.device, dtype=entropy.dtype)
+        if valid_mask.ndim == probabilities.ndim - 1:
+            valid_mask = valid_mask.unsqueeze(1)
+        if tuple(valid_mask.shape) != tuple(probabilities.shape):
+            raise ValueError(
+                "valid_mask must match probability shape (apart from a singleton channel), "
+                f"got {tuple(valid_mask.shape)} vs {tuple(probabilities.shape)}"
+            )
+    entropy = (entropy * valid_mask).flatten(start_dim=1).sum(dim=1)
+    mass = valid_mask.flatten(start_dim=1).sum(dim=1).clamp_min(1.0)
+    return (entropy / mass).sum()
 
 
 # Compatibility for callers of the earlier local name.
 binary_entropy = avg_entropy
 
 
-def soft_dice_loss(predictions: torch.Tensor, pseudo_label: torch.Tensor) -> torch.Tensor:
+def soft_dice_loss(
+    predictions: torch.Tensor,
+    pseudo_label: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """DSPU soft Dice over every view, with a detached soft pseudo-label."""
     if predictions.ndim != 5 or pseudo_label.ndim != 5:
         raise ValueError(
@@ -42,8 +64,22 @@ def soft_dice_loss(predictions: torch.Tensor, pseudo_label: torch.Tensor) -> tor
             f"got {tuple(predictions.shape)} and {tuple(pseudo_label.shape)}"
         )
     target = pseudo_label.expand(predictions.shape[0], *pseudo_label.shape[1:])
+    if valid_mask is None:
+        valid_mask = torch.ones_like(predictions)
+    else:
+        valid_mask = valid_mask.to(device=predictions.device, dtype=predictions.dtype)
+        if valid_mask.ndim == predictions.ndim - 1:
+            valid_mask = valid_mask.unsqueeze(1)
+        if tuple(valid_mask.shape) != tuple(predictions.shape):
+            raise ValueError(
+                "valid_mask must match predictions (apart from a singleton channel), "
+                f"got {tuple(valid_mask.shape)} vs {tuple(predictions.shape)}"
+            )
     pred_flat = predictions.float().flatten(start_dim=1)
     target_flat = target.float().flatten(start_dim=1)
+    valid_flat = valid_mask.float().flatten(start_dim=1)
+    pred_flat = pred_flat * valid_flat
+    target_flat = target_flat * valid_flat
     numerator = 2.0 * (pred_flat * target_flat).sum(dim=1)
     denominator = pred_flat.sum(dim=1) + target_flat.sum(dim=1) + EPS
     return (1.0 - numerator / denominator).mean()
@@ -53,12 +89,15 @@ def cac_from_features(
     vision_features: torch.Tensor,
     text_features: torch.Tensor,
     logits: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+    feature_spatial_shape: Optional[tuple[int, int, int]] = None,
 ) -> torch.Tensor:
     """Compute CM-TTA's soft foreground/background CAC in 3-D.
 
     The released VoxTell projection hook exposes visual tokens as ``(S,B,C)``
-    and logits as ``(B,N,H,W,D)``.  The 5-D feature form is accepted for small
-    test doubles and older checkpoints as well.
+    and logits as ``(B,N,D,H,W)``.  The 5-D feature form is accepted for small
+    test doubles and older checkpoints as well.  ``valid_mask`` is in the
+    logits/input order ``(B,D,H,W)``.
     """
     if vision_features.ndim not in (3, 5):
         raise ValueError(
@@ -69,46 +108,155 @@ def cac_from_features(
         raise ValueError(f"Expected text features (N,B,C), got {text_features.shape}")
     if logits.ndim != 5:
         raise ValueError(f"Expected logits (B,N,D,H,W), got {logits.shape}")
+    components = cac_components_from_features(
+        vision_features,
+        logits,
+        valid_mask=valid_mask,
+        feature_spatial_shape=feature_spatial_shape,
+    )
+    text = text_features[0].float()
+    if text.shape[0] != components["foreground_sum"].shape[0]:
+        raise ValueError("Projected text and visual feature batch dimensions must agree")
+    return cac_from_components(
+        components["foreground_sum"],
+        components["foreground_mass"],
+        components["background_sum"],
+        components["background_mass"],
+        text,
+    )
+
+
+def _canonical_valid_mask(
+    valid_mask: Optional[torch.Tensor],
+    batch: int,
+    source_spatial_shape: tuple[int, int, int],
+    target_spatial_shape: tuple[int, int, int],
+    device: torch.device,
+    permute_source_to_target: bool = False,
+) -> torch.Tensor:
+    """Return a ``(B,*target_spatial_shape)`` mask in feature-grid order."""
+    if valid_mask is None:
+        return torch.ones((batch, *target_spatial_shape), device=device, dtype=torch.float32)
+    mask = torch.as_tensor(valid_mask, device=device).float()
+    if mask.ndim == 5 and mask.shape[1] == 1:
+        mask = mask[:, 0]
+    if mask.ndim != 4 or mask.shape[0] != batch:
+        raise ValueError(
+            "valid_mask must have shape (B,D,H,W) or (B,1,D,H,W), "
+            f"got {tuple(mask.shape)}"
+        )
+    mask_shape = tuple(int(size) for size in mask.shape[1:])
+    if permute_source_to_target and mask_shape == source_spatial_shape:
+        # The external VoxTell API uses (D,H,W), while its projected-memory
+        # grid uses (H,W,D).  Permute before resizing when the grids differ.
+        mask = mask.permute(0, 2, 3, 1).contiguous()
+        if tuple(mask.shape[1:]) == target_spatial_shape:
+            return mask
+    elif mask_shape == target_spatial_shape:
+        return mask
+    if tuple(mask.shape[1:]) != target_spatial_shape:
+        mask = F.interpolate(
+            mask.unsqueeze(1), size=target_spatial_shape, mode="nearest"
+        ).squeeze(1)
+    return mask
+
+
+def cac_components_from_features(
+    vision_features: torch.Tensor,
+    logits: torch.Tensor,
+    valid_mask: Optional[torch.Tensor] = None,
+    feature_spatial_shape: Optional[tuple[int, int, int]] = None,
+) -> dict[str, torch.Tensor]:
+    """Accumulate unnormalized visual evidence for Eq. (1).
+
+    No voxel-wise cosine is computed here.  The returned sums can be added
+    across patches and normalized/cosined exactly once at case level.
+    """
+    if logits.ndim != 5:
+        raise ValueError(f"Expected logits (B,N,D,H,W) or (B,N,H,W,D), got {logits.shape}")
+    batch = logits.shape[0]
     if vision_features.ndim == 3:
-        tokens, batch, channels = vision_features.shape
-        if batch != logits.shape[0]:
+        tokens, feature_batch, channels = vision_features.shape
+        if feature_batch != batch:
             raise ValueError("Vision features and logits have different batch sizes")
-        spatial_shape = tuple(int(size) for size in logits.shape[2:])
-        if tokens != int(np.prod(spatial_shape)):
+        logits_spatial_shape = tuple(int(size) for size in logits.shape[2:])
+        if feature_spatial_shape is None:
+            output_spatial_shape = logits_spatial_shape
+        else:
+            output_spatial_shape = tuple(int(size) for size in feature_spatial_shape)
+        if tokens != int(np.prod(output_spatial_shape)):
             raise ValueError(
                 "Projected visual token count does not match logits spatial size: "
-                f"{tokens} vs {spatial_shape}"
+                f"{tokens} vs {output_spatial_shape}"
             )
-        vision = vision_features.permute(1, 2, 0).reshape(batch, channels, *spatial_shape)
+        vision = vision_features.permute(1, 2, 0).reshape(batch, channels, *output_spatial_shape)
+        mask = _canonical_valid_mask(
+            valid_mask,
+            batch,
+            logits_spatial_shape,
+            output_spatial_shape,
+            logits.device,
+            permute_source_to_target=feature_spatial_shape is not None,
+        )
         probability = torch.sigmoid(logits[:, 0].float())
-    else:
-        if vision_features.shape[0] != logits.shape[0]:
+        if feature_spatial_shape is not None:
+            # Flattened VoxTell memory tokens are ordered (H,W,D), whereas
+            # segmentation logits are returned in (D,H,W) order.
+            probability = probability.permute(0, 2, 3, 1).contiguous()
+    elif vision_features.ndim == 5:
+        if vision_features.shape[0] != batch:
             raise ValueError("Vision features and logits have different batch sizes")
         vision = vision_features.permute(0, 4, 1, 2, 3).float()
+        output_spatial_shape = tuple(int(size) for size in vision.shape[2:])
+        logits_spatial_shape = tuple(int(size) for size in logits.shape[2:])
         probability = torch.sigmoid(logits[:, 0].float()).permute(0, 2, 3, 1)
+        mask = _canonical_valid_mask(
+            valid_mask,
+            batch,
+            logits_spatial_shape,
+            output_spatial_shape,
+            logits.device,
+            permute_source_to_target=True,
+        )
+    else:
+        raise ValueError(f"Expected projected 3-D features, got {tuple(vision_features.shape)}")
 
-    vision = F.normalize(vision, dim=1)
-    text = F.normalize(text_features[0].float(), dim=1)
-    if text.shape[0] != vision.shape[0] or text.shape[1] != vision.shape[1]:
-        raise ValueError("Projected text and visual feature dimensions must agree")
-    similarity = (vision * text[:, :, None, None, None]).sum(dim=1)
-
-    if probability.shape[1:] != similarity.shape[1:]:
+    if probability.shape[1:] != vision.shape[2:]:
         probability = F.interpolate(
-            probability.unsqueeze(1),
-            size=similarity.shape[1:],
-            mode="trilinear",
-            align_corners=False,
+            probability.unsqueeze(1), size=vision.shape[2:], mode="trilinear", align_corners=False
         ).squeeze(1)
+        mask = F.interpolate(
+            mask.unsqueeze(1), size=vision.shape[2:], mode="nearest"
+        ).squeeze(1)
+    mask = mask.to(dtype=probability.dtype)
+    foreground_probability = probability * mask
+    background_probability = (1.0 - probability) * mask
+    return {
+        "foreground_sum": (vision * foreground_probability.unsqueeze(1)).sum(dim=(2, 3, 4)),
+        "foreground_mass": foreground_probability.sum(dim=(1, 2, 3)),
+        "background_sum": (vision * background_probability.unsqueeze(1)).sum(dim=(2, 3, 4)),
+        "background_mass": background_probability.sum(dim=(1, 2, 3)),
+    }
 
-    # Eq. (1) of CM-TTA uses the soft prediction itself as the foreground
-    # evidence and (1 - P) as the background evidence.
-    background_probability = 1.0 - probability
-    foreground_mass = probability.sum(dim=(1, 2, 3)) + EPS
-    background_mass = background_probability.sum(dim=(1, 2, 3)) + EPS
-    foreground_similarity = (similarity * probability).sum(dim=(1, 2, 3)) / foreground_mass
-    background_similarity = (similarity * background_probability).sum(dim=(1, 2, 3)) / background_mass
-    return foreground_similarity - background_similarity
+
+def cac_from_components(
+    foreground_sum: torch.Tensor,
+    foreground_mass: torch.Tensor,
+    background_sum: torch.Tensor,
+    background_mass: torch.Tensor,
+    text_features: torch.Tensor,
+) -> torch.Tensor:
+    """Finish CAC after sums from all valid voxels have been accumulated."""
+    if text_features.ndim != 2:
+        raise ValueError(f"Expected text features (B,C), got {tuple(text_features.shape)}")
+    if foreground_sum.shape != background_sum.shape or foreground_sum.shape != text_features.shape:
+        raise ValueError("CAC feature sums and text features must have matching (B,C) shapes")
+    foreground = foreground_sum / (foreground_mass.unsqueeze(1) + EPS)
+    background = background_sum / (background_mass.unsqueeze(1) + EPS)
+    text = F.normalize(text_features.float(), dim=1)
+    foreground = F.normalize(foreground.float(), dim=1)
+    background = F.normalize(background.float(), dim=1)
+    return (foreground * text).sum(dim=1) - (background * text).sum(dim=1)
 
 
 def select_cac_view(
@@ -217,7 +365,6 @@ class VoxTellCMTTA:
 
         self.args = args
         self.lr = float(args.lr)
-        self.weight_decay = float(args.weight_decay)
         self.ema_momentum = float(args.ema_momentum)
         self.w_cac = float(args.w_cac)
         self.w_entropy = float(args.w_entropy)
@@ -228,9 +375,7 @@ class VoxTellCMTTA:
         if not 0.0 < self.selection_p <= 1.0:
             raise ValueError("selection_p must be in (0, 1]")
 
-        self.optimizer = torch.optim.AdamW(
-            [self.soft_prompt], lr=self.lr, weight_decay=self.weight_decay
-        )
+        self.optimizer = torch.optim.Adam([self.soft_prompt], lr=self.lr)
         amp_enabled = self.device.type == "cuda"
         if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
             self.scaler = torch.amp.GradScaler(
@@ -244,6 +389,19 @@ class VoxTellCMTTA:
 
         memory_length = getattr(args, "short_memory_length", getattr(args, "prompt_memory_size", 16))
         self.short_memory = ShortPromptMemory(int(memory_length))
+        self.view_batch_size = max(1, int(getattr(args, "view_batch_size", 1)))
+        # VoxTell's hook normally returns (B,H,W,D,C).  Keep the configured
+        # grid as a fallback for wrappers that flatten it to (S,B,C).
+        base_model = getattr(self.model, "_orig_mod", self.model)
+        decoder_configs = getattr(base_model, "DECODER_CONFIGS", None)
+        selected_decoder_layer = getattr(base_model, "selected_decoder_layer", None)
+        self.feature_spatial_shape = None
+        if isinstance(decoder_configs, dict) and selected_decoder_layer in decoder_configs:
+            shape = decoder_configs[selected_decoder_layer].get("shape")
+            if shape is not None:
+                depth, height, width = (int(value) for value in shape)
+                # The flattened hook follows VoxTell's (H,W,D) ordering.
+                self.feature_spatial_shape = (height, width, depth)
         self._vision_features = None
         self._text_features = None
         self._hooks = [
@@ -285,21 +443,81 @@ class VoxTellCMTTA:
             raise ValueError(f"VoxTell must return (B,N,D,H,W) logits, got {logits.shape}")
         return logits
 
-    def _cac(self, logits: torch.Tensor) -> torch.Tensor:
+    def _cac_components(
+        self, logits: torch.Tensor, valid_mask: Optional[torch.Tensor] = None
+    ) -> dict[str, torch.Tensor]:
         if self._vision_features is None or self._text_features is None:
             raise RuntimeError("VoxTell CAC feature hooks did not capture a forward pass")
-        return cac_from_features(self._vision_features, self._text_features, logits)
+        return cac_components_from_features(
+            self._vision_features,
+            logits,
+            valid_mask=valid_mask,
+            feature_spatial_shape=self.feature_spatial_shape,
+        )
 
-    def _case_cac(self, prompt: torch.Tensor, patches: Iterable[torch.Tensor]) -> float:
-        scores = []
+    def _cac(
+        self, logits: torch.Tensor, valid_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if self._vision_features is None or self._text_features is None:
+            raise RuntimeError("VoxTell CAC feature hooks did not capture a forward pass")
+        return cac_from_features(
+            self._vision_features,
+            self._text_features,
+            logits,
+            valid_mask=valid_mask,
+            feature_spatial_shape=self.feature_spatial_shape,
+        )
+
+    @staticmethod
+    def _add_components(
+        accumulator: Optional[dict[str, torch.Tensor]],
+        components: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        if accumulator is None:
+            return {key: value for key, value in components.items()}
+        return {
+            key: accumulator[key] + components[key]
+            for key in components
+        }
+
+    def _case_cac(
+        self,
+        prompt: torch.Tensor,
+        patches: Iterable[torch.Tensor],
+        valid_masks: Optional[Iterable[torch.Tensor]] = None,
+    ) -> float:
+        patches = list(patches)
+        if valid_masks is None:
+            valid_masks = [None] * len(patches)
+        else:
+            valid_masks = list(valid_masks)
+        if len(valid_masks) != len(patches):
+            raise ValueError("patches and valid_masks must have equal lengths")
+        accumulator = None
+        text_sum = None
         with torch.no_grad():
-            for patch in patches:
+            for patch, valid_mask in zip(patches, valid_masks):
                 patch = patch.unsqueeze(0).to(self.device, non_blocking=True)
+                if valid_mask is None:
+                    valid_mask = torch.ones((1, *patch.shape[-3:]), device=self.device)
+                else:
+                    valid_mask = valid_mask.unsqueeze(0).to(self.device, non_blocking=True)
                 logits = self._forward(patch, prompt)
-                scores.append(float(self._cac(logits)[0].detach().cpu()))
-        if not scores:
+                components = self._cac_components(logits, valid_mask)
+                accumulator = self._add_components(accumulator, components)
+                text = self._text_features[0].float()
+                text_sum = text if text_sum is None else text_sum + text
+        if accumulator is None:
             raise ValueError("A complete case must contain at least one patch")
-        return float(np.mean(scores))
+        text = text_sum / len(patches)
+        score = cac_from_components(
+            accumulator["foreground_sum"],
+            accumulator["foreground_mass"],
+            accumulator["background_sum"],
+            accumulator["background_mass"],
+            text,
+        )
+        return float(score[0].detach().cpu())
 
     @staticmethod
     def _sample_intensity_params(num_views: int) -> list[dict[str, float]]:
@@ -314,23 +532,57 @@ class VoxTellCMTTA:
         return params
 
     @staticmethod
-    def _make_views(patch: torch.Tensor, params: list[dict[str, float]]) -> torch.Tensor:
-        views = [patch]
-        for param in params[1:]:
-            # Intensity-only transforms preserve the voxel correspondence used
-            # by DSPU. No spatial transform is applied to a 3-D volume.
-            views.append(patch * param["scale"] + param["offset"])
-        return torch.stack(views, dim=0).contiguous()
+    def _make_views(
+        patch: torch.Tensor,
+        params: list[dict[str, float]],
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return VoxTellCMTTA._make_view_batch(
+            patch, params, valid_mask, 0, len(params)
+        )
 
-    def _dynamic_short_prompt(self, patches: list[torch.Tensor]) -> tuple[torch.Tensor, float, float, float]:
+    @staticmethod
+    def _make_view_batch(
+        patch: torch.Tensor,
+        params: list[dict[str, float]],
+        valid_mask: Optional[torch.Tensor],
+        start: int,
+        end: int,
+    ) -> torch.Tensor:
+        if not 0 <= start < end <= len(params):
+            raise ValueError("invalid view batch range")
+        views = []
+        for view_index in range(start, end):
+            param = params[view_index]
+            view = patch if view_index == 0 else patch * param["scale"] + param["offset"]
+            views.append(view)
+        views = torch.stack(views, dim=0).contiguous()
+        if valid_mask is not None:
+            if valid_mask.ndim == 4 and valid_mask.shape[0] == 1:
+                valid_mask = valid_mask[0]
+            if valid_mask.ndim != 3 or tuple(valid_mask.shape) != tuple(patch.shape[-3:]):
+                raise ValueError(
+                    "valid_mask must have shape (D,H,W) for a patch, "
+                    f"got {tuple(valid_mask.shape)}"
+                )
+            # Re-mask after intensity augmentation so padding never acquires
+            # an offset/noise-like foreground value.
+            views = views * valid_mask.to(device=views.device, dtype=views.dtype).unsqueeze(0)
+        return views
+
+    def _dynamic_short_prompt(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: Optional[list[torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, float, float, float]:
         current = self.soft_prompt
-        current_cac = self._case_cac(current, patches)
+        current_cac = self._case_cac(current, patches, valid_masks)
         if len(self.short_memory) == 0:
             short = current
             return short, current_cac, current_cac, 0.0
 
         historical = self.short_memory.weighted_prompt(self.device, current.dtype)
-        historical_cac = self._case_cac(historical, patches)
+        historical_cac = self._case_cac(historical, patches, valid_masks)
         weights = torch.softmax(
             torch.tensor([historical_cac, current_cac], device=self.device), dim=0
         )
@@ -339,28 +591,86 @@ class VoxTellCMTTA:
         return short, current_cac, historical_cac, weight_historical
 
     def _select_case_view(
-        self, patches: list[torch.Tensor], params: list[dict[str, float]], short: torch.Tensor
+        self,
+        patches: list[torch.Tensor],
+        params: list[dict[str, float]],
+        short: torch.Tensor,
+        valid_masks: Optional[list[torch.Tensor]] = None,
     ) -> tuple[int, torch.Tensor]:
-        per_patch = []
-        per_patch_probabilities = []
+        if valid_masks is None:
+            valid_masks = [None] * len(patches)
+        if len(valid_masks) != len(patches):
+            raise ValueError("patches and valid_masks must have equal lengths")
+        accumulator = None
+        text_sum = None
         with torch.no_grad():
-            for patch in patches:
-                views = self._make_views(patch, params).to(self.device, non_blocking=True)
-                logits = self._forward(views, short.detach())
-                per_patch.append(self._cac(logits).detach())
-                per_patch_probabilities.append(torch.sigmoid(logits[:, :1]).squeeze(1).detach())
-        scores = torch.stack(per_patch, dim=0).mean(dim=0)
-        probabilities = torch.stack(per_patch_probabilities, dim=0).mean(dim=0)
-        selected, _ = select_cac_view(scores, probabilities, self.selection_p)
+            for patch, valid_mask in zip(patches, valid_masks):
+                if valid_mask is None:
+                    valid_mask = torch.ones(patch.shape[-3:])
+                elif valid_mask.ndim == 4 and valid_mask.shape[0] == 1:
+                    valid_mask = valid_mask[0]
+                total_views = len(params)
+                for start in range(0, total_views, self.view_batch_size):
+                    end = min(total_views, start + self.view_batch_size)
+                    view_batch = self._make_view_batch(
+                        patch, params, valid_mask, start, end
+                    ).to(self.device, non_blocking=True)
+                    input_mask_batch = valid_mask.unsqueeze(0).to(
+                        self.device, non_blocking=True
+                    ).expand(end - start, -1, -1, -1)
+                    logits = self._forward(view_batch, short.detach())
+                    components = self._cac_components(logits, input_mask_batch)
+                    accumulator = self._add_components(accumulator, components)
+                    text = self._text_features[0].float()
+                    if text_sum is None:
+                        text_sum = torch.zeros(
+                            (total_views, text.shape[1]),
+                            device=text.device,
+                            dtype=text.dtype,
+                        )
+                    text_sum[start:end] += text
+        if accumulator is None:
+            raise ValueError("A complete case must contain at least one patch")
+        scores = cac_from_components(
+            accumulator["foreground_sum"],
+            accumulator["foreground_mass"],
+            accumulator["background_sum"],
+            accumulator["background_mass"],
+            text_sum,
+        ).detach()
+        selected, _ = select_cac_view(
+            scores, torch.ones((scores.shape[0], 1), device=scores.device), self.selection_p
+        )
         return selected, scores
 
-    def adapt_case(self, patches: list[torch.Tensor]) -> dict:
+    def adapt_case(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: Optional[list[torch.Tensor]] = None,
+    ) -> dict:
         """Adapt once on one complete case, aggregating all patch gradients."""
         if not patches:
             raise ValueError("adapt_case received no patches")
+        if valid_masks is None:
+            valid_masks = [torch.ones(patch.shape[-3:]) for patch in patches]
+        if len(valid_masks) != len(patches):
+            raise ValueError("patches and valid_masks must have equal lengths")
         patches = [patch.float().contiguous() for patch in patches]
+        normalized_masks = []
+        for mask, patch in zip(valid_masks, patches):
+            if mask.ndim == 4 and mask.shape[0] == 1:
+                mask = mask[0]
+            if mask.ndim != 3 or tuple(mask.shape) != tuple(patch.shape[-3:]):
+                raise ValueError(
+                    "Each valid mask must have shape (D,H,W) matching its patch, "
+                    f"got {tuple(mask.shape)} vs {tuple(patch.shape[-3:])}"
+                )
+            normalized_masks.append(mask.float().contiguous())
+        valid_masks = normalized_masks
         params = self._sample_intensity_params(self.num_aug_views)
-        short, current_cac, historical_cac, weight_historical = self._dynamic_short_prompt(patches)
+        short, current_cac, historical_cac, weight_historical = self._dynamic_short_prompt(
+            patches, valid_masks
+        )
 
         if self.long_prompt is None:
             long = short.detach().clone()
@@ -368,39 +678,101 @@ class VoxTellCMTTA:
             long = self.ema_momentum * self.long_prompt + (1.0 - self.ema_momentum) * short.detach()
         long = long.detach()
 
-        selected_view, selection_scores = self._select_case_view(patches, params, short)
+        selected_view, selection_scores = self._select_case_view(
+            patches, params, short, valid_masks
+        )
         short_snapshot = short.detach().clone()
+        short_value = short_snapshot
+        short_current_weight = 1.0 - weight_historical
         self.optimizer.zero_grad(set_to_none=True)
         sums = {"soft_dice": 0.0, "cac_loss": 0.0, "entropy_loss": 0.0, "loss": 0.0}
         autocast_enabled = self.device.type == "cuda"
-        for patch in patches:
-            views = self._make_views(patch, params).to(self.device, non_blocking=True)
-            selected = views[selected_view:selected_view + 1]
+        total_views = 1 + self.num_aug_views
+        for patch, valid_mask in zip(patches, valid_masks):
+            selected = self._make_view_batch(
+                patch, params, valid_mask, selected_view, selected_view + 1
+            ).to(self.device, non_blocking=True)
             with torch.no_grad(), torch.autocast(
                 device_type=self.device.type, enabled=autocast_enabled
             ):
                 long_logits = self._forward(selected, long)
                 pseudo_label = torch.sigmoid(long_logits[:, :1]).detach()
 
-            with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
-                student_logits = self._forward(views, short)
-                student_probabilities = torch.sigmoid(student_logits[:, :1])
-                student_cac = self._cac(student_logits)
-                soft_dice = soft_dice_loss(student_probabilities, pseudo_label)
-                cac_loss = -student_cac[selected_view]
-                entropy_loss = avg_entropy(student_probabilities[selected_view])
-                loss = soft_dice + self.w_cac * cac_loss + self.w_entropy * entropy_loss
+            # Forward small view batches so the 10-view 192^3 graph is never
+            # resident at once.  Backward accumulates into the same prompt
+            # gradient; optimizer.step remains exactly once per case.
+            for start in range(0, total_views, self.view_batch_size):
+                end = min(total_views, start + self.view_batch_size)
+                view_batch = self._make_view_batch(
+                    patch, params, valid_mask, start, end
+                ).to(self.device, non_blocking=True)
+                input_mask_batch = valid_mask.unsqueeze(0).to(
+                    self.device, non_blocking=True
+                ).expand(end - start, -1, -1, -1)
+                with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                    # Rebuild this tiny fusion graph for every chunk.  Reusing
+                    # a non-leaf short prompt graph would require retain_graph
+                    # and defeat the memory-saving per-view backward.
+                    student_prompt = short_value + short_current_weight * (
+                        self.soft_prompt - self.soft_prompt.detach()
+                    )
+                    student_logits = self._forward(view_batch, student_prompt)
+                    student_probabilities = torch.sigmoid(student_logits[:, :1])
+                    soft_dice = soft_dice_loss(
+                        student_probabilities,
+                        pseudo_label,
+                        valid_mask=input_mask_batch.unsqueeze(1),
+                    )
+                    chunk_weight = (end - start) / total_views
+                    loss = soft_dice * chunk_weight
+                    entropy_loss = student_probabilities.new_zeros(())
+                    if start <= selected_view < end:
+                        selected_index = selected_view - start
+                        entropy_loss = avg_entropy(
+                            student_probabilities[selected_index:selected_index + 1],
+                            valid_mask=input_mask_batch[selected_index:selected_index + 1],
+                        )
+                        loss = loss + self.w_entropy * entropy_loss
 
-            # Gradient accumulation is one aggregated case loss; optimizer.step
-            # remains outside this loop and executes exactly once per case.
-            self.scaler.scale(loss / len(patches)).backward()
-            for name, value in (
-                ("soft_dice", soft_dice),
-                ("cac_loss", cac_loss),
-                ("entropy_loss", entropy_loss),
-                ("loss", loss),
-            ):
-                sums[name] += float(value.detach().cpu()) / len(patches)
+                self.scaler.scale(loss / len(patches)).backward()
+                sums["soft_dice"] += float(soft_dice.detach().cpu()) * chunk_weight / len(patches)
+                sums["entropy_loss"] += float(entropy_loss.detach().cpu()) / len(patches)
+                sums["loss"] += float(loss.detach().cpu()) / len(patches)
+
+        # CAC loss uses one case-level statistic as well.  Only one selected
+        # view per patch is retained here, rather than the full 10-view graph;
+        # the global pooled feature/mass sums are then cosined exactly once.
+        case_components = None
+        case_text_sum = None
+        for patch, valid_mask in zip(patches, valid_masks):
+            selected = self._make_view_batch(
+                patch, params, valid_mask, selected_view, selected_view + 1
+            ).to(self.device, non_blocking=True)
+            input_mask = valid_mask.unsqueeze(0).to(
+                self.device, non_blocking=True
+            )
+            with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                student_prompt = short_value + short_current_weight * (
+                    self.soft_prompt - self.soft_prompt.detach()
+                )
+                selected_logits = self._forward(selected, student_prompt)
+                components = self._cac_components(selected_logits, input_mask)
+                case_components = self._add_components(case_components, components)
+                text = self._text_features[0].float()
+                case_text_sum = text if case_text_sum is None else case_text_sum + text
+        if case_components is None or case_text_sum is None:
+            raise RuntimeError("Selected-view case CAC accumulation produced no statistics")
+        case_cac = cac_from_components(
+            case_components["foreground_sum"],
+            case_components["foreground_mass"],
+            case_components["background_sum"],
+            case_components["background_mass"],
+            case_text_sum / len(patches),
+        )
+        cac_loss = -case_cac[0]
+        self.scaler.scale(self.w_cac * cac_loss).backward()
+        sums["cac_loss"] = float(cac_loss.detach().cpu())
+        sums["loss"] += self.w_cac * sums["cac_loss"]
 
         self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_([self.soft_prompt], float(self.args.grad_clip))

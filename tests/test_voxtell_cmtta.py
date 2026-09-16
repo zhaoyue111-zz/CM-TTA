@@ -4,10 +4,13 @@ import unittest
 import torch
 from torch import nn
 
+from data.voxtell_p0 import make_case_patches, pad_to_patch_grid
 from method.voxtell_cmtta import (
     ShortPromptMemory,
     VoxTellCMTTA,
     avg_entropy,
+    cac_from_features,
+    cac_from_components,
     select_cac_view,
     soft_dice_loss,
 )
@@ -40,7 +43,6 @@ class TinyVoxTell(nn.Module):
 def make_args(**overrides):
     values = dict(
         lr=0.05,
-        weight_decay=0.0,
         ema_momentum=0.9,
         w_cac=1.0,
         w_entropy=0.1,
@@ -65,6 +67,9 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertTrue(all(not p.requires_grad for p in model.parameters()))
             self.assertTrue(all(not p.requires_grad for p in qwen.parameters()))
             self.assertEqual(adapter.soft_prompt.dtype, torch.float32)
+            self.assertIsInstance(adapter.optimizer, torch.optim.Adam)
+            self.assertEqual(adapter.optimizer.param_groups[0]["lr"], 0.05)
+            self.assertEqual(adapter.optimizer.param_groups[0]["weight_decay"], 0.0)
         finally:
             adapter.close()
 
@@ -90,13 +95,80 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(selected_indices.tolist(), [1])
         self.assertAlmostEqual(float(avg_entropy(probabilities[0])), 0.693147, places=5)
 
+    def test_cac_pools_features_before_cosine(self):
+        # The foreground average is [1, 1] and background average [1, -1].
+        # Cosine-after-pooling therefore gives 1 - 0 = 1.  Averaging voxel
+        # cosines would incorrectly produce a different result.
+        vision = torch.tensor(
+            [
+                [[2.0, 0.0]],
+                [[0.0, 2.0]],
+                [[1.0, -1.0]],
+                [[1.0, -1.0]],
+            ]
+        )
+        text = torch.tensor([[[1.0, 1.0]]])
+        logits = torch.tensor([[[[[20.0, 20.0], [-20.0, -20.0]]]]])
+        result = cac_from_features(vision, text, logits)
+        self.assertTrue(torch.allclose(result, torch.ones(1), atol=1e-5))
+
+    def test_case_cac_uses_global_sums_not_patch_cac_mean(self):
+        text = torch.tensor([[1.0, 0.0]])
+        first = cac_from_components(
+            torch.tensor([[10.0, 0.0]]), torch.tensor([10.0]),
+            torch.tensor([[0.0, 10.0]]), torch.tensor([10.0]), text
+        )
+        second = cac_from_components(
+            torch.tensor([[0.0, 1.0]]), torch.tensor([1.0]),
+            torch.tensor([[0.0, 1.0]]), torch.tensor([1.0]), text
+        )
+        global_score = cac_from_components(
+            torch.tensor([[10.0, 1.0]]), torch.tensor([11.0]),
+            torch.tensor([[0.0, 11.0]]), torch.tensor([11.0]), text
+        )
+        self.assertFalse(torch.allclose(global_score, (first + second) / 2.0))
+
+    def test_padding_mask_excludes_padding_and_augmentation_keeps_it_zero(self):
+        volume = torch.ones(1, 3, 4, 5)
+        padded, valid, _ = pad_to_patch_grid(volume, (2, 3, 3))
+        self.assertEqual(tuple(padded.shape), (1, 4, 6, 6))
+        self.assertEqual(tuple(valid.shape), (1, 4, 6, 6))
+        self.assertEqual(float(valid[:, :3, :4, :5].sum()), 3 * 4 * 5)
+        patches, valid_masks, _locations, _original = make_case_patches(volume, (2, 3, 3))
+        self.assertEqual(len(patches), len(valid_masks))
+        augmented = VoxTellCMTTA._make_views(
+            patches[-1], [{"scale": 1.0, "offset": 0.0}, {"scale": 1.0, "offset": 10.0}],
+            valid_masks[-1],
+        )
+        self.assertTrue(torch.equal(augmented * (1.0 - valid_masks[-1]), torch.zeros_like(augmented)))
+
+    def test_padding_is_excluded_from_cac_and_soft_dice(self):
+        vision = torch.tensor([[[1.0, 0.0]], [[0.0, 1.0]]])
+        text = torch.tensor([[[1.0, 0.0]]])
+        logits_a = torch.tensor([[[[[20.0, -20.0]]]]])
+        logits_b = torch.tensor([[[[[20.0, 20.0]]]]])
+        valid = torch.tensor([[[[1.0, 0.0]]]])
+        cac_a = cac_from_features(vision, text, logits_a, valid_mask=valid)
+        cac_b = cac_from_features(vision, text, logits_b, valid_mask=valid)
+        self.assertTrue(torch.allclose(cac_a, cac_b, atol=1e-5))
+
+        prediction_a = torch.tensor([[[[[0.8, 0.0]]]]])
+        prediction_b = torch.tensor([[[[[0.8, 1.0]]]]])
+        pseudo_a = torch.tensor([[[[[0.8, 0.0]]]]])
+        pseudo_b = torch.tensor([[[[[0.8, 0.2]]]]])
+        dice_a = soft_dice_loss(prediction_a, pseudo_a, valid_mask=valid)
+        dice_b = soft_dice_loss(prediction_b, pseudo_b, valid_mask=valid)
+        self.assertTrue(torch.allclose(dice_a, dice_b, atol=1e-6))
+
     def test_selected_view_is_pseudo_label_source_and_case_has_one_step(self):
         model = TinyVoxTell()
-        adapter = VoxTellCMTTA(model, torch.zeros(1, 1, 2), "cpu", make_args())
+        adapter = VoxTellCMTTA(
+            model, torch.zeros(1, 1, 2), "cpu", make_args(view_batch_size=3)
+        )
         try:
             # Make selection deterministic while retaining the real DSPU path.
-            adapter._case_cac = lambda _prompt, _patches: 0.0
-            adapter._select_case_view = lambda _patches, _params, _short: (
+            adapter._case_cac = lambda *_args: 0.0
+            adapter._select_case_view = lambda *_args: (
                 1,
                 torch.tensor([0.0, 1.0, 0.0]),
             )
@@ -112,6 +184,11 @@ class VoxTellCMTTATest(unittest.TestCase):
             # The long-prompt forward is immediately followed by the all-view
             # student forward.  Its image must be student view 1.
             self.assertTrue(torch.equal(model.last_long_input, model.last_student_input[1:2]))
+            # A second case exercises the non-leaf short-prompt fusion while
+            # still allowing only one update for that case.
+            trace2 = adapter.adapt_case([patch])
+            self.assertEqual(trace2["optimizer_steps_for_case"], 1)
+            self.assertEqual(adapter.optimizer_step_count, 2)
         finally:
             adapter.close()
 
