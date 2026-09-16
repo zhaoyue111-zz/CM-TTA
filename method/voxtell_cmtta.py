@@ -825,7 +825,6 @@ class VoxTellCMTTA:
             global_entropy, (global_entropy_sum, global_entropy_mass)
         )
 
-        scale = float(self.scaler.get_scale())
         total_views = len(params)
         for patch, valid_mask in zip(patches, valid_masks):
             selected = self._make_view_batch(
@@ -865,8 +864,8 @@ class VoxTellCMTTA:
                         local_dice["prediction_mass"],
                     ]
                     local_gradients = [
-                        dice_derivatives[0][start:end] * scale,
-                        dice_derivatives[1][start:end] * scale,
+                        dice_derivatives[0][start:end],
+                        dice_derivatives[1][start:end],
                     ]
                     if start <= selected_view < end:
                         selected_index = selected_view - start
@@ -876,7 +875,7 @@ class VoxTellCMTTA:
                         )
                         local_tensors.append(local_entropy_sum)
                         local_gradients.append(
-                            entropy_derivatives[0] * scale * self.w_entropy
+                            entropy_derivatives[0] * self.w_entropy
                         )
                 differentiable = [
                     (tensor, gradient)
@@ -887,7 +886,7 @@ class VoxTellCMTTA:
                     local_objective = sum(
                         (tensor * gradient).sum() for tensor, gradient in differentiable
                     )
-                    local_objective.backward()
+                    self.scaler.scale(local_objective).backward()
         return float(global_dice.detach().cpu()), float(global_entropy.detach().cpu())
 
     def _backward_case_cac(
@@ -948,7 +947,6 @@ class VoxTellCMTTA:
 
         # Backpropagate the derivative of w_cac * (-case_cac), one selected
         # view/patch at a time.  The current graph is released every iteration.
-        scale = -float(self.scaler.get_scale()) * self.w_cac
         for patch, valid_mask in zip(patches, valid_masks):
             selected = self._make_view_batch(
                 patch, params, valid_mask, selected_view, selected_view + 1
@@ -976,13 +974,15 @@ class VoxTellCMTTA:
                 if local.requires_grad:
                     local_tensors.append(local)
                     text_factor = 1.0 / len(patches) if local is local_text else 1.0
-                    local_gradients.append(derivative * (scale * text_factor))
+                    local_gradients.append(
+                        derivative * (-self.w_cac * text_factor)
+                    )
             if local_tensors:
                 local_objective = sum(
                     (tensor * gradient).sum()
                     for tensor, gradient in zip(local_tensors, local_gradients)
                 )
-                local_objective.backward()
+                self.scaler.scale(local_objective).backward()
         return float(cac_loss.cpu())
 
     def adapt_case(

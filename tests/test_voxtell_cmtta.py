@@ -442,6 +442,161 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             adapter.close()
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA AMP is unavailable")
+    def test_cuda_amp_adapt_case_initializes_scaler_and_steps_once(self):
+        device = torch.device("cuda")
+        patches = [
+            torch.tensor(
+                [[[[0.0, 0.2], [0.4, 0.6]], [[0.8, 1.0], [0.3, 0.1]]]],
+                device=device,
+            ),
+            torch.tensor(
+                [[[[0.1, 0.3], [0.5, 0.7]], [[0.9, 0.6], [0.2, 0.0]]]],
+                device=device,
+            ),
+        ]
+        valid_masks = [
+            torch.tensor([[[1.0, 1.0], [1.0, 0.0]], [[1.0, 1.0], [1.0, 1.0]]], device=device),
+            torch.tensor([[[1.0, 1.0], [1.0, 1.0]], [[1.0, 0.0], [1.0, 1.0]]], device=device),
+        ]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+        ]
+        prompt = torch.zeros(1, 1, 2, device=device)
+
+        def make_adapter():
+            model = TinyVoxTell().to(device)
+            with torch.no_grad():
+                model.project_bottleneck_embed.weight.copy_(torch.tensor([[1.0], [0.0]], device=device))
+                model.project_text_embed.weight.copy_(torch.eye(2, device=device))
+            return VoxTellCMTTA(
+                model, prompt, device, make_args(num_aug_views=1, view_batch_size=1)
+            )
+
+        def direct_gradient(adapter):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            short_value = adapter.soft_prompt.detach().clone()
+            long_prompt = short_value.clone()
+            dice_stats = None
+            entropy_sum = None
+            entropy_mass = None
+            cac_components = None
+            text_sum = None
+            with torch.autocast(device_type="cuda", enabled=True):
+                student_prompt = short_value + (
+                    adapter.soft_prompt - adapter.soft_prompt.detach()
+                )
+                for patch, valid_mask in zip(patches, valid_masks):
+                    selected = adapter._make_view_batch(
+                        patch, params, valid_mask, 1, 2
+                    ).to(device)
+                    with torch.no_grad():
+                        pseudo = torch.sigmoid(
+                            adapter._forward(selected, long_prompt)[:, :1]
+                        ).detach()
+                    views = adapter._make_view_batch(
+                        patch, params, valid_mask, 0, 2
+                    ).to(device)
+                    logits = adapter._forward(views, student_prompt)
+                    probabilities = torch.sigmoid(logits[:, :1])
+                    local_mask = valid_mask.unsqueeze(0).expand(2, -1, -1, -1)
+                    dice_stats = adapter._add_components(
+                        dice_stats,
+                        masked_dice_components(
+                            probabilities, pseudo, local_mask.unsqueeze(1)
+                        ),
+                    )
+                    local_entropy, local_mass = masked_entropy_components(
+                        probabilities[1:2], local_mask[1:2]
+                    )
+                    entropy_sum = (
+                        local_entropy[0]
+                        if entropy_sum is None
+                        else entropy_sum + local_entropy[0]
+                    )
+                    entropy_mass = (
+                        local_mass[0]
+                        if entropy_mass is None
+                        else entropy_mass + local_mass[0]
+                    )
+                    selected_logits = adapter._forward(selected, student_prompt)
+                    local_cac = adapter._cac_components(
+                        selected_logits,
+                        valid_mask.unsqueeze(0),
+                    )
+                    cac_components = adapter._add_components(cac_components, local_cac)
+                    text = adapter._text_features[0].float()
+                    text_sum = text if text_sum is None else text_sum + text
+                dice = (
+                    1.0
+                    - 2.0 * dice_stats["intersection"]
+                    / (
+                        dice_stats["prediction_mass"]
+                        + dice_stats["pseudo_mass"]
+                        + 1e-8
+                    )
+                ).mean()
+                entropy = entropy_sum / entropy_mass.clamp_min(1.0)
+                case_cac = cac_from_components(
+                    cac_components["foreground_sum"],
+                    cac_components["foreground_mass"],
+                    cac_components["background_sum"],
+                    cac_components["background_mass"],
+                    text_sum / len(patches),
+                )[0]
+                objective = dice + adapter.w_entropy * entropy - adapter.w_cac * case_cac
+            adapter.scaler.scale(objective).backward()
+            return adapter.soft_prompt.grad.detach().clone()
+
+        direct_adapter = make_adapter()
+        two_stage_adapter = make_adapter()
+        try:
+            direct_gradient_value = direct_gradient(direct_adapter)
+            two_stage_adapter.optimizer.zero_grad(set_to_none=True)
+            short_value = two_stage_adapter.soft_prompt.detach().clone()
+            two_stage_adapter._backward_case_supervision(
+                patches,
+                valid_masks,
+                params,
+                1,
+                short_value,
+                1.0,
+                short_value,
+                True,
+            )
+            two_stage_adapter._backward_case_cac(
+                patches,
+                valid_masks,
+                params,
+                1,
+                short_value,
+                1.0,
+                True,
+            )
+            two_stage_gradient_value = two_stage_adapter.soft_prompt.grad.detach().clone()
+        finally:
+            direct_adapter.close()
+            two_stage_adapter.close()
+
+        self.assertTrue(
+            torch.allclose(
+                two_stage_gradient_value,
+                direct_gradient_value,
+                atol=2e-3,
+                rtol=2e-3,
+            )
+        )
+
+        adapter = make_adapter()
+        try:
+            trace = adapter.adapt_case(patches)
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertEqual(adapter.optimizer_step_count, 1)
+            self.assertIn("scale", adapter.scaler.state_dict())
+        finally:
+            adapter.close()
+
     def test_short_memory_is_fifo_and_cac_weighted(self):
         memory = ShortPromptMemory(2)
         memory.append(torch.tensor([1.0]), 0.0)
