@@ -170,6 +170,8 @@ class VoxTellCMTTATest(unittest.TestCase):
               [[1.0, 0.8, 0.6], [0.4, 0.2, 0.0]]]]
         )
         valid_mask = torch.ones(2, 2, 3)
+        patches = [patch, patch + 0.1]
+        valid_masks = [valid_mask, valid_mask]
         params = [{"scale": 1.0, "offset": 0.0}]
         params.extend(
             {"scale": 0.8 + 0.04 * index, "offset": -0.1 + 0.02 * index}
@@ -189,7 +191,7 @@ class VoxTellCMTTATest(unittest.TestCase):
             )
             try:
                 selected, scores = adapter._select_case_view(
-                    [patch], params, adapter.soft_prompt.detach(), [valid_mask]
+                    patches, params, adapter.soft_prompt.detach(), valid_masks
                 )
                 results.append((selected, scores))
             finally:
@@ -200,6 +202,91 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(results[0][0], results[2][0])
         self.assertTrue(torch.allclose(results[0][1], results[1][1], atol=1e-6))
         self.assertTrue(torch.allclose(results[0][1], results[2][1], atol=1e-6))
+
+    def test_two_stage_global_cac_gradient_matches_full_graph(self):
+        patches = [
+            torch.tensor([[[[0.0, 0.2], [0.4, 0.6]], [[0.8, 1.0], [0.3, 0.1]]]]),
+            torch.tensor([[[[0.1, 0.3], [0.5, 0.7]], [[0.9, 0.6], [0.2, 0.0]]]]),
+        ]
+        valid_masks = [
+            torch.tensor([[[1.0, 1.0], [1.0, 0.0]], [[1.0, 1.0], [1.0, 1.0]]]),
+            torch.tensor([[[1.0, 1.0], [1.0, 1.0]], [[1.0, 0.0], [1.0, 1.0]]]),
+        ]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+        ]
+        model = TinyVoxTell()
+        # Make pooled foreground/background directions different so both the
+        # probability-weighted visual path and the prompt-text path contribute
+        # a non-zero gradient.
+        model.project_bottleneck_embed = nn.Linear(1, 2, bias=True)
+        with torch.no_grad():
+            model.project_bottleneck_embed.weight.copy_(torch.tensor([[1.0], [0.0]]))
+            model.project_bottleneck_embed.bias.copy_(torch.tensor([0.0, 1.0]))
+            model.project_text_embed.weight.copy_(torch.eye(2))
+        adapter = VoxTellCMTTA(
+            model,
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(num_aug_views=1, view_batch_size=1),
+        )
+
+        def direct_cac_gradient(detach_components=False, detach_text=False):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            components_sum = None
+            text_sum = None
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = adapter._make_view_batch(
+                    patch, params, valid_mask, 1, 2
+                )
+                student_prompt = adapter.soft_prompt.detach().clone() + (
+                    adapter.soft_prompt - adapter.soft_prompt.detach()
+                )
+                logits = adapter._forward(selected, student_prompt)
+                components = adapter._cac_components(
+                    logits, valid_mask.unsqueeze(0)
+                )
+                if detach_components:
+                    components = {key: value.detach() for key, value in components.items()}
+                components_sum = adapter._add_components(components_sum, components)
+                text = adapter._text_features[0].float()
+                text_sum = text if text_sum is None else text_sum + text
+            if detach_text:
+                text_sum = text_sum.detach()
+            case_cac = cac_from_components(
+                components_sum["foreground_sum"],
+                components_sum["foreground_mass"],
+                components_sum["background_sum"],
+                components_sum["background_mass"],
+                text_sum / len(patches),
+            )
+            (-adapter.w_cac * case_cac[0]).backward()
+            return adapter.soft_prompt.grad.detach().clone()
+
+        try:
+            direct_gradient = direct_cac_gradient()
+            visual_probability_gradient = direct_cac_gradient(detach_text=True)
+            text_gradient = direct_cac_gradient(detach_components=True)
+
+            adapter.optimizer.zero_grad(set_to_none=True)
+            adapter._backward_case_cac(
+                patches,
+                valid_masks,
+                params,
+                1,
+                adapter.soft_prompt.detach().clone(),
+                1.0,
+                False,
+            )
+            two_stage_gradient = adapter.soft_prompt.grad.detach().clone()
+        finally:
+            adapter.close()
+
+        self.assertTrue(torch.allclose(two_stage_gradient, direct_gradient, atol=1e-6))
+        self.assertGreater(float(direct_gradient.norm()), 0.0)
+        self.assertGreater(float(visual_probability_gradient.norm()), 0.0)
+        self.assertGreater(float(text_gradient.norm()), 0.0)
 
     def test_selected_view_is_pseudo_label_source_and_case_has_one_step(self):
         model = TinyVoxTell()
