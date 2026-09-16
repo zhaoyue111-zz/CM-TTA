@@ -160,6 +160,47 @@ class VoxTellCMTTATest(unittest.TestCase):
         dice_b = soft_dice_loss(prediction_b, pseudo_b, valid_mask=valid)
         self.assertTrue(torch.allclose(dice_a, dice_b, atol=1e-6))
 
+        entropy_a = avg_entropy(prediction_a, valid_mask=valid)
+        entropy_b = avg_entropy(prediction_b, valid_mask=valid)
+        self.assertTrue(torch.allclose(entropy_a, entropy_b, atol=1e-6))
+
+    def test_select_case_view_keeps_global_view_axis_for_every_chunk_size(self):
+        patch = torch.tensor(
+            [[[[0.0, 0.2, 0.4], [0.6, 0.8, 1.0]],
+              [[1.0, 0.8, 0.6], [0.4, 0.2, 0.0]]]]
+        )
+        valid_mask = torch.ones(2, 2, 3)
+        params = [{"scale": 1.0, "offset": 0.0}]
+        params.extend(
+            {"scale": 0.8 + 0.04 * index, "offset": -0.1 + 0.02 * index}
+            for index in range(9)
+        )
+        results = []
+        for view_batch_size in (1, 3, 10):
+            model = TinyVoxTell()
+            with torch.no_grad():
+                model.project_bottleneck_embed.weight.copy_(torch.tensor([[1.0], [0.5]]))
+                model.project_text_embed.weight.copy_(torch.eye(2))
+            adapter = VoxTellCMTTA(
+                model,
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(num_aug_views=9, view_batch_size=view_batch_size),
+            )
+            try:
+                selected, scores = adapter._select_case_view(
+                    [patch], params, adapter.soft_prompt.detach(), [valid_mask]
+                )
+                results.append((selected, scores))
+            finally:
+                adapter.close()
+
+        self.assertEqual(tuple(results[0][1].shape), (10,))
+        self.assertEqual(results[0][0], results[1][0])
+        self.assertEqual(results[0][0], results[2][0])
+        self.assertTrue(torch.allclose(results[0][1], results[1][1], atol=1e-6))
+        self.assertTrue(torch.allclose(results[0][1], results[2][1], atol=1e-6))
+
     def test_selected_view_is_pseudo_label_source_and_case_has_one_step(self):
         model = TinyVoxTell()
         adapter = VoxTellCMTTA(

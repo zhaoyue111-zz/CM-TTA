@@ -27,7 +27,9 @@ def avg_entropy(
     eps: float = EPS,
 ) -> torch.Tensor:
     """CM-TTA binary entropy, averaged over valid 3-D voxels."""
-    probabilities = probabilities.float().clamp(eps, 1.0 - eps)
+    probabilities = probabilities.float()
+    safe_eps = max(float(eps), float(torch.finfo(probabilities.dtype).eps))
+    probabilities = probabilities.clamp(safe_eps, 1.0 - safe_eps)
     entropy = -(
         probabilities * probabilities.log()
         + (1.0 - probabilities) * (1.0 - probabilities).log()
@@ -620,7 +622,20 @@ class VoxTellCMTTA:
                     ).expand(end - start, -1, -1, -1)
                     logits = self._forward(view_batch, short.detach())
                     components = self._cac_components(logits, input_mask_batch)
-                    accumulator = self._add_components(accumulator, components)
+                    if accumulator is None:
+                        # Keep a real global view axis.  Adding successive
+                        # chunks directly would align their local index 0s
+                        # and collapse all views when batch_size=1.
+                        accumulator = {
+                            key: torch.zeros(
+                                (total_views, *value.shape[1:]),
+                                device=value.device,
+                                dtype=value.dtype,
+                            )
+                            for key, value in components.items()
+                        }
+                    for key, value in components.items():
+                        accumulator[key][start:end].add_(value)
                     text = self._text_features[0].float()
                     if text_sum is None:
                         text_sum = torch.zeros(
@@ -739,11 +754,52 @@ class VoxTellCMTTA:
                 sums["entropy_loss"] += float(entropy_loss.detach().cpu()) / len(patches)
                 sums["loss"] += float(loss.detach().cpu()) / len(patches)
 
-        # CAC loss uses one case-level statistic as well.  Only one selected
-        # view per patch is retained here, rather than the full 10-view graph;
-        # the global pooled feature/mass sums are then cosined exactly once.
+        # First collect the exact case-level CAC inputs without autograd.  A
+        # later pass applies the global CAC derivative patch by patch, so no
+        # collection of patch graphs is needed.
         case_components = None
         case_text_sum = None
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                input_mask = valid_mask.unsqueeze(0).to(
+                    self.device, non_blocking=True
+                )
+                with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                    student_prompt = short_value + short_current_weight * (
+                        self.soft_prompt - self.soft_prompt.detach()
+                    )
+                    selected_logits = self._forward(selected, student_prompt)
+                    components = self._cac_components(selected_logits, input_mask)
+                    case_components = self._add_components(case_components, components)
+                    text = self._text_features[0].float()
+                    case_text_sum = text if case_text_sum is None else case_text_sum + text
+        if case_components is None or case_text_sum is None:
+            raise RuntimeError("Selected-view case CAC accumulation produced no statistics")
+
+        # Differentiate the one global pooled-CAC expression with respect to
+        # its five aggregate inputs.  Each derivative is then supplied to a
+        # one-patch autograd graph below; this is exact chain-rule gradient
+        # accumulation and has the same result as retaining every patch graph.
+        global_inputs = tuple(
+            case_components[key].detach().requires_grad_(True)
+            for key in (
+                "foreground_sum",
+                "foreground_mass",
+                "background_sum",
+                "background_mass",
+            )
+        )
+        global_text = (case_text_sum / len(patches)).detach().requires_grad_(True)
+        case_cac_graph = cac_from_components(*global_inputs, global_text)
+        global_derivatives = torch.autograd.grad(case_cac_graph[0], (*global_inputs, global_text))
+        cac_loss = -case_cac_graph[0].detach()
+
+        # Backpropagate global CAC gradients one selected view/patch at a
+        # time.  The current graph is released on every iteration.
+        scale = float(self.scaler.get_scale()) * self.w_cac
         for patch, valid_mask in zip(patches, valid_masks):
             selected = self._make_view_batch(
                 patch, params, valid_mask, selected_view, selected_view + 1
@@ -757,21 +813,25 @@ class VoxTellCMTTA:
                 )
                 selected_logits = self._forward(selected, student_prompt)
                 components = self._cac_components(selected_logits, input_mask)
-                case_components = self._add_components(case_components, components)
-                text = self._text_features[0].float()
-                case_text_sum = text if case_text_sum is None else case_text_sum + text
-        if case_components is None or case_text_sum is None:
-            raise RuntimeError("Selected-view case CAC accumulation produced no statistics")
-        case_cac = cac_from_components(
-            case_components["foreground_sum"],
-            case_components["foreground_mass"],
-            case_components["background_sum"],
-            case_components["background_mass"],
-            case_text_sum / len(patches),
-        )
-        cac_loss = -case_cac[0]
-        self.scaler.scale(self.w_cac * cac_loss).backward()
-        sums["cac_loss"] = float(cac_loss.detach().cpu())
+                local_text = self._text_features[0].float()
+            local_inputs = (
+                components["foreground_sum"],
+                components["foreground_mass"],
+                components["background_sum"],
+                components["background_mass"],
+                local_text,
+            )
+            local_tensors = []
+            local_gradients = []
+            for local, derivative in zip(local_inputs, global_derivatives):
+                if local.requires_grad:
+                    local_tensors.append(local)
+                    text_factor = 1.0 / len(patches) if local is local_text else 1.0
+                    local_gradients.append(derivative * (scale * text_factor))
+            if local_tensors:
+                torch.autograd.backward(local_tensors, local_gradients)
+
+        sums["cac_loss"] = float(cac_loss.cpu())
         sums["loss"] += self.w_cac * sums["cac_loss"]
 
         self.scaler.unscale_(self.optimizer)
