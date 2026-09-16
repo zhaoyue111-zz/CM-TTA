@@ -16,3 +16,8 @@ timm
 torch
 torchvision
 transformers
+nnunetv2
+dynamic-network-architectures
+positional-encodings
+acvl_utils==0.2.5
+tqdm

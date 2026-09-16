@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -9,21 +10,6 @@ from PIL import Image
 import torch
 import torch.backends.cudnn as cudnn
 
-from data.NII_test import (
-    load_datasets_isic2018,
-    load_datasets_promise,
-)
-from method.tpt_mt import TPT_MT
-from sam3.custom_sam3 import get_coop
-from utils.tools import (
-    AverageMeter,
-    ProgressMeter,
-    Summary,
-    calculate_metrics,
-    resize_and_save,
-    set_random_seed,
-)
-
 
 CLASS_NAMES = {
     "promise": ["prostate"],
@@ -32,6 +18,8 @@ CLASS_NAMES = {
 
 
 def build_loader(args):
+    from data.NII_test import load_datasets_isic2018, load_datasets_promise
+
     if args.dataset == "promise":
         return load_datasets_promise(args, args.resolution, augmix=False, n_views=args.aug_views)
     if args.dataset == "isic2018":
@@ -61,6 +49,24 @@ def print_args(args):
 
 
 def main():
+    # Keep the original SAM3 Promise/ISIC path intact while exposing the
+    # native 3-D VoxTell P0 path from the same root CM-TTA entry point.
+    if "voxtell_p0" in sys.argv:
+        from run_voxtell_cmtta import main as run_voxtell
+
+        sys.argv = [arg for arg in sys.argv if arg != "voxtell_p0"]
+        sys.argv = [arg for arg in sys.argv if arg != "--dataset"]
+        return run_voxtell()
+    from method.tpt_mt import TPT_MT
+    from sam3.custom_sam3 import get_coop
+    from utils.tools import (
+        AverageMeter,
+        ProgressMeter,
+        Summary,
+        calculate_metrics,
+        resize_and_save,
+        set_random_seed,
+    )
     args = parse_args()
     set_random_seed(args.seed)
     cudnn.benchmark = True

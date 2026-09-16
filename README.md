@@ -109,6 +109,30 @@ Some useful options:
 --use_entropy_loss 1
 ```
 
+### VoxTell CM-TTA on P0
+
+The root CM-TTA entry also supports the native 3-D VoxTell model. This path
+uses only the eight `test_cases` in
+`/data/zy/CT_MRI_DATA_3D/worst_zeroshot_split_p0/balanced_zeroshot_split.json`;
+the train split is not loaded. VoxTell and Qwen remain frozen while the
+single `liver` soft prompt is adapted online across cases. CAC view selection,
+entropy/segmentation consistency, teacher prompt EMA, and prompt memory are
+kept; SAM3-only point/box prompts are disabled.
+
+```bash
+python run_cmtta.py \
+  --dataset voxtell_p0 \
+  --data_dir /data/zy/CT_MRI_DATA_3D \
+  --voxtell_root /data/zy/VoxTell_from_disk \
+  --model_dir /data/zy/VoxTell_from_disk/model \
+  --text_model /home/SENSETIME/yangtingting/.cache/huggingface/hub/models--Qwen--Qwen3-Embedding-4B/snapshots/5cf2132abc99cad020ac570b19d031efec650f2b \
+  --prompt liver \
+  --device cuda:0
+```
+
+Predictions and case-level 3-D Dice/mIoU are written to
+`results_/voxtell_cmtta_p0/`.
+
 Results are saved under:
 
 ```text
