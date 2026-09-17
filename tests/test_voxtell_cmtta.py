@@ -14,6 +14,7 @@ from method.voxtell_cmtta import (
     avg_entropy,
     cac_from_features,
     cac_from_components,
+    cac_components_from_features,
     masked_dice_components,
     masked_entropy_components,
     select_cac_view,
@@ -200,6 +201,52 @@ class VoxTellCMTTATest(unittest.TestCase):
         result = cac_from_features(vision, text, logits)
         self.assertTrue(torch.allclose(result, torch.ones(1), atol=1e-5))
 
+    def test_cac_uses_hard_half_probability_masks_for_feature_pooling(self):
+        vision = torch.tensor(
+            [
+                [[1.0, 0.0]],
+                [[0.0, 1.0]],
+                [[1.0, 1.0]],
+                [[2.0, 0.0]],
+            ]
+        )
+        probabilities = torch.tensor([0.9, 0.6, 0.4, 0.1]).reshape(1, 1, 1, 4)
+        logits = torch.logit(probabilities).unsqueeze(1)
+        components = cac_components_from_features(vision, logits)
+        self.assertTrue(
+            torch.equal(components["foreground_mass"], torch.tensor([2.0]))
+        )
+        self.assertTrue(
+            torch.equal(components["background_mass"], torch.tensor([2.0]))
+        )
+        self.assertTrue(
+            torch.allclose(components["foreground_sum"], torch.tensor([[1.0, 1.0]]))
+        )
+        self.assertTrue(
+            torch.allclose(components["background_sum"], torch.tensor([[3.0, 1.0]]))
+        )
+
+        all_foreground = cac_components_from_features(
+            vision, torch.full_like(logits, 20.0)
+        )
+        all_background = cac_components_from_features(
+            vision, torch.full_like(logits, -20.0)
+        )
+        self.assertTrue(torch.isfinite(cac_from_components(
+            all_foreground["foreground_sum"],
+            all_foreground["foreground_mass"],
+            all_foreground["background_sum"],
+            all_foreground["background_mass"],
+            torch.tensor([[1.0, 0.0]]),
+        )).all())
+        self.assertTrue(torch.isfinite(cac_from_components(
+            all_background["foreground_sum"],
+            all_background["foreground_mass"],
+            all_background["background_sum"],
+            all_background["background_mass"],
+            torch.tensor([[1.0, 0.0]]),
+        )).all())
+
     def test_case_cac_uses_global_sums_not_patch_cac_mean(self):
         text = torch.tensor([[1.0, 0.0]])
         first = cac_from_components(
@@ -349,7 +396,10 @@ class VoxTellCMTTATest(unittest.TestCase):
                 components_sum["background_mass"],
                 text_sum / len(patches),
             )
-            (-adapter.w_cac * case_cac[0]).backward()
+            if case_cac[0].requires_grad:
+                (-adapter.w_cac * case_cac[0]).backward()
+            else:
+                return torch.zeros_like(adapter.ctx)
             return adapter.ctx.grad.detach().clone()
 
         try:
@@ -373,7 +423,7 @@ class VoxTellCMTTATest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(two_stage_gradient, direct_gradient, atol=1e-6))
         self.assertGreater(float(direct_gradient.norm()), 0.0)
-        self.assertGreater(float(visual_probability_gradient.norm()), 0.0)
+        self.assertEqual(float(visual_probability_gradient.norm()), 0.0)
         self.assertGreater(float(text_gradient.norm()), 0.0)
 
     def test_case_dice_entropy_and_gradient_are_patch_partition_invariant(self):

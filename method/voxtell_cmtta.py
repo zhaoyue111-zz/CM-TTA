@@ -272,13 +272,16 @@ def cac_components_from_features(
             mask.unsqueeze(1), size=vision.shape[2:], mode="nearest"
         ).squeeze(1)
     mask = mask.to(dtype=probability.dtype)
-    foreground_probability = probability * mask
-    background_probability = (1.0 - probability) * mask
+    # CM-TTA's CAC uses hard foreground/background regions for visual feature
+    # pooling. Probability values are used only to form the 0.5 partition;
+    # they are never used as token weights.
+    foreground_mask = (probability > 0.5).to(dtype=probability.dtype) * mask
+    background_mask = (probability <= 0.5).to(dtype=probability.dtype) * mask
     return {
-        "foreground_sum": (vision * foreground_probability.unsqueeze(1)).sum(dim=(2, 3, 4)),
-        "foreground_mass": foreground_probability.sum(dim=(1, 2, 3)),
-        "background_sum": (vision * background_probability.unsqueeze(1)).sum(dim=(2, 3, 4)),
-        "background_mass": background_probability.sum(dim=(1, 2, 3)),
+        "foreground_sum": (vision * foreground_mask.unsqueeze(1)).sum(dim=(2, 3, 4)),
+        "foreground_mass": foreground_mask.sum(dim=(1, 2, 3)),
+        "background_sum": (vision * background_mask.unsqueeze(1)).sum(dim=(2, 3, 4)),
+        "background_mass": background_mask.sum(dim=(1, 2, 3)),
     }
 
 
@@ -294,8 +297,8 @@ def cac_from_components(
         raise ValueError(f"Expected text features (B,C), got {tuple(text_features.shape)}")
     if foreground_sum.shape != background_sum.shape or foreground_sum.shape != text_features.shape:
         raise ValueError("CAC feature sums and text features must have matching (B,C) shapes")
-    foreground = foreground_sum / (foreground_mass.unsqueeze(1) + EPS)
-    background = background_sum / (background_mass.unsqueeze(1) + EPS)
+    foreground = foreground_sum / foreground_mass.unsqueeze(1).clamp_min(1.0)
+    background = background_sum / background_mass.unsqueeze(1).clamp_min(1.0)
     text = F.normalize(text_features.float(), dim=1)
     foreground = F.normalize(foreground.float(), dim=1)
     background = F.normalize(background.float(), dim=1)
@@ -894,6 +897,16 @@ class VoxTellCMTTA:
                     text_sum[start:end] += text
         if accumulator is None:
             raise ValueError("A complete case must contain at least one patch")
+        foreground_counts = accumulator["foreground_mass"].detach().cpu().tolist()
+        background_counts = accumulator["background_mass"].detach().cpu().tolist()
+        count_report = ", ".join(
+            f"view={view}: fg={float(fg):.0f}, bg={float(bg):.0f}"
+            for view, (fg, bg) in enumerate(zip(foreground_counts, background_counts))
+        )
+        print(
+            "[VoxTell-CM-TTA] case CAC valid bottleneck tokens: "
+            f"case={self.optimizer_step_count + 1}; {count_report}"
+        )
         scores = cac_from_components(
             accumulator["foreground_sum"],
             accumulator["foreground_mass"],
