@@ -296,6 +296,22 @@ def attach_view_selection_metrics(
                     else float(view_selection["tdc_rank"][view_index])
                 ),
                 "entropy_rank": float(view_selection["entropy_rank"][view_index]),
+                "CAC_entropy_rank": float(
+                    view_selection["cac_entropy_rank"][view_index]
+                ),
+                "TDC_entropy_rank": (
+                    None
+                    if view_selection["tdc_entropy_rank"] is None
+                    else float(view_selection["tdc_entropy_rank"][view_index])
+                ),
+                "CAC_combined_rank": float(
+                    view_selection["cac_combined_rank"][view_index]
+                ),
+                "TDC_combined_rank": (
+                    None
+                    if view_selection["tdc_combined_rank"] is None
+                    else float(view_selection["tdc_combined_rank"][view_index])
+                ),
                 "combined_rank": float(view_selection["combined_rank"][view_index]),
                 "selection_metric": view_selection["selection_metric"],
                 "selected": view_index == selected_view,
@@ -324,8 +340,8 @@ def selector_only_case_report(
     rank_values = {
         "cac_only": view_selection["cac_rank"],
         "tdc_only": view_selection["tdc_rank"],
-        "cac_entropy": view_selection["cac_entropy_rank"],
-        "tdc_entropy": view_selection["tdc_entropy_rank"],
+        "cac_entropy": view_selection["cac_combined_rank"],
+        "tdc_entropy": view_selection["tdc_combined_rank"],
     }
     ranks = {}
     for name, values in rank_values.items():

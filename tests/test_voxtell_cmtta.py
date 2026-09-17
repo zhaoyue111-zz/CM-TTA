@@ -493,9 +493,11 @@ class VoxTellCMTTATest(unittest.TestCase):
             "cac": [0.8, 0.2, 0.5],
             "tdc": [0.1, 0.9, 0.4],
             "cac_rank": [0.0, 2.0, 1.0],
-            "tdc_rank": [2.0, 0.0, 1.0],
-            "cac_entropy_rank": [0.0, 2.0, 1.0],
-            "tdc_entropy_rank": [1.0, 1.0, 1.0],
+            "tdc_rank": [0.0, 2.0, 1.0],
+            "cac_entropy_rank": [1.0, 0.0, 2.0],
+            "tdc_entropy_rank": [1.0, 0.0, 2.0],
+            "cac_combined_rank": [1.0, 2.0, 3.0],
+            "tdc_combined_rank": [1.0, 2.0, 3.0],
             "selected_view": 0,
         }
         report = selector_only_case_report(view_metrics, selection)
@@ -506,8 +508,32 @@ class VoxTellCMTTATest(unittest.TestCase):
         for result in report["selectors"].values():
             self.assertEqual(result["oracle_best_view"], 1)
             self.assertIn("regret", result)
+        self.assertEqual(report["selectors"]["cac_only"]["selected_view"], 0)
+        self.assertEqual(report["selectors"]["tdc_only"]["selected_view"], 0)
+        self.assertEqual(report["selectors"]["cac_entropy"]["selected_view"], 0)
+        self.assertEqual(report["selectors"]["tdc_entropy"]["selected_view"], 0)
         summary = summarize_selector_only([report])
         self.assertEqual(set(summary), set(report["selectors"]))
+
+    def test_selector_only_combined_rank_beats_entropy_only(self):
+        view_metrics = [
+            {"view": 0, "GT_Dice_before_adaptation": 0.6},
+            {"view": 1, "GT_Dice_before_adaptation": 0.9},
+            {"view": 2, "GT_Dice_before_adaptation": 0.5},
+        ]
+        selection = {
+            "tdc": [0.1, 0.2, 0.3],
+            "cac_rank": [0.0, 2.0, 1.0],
+            "tdc_rank": [0.0, 2.0, 1.0],
+            "cac_entropy_rank": [1.0, 0.0, 2.0],
+            "tdc_entropy_rank": [1.0, 0.0, 2.0],
+            "cac_combined_rank": [1.0, 2.0, 3.0],
+            "tdc_combined_rank": [1.0, 2.0, 3.0],
+        }
+        report = selector_only_case_report(view_metrics, selection)
+        # Entropy alone would choose view 1; quality+entropy chooses view 0.
+        self.assertEqual(report["selectors"]["cac_entropy"]["selected_view"], 0)
+        self.assertEqual(report["selectors"]["tdc_entropy"]["selected_view"], 0)
 
     def test_cac_matches_source_similarity_map_definition(self):
         vision = torch.tensor(

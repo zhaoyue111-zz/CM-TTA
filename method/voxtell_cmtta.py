@@ -1196,15 +1196,23 @@ class VoxTellCMTTA:
             if tdc_scores is not None
             else None
         )
+        cac_combined_rank = cac_rank + cac_entropy_rank
+        tdc_combined_rank = (
+            None
+            if tdc_rank is None or tdc_entropy_rank is None
+            else tdc_rank + tdc_entropy_rank
+        )
         if self.view_selection_metric == "tdc":
             # CM-SFDA uses zero-based average ranks for ties in both TDC and
             # entropy; retain the existing argsort ranks for CAC compatibility.
             entropy_rank = tdc_entropy_rank
             quality_rank = tdc_rank
+            quality_entropy_rank = tdc_combined_rank
         else:
             entropy_rank = cac_entropy_rank
             quality_rank = cac_rank
-        combined_rank = quality_rank if not self.use_entropy_rank else entropy_rank + quality_rank
+            quality_entropy_rank = cac_combined_rank
+        combined_rank = quality_rank if not self.use_entropy_rank else quality_entropy_rank
         if self.view_selection_metric == "tdc" or not self.use_entropy_rank:
             num_selected = max(1, int(len(params) * self.selection_p))
             if num_selected != 1:
@@ -1230,6 +1238,10 @@ class VoxTellCMTTA:
             "cac_entropy_rank": cac_entropy_rank.cpu().tolist(),
             "tdc_entropy_rank": (
                 None if tdc_entropy_rank is None else tdc_entropy_rank.cpu().tolist()
+            ),
+            "cac_combined_rank": cac_combined_rank.cpu().tolist(),
+            "tdc_combined_rank": (
+                None if tdc_combined_rank is None else tdc_combined_rank.cpu().tolist()
             ),
             "combined_rank": combined_rank.cpu().tolist(),
             "selected_view": selected,
