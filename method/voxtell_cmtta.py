@@ -48,10 +48,6 @@ def avg_entropy(
     return (entropy / mass).sum()
 
 
-# Compatibility for callers of the earlier local name.
-binary_entropy = avg_entropy
-
-
 def _broadcast_valid_mask(
     reference: torch.Tensor, valid_mask: Optional[torch.Tensor]
 ) -> torch.Tensor:
@@ -130,7 +126,7 @@ def cac_from_features(
     valid_mask: Optional[torch.Tensor] = None,
     feature_spatial_shape: Optional[tuple[int, int, int]] = None,
 ) -> torch.Tensor:
-    """Compute CM-TTA's soft foreground/background CAC in 3-D.
+    """Compute CM-TTA's hard-threshold per-token cosine CAC in 3-D.
 
     The released VoxTell projection hook exposes visual tokens as ``(S,B,C)``
     and logits as ``(B,N,D,H,W)``.  The 5-D feature form is accepted for small
@@ -341,8 +337,15 @@ def select_cac_view_from_entropy(
     entropy_rank = entropy_scores.argsort().argsort().float()
     cac_rank = (-cac_scores).argsort().argsort().float()
     combined_rank = entropy_rank + cac_rank
-    num_selected = max(1, int(cac_scores.numel() * float(selection_p)))
-    selected_indices = torch.argsort(combined_rank, descending=False)[:num_selected]
+    num_views = cac_scores.numel()
+    num_selected = max(1, int(num_views * float(selection_p)))
+    if num_selected != 1:
+        raise ValueError(
+            "VoxTell CM-TTA requires exactly one selected view; "
+            f"selection_p={selection_p} with num_views={num_views} "
+            f"would select {num_selected} views"
+        )
+    selected_indices = torch.argsort(combined_rank, descending=False)[:1]
     return int(selected_indices[0].item()), selected_indices
 
 
@@ -823,8 +826,6 @@ class VoxTellCMTTA:
         if len(valid_masks) != len(patches):
             raise ValueError("patches and valid_masks must have equal lengths")
         accumulator = None
-        entropy_sum = None
-        entropy_mass = None
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
                 patch = patch.unsqueeze(0).to(self.device, non_blocking=True)
