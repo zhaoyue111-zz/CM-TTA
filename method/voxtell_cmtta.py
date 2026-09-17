@@ -20,6 +20,7 @@ from torch import nn
 
 
 EPS = 1e-8
+TDC_DECODER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
 
 
 def avg_entropy(
@@ -155,6 +156,107 @@ def cac_from_features(
         components["background_sum"],
         components["background_mass"],
     )
+
+
+def tdc_patch_components(
+    decoder_outputs: list[torch.Tensor] | tuple[torch.Tensor, ...],
+    valid_mask: torch.Tensor,
+    threshold: float = 0.5,
+) -> dict[str, torch.Tensor]:
+    """Accumulate one patch's TDC pair statistics on the D5 grid.
+
+    VoxTell returns decoder logits in ``[D5,D4,D3,D2,D1]`` order.  TDC uses
+    only the first four outputs; lower-resolution outputs are resized to D5
+    before hard thresholding.  The returned statistics are intentionally
+    additive so callers can perform one exact case-level reduction.
+    """
+    if not isinstance(decoder_outputs, (list, tuple)) or len(decoder_outputs) < 4:
+        raise ValueError("TDC requires decoder outputs [D5,D4,D3,D2,D1]")
+    if not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError(f"TDC threshold must be in [0, 1], got {threshold}")
+    reference = decoder_outputs[0]
+    if reference.ndim != 5 or reference.shape[1] != 1:
+        raise ValueError(
+            "TDC expects decoder logits with shape (B,1,D,H,W), "
+            f"got {tuple(reference.shape)}"
+        )
+    batch = reference.shape[0]
+    spatial_shape = tuple(int(size) for size in reference.shape[2:])
+    valid = valid_mask
+    if valid.ndim == 4:
+        valid = valid.unsqueeze(1)
+    if valid.ndim != 5 or valid.shape[0] != batch:
+        raise ValueError(
+            "TDC valid_mask must have shape (B,D,H,W) or (B,1,D,H,W), "
+            f"got {tuple(valid.shape)}"
+        )
+    valid = valid.to(device=reference.device, dtype=torch.bool)
+    input_spatial_shape = tuple(int(size) for size in valid.shape[2:])
+    if input_spatial_shape != spatial_shape and input_spatial_shape[::-1] == spatial_shape:
+        valid = valid.permute(0, 1, 3, 4, 2).contiguous()
+    elif input_spatial_shape != spatial_shape:
+        valid = F.interpolate(valid.float(), size=spatial_shape, mode="nearest").bool()
+
+    masks = []
+    finite = torch.ones(batch, dtype=torch.bool, device=reference.device)
+    for level, logits in enumerate(decoder_outputs[:4]):
+        if not torch.is_tensor(logits) or logits.ndim != 5:
+            raise ValueError(f"TDC decoder D{5 - level} must be 5-D logits")
+        if logits.shape[:2] != reference.shape[:2]:
+            raise ValueError("TDC decoder outputs must agree in batch and prompt dimensions")
+        logits = logits.float()
+        finite &= torch.isfinite(logits).flatten(start_dim=1).all(dim=1)
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)
+        if level and tuple(logits.shape[2:]) != spatial_shape:
+            logits = F.interpolate(
+                logits, size=spatial_shape, mode="trilinear", align_corners=False
+            )
+        masks.append((torch.sigmoid(logits) >= float(threshold)) & valid)
+
+    intersection = reference.new_zeros((batch, len(TDC_DECODER_PAIRS)), dtype=torch.float32)
+    count1 = intersection.clone()
+    count2 = intersection.clone()
+    for pair_index, (left, right) in enumerate(TDC_DECODER_PAIRS):
+        mask_left = masks[left].flatten(start_dim=1)
+        mask_right = masks[right].flatten(start_dim=1)
+        count1[:, pair_index] = mask_left.sum(dim=1).float()
+        count2[:, pair_index] = mask_right.sum(dim=1).float()
+        intersection[:, pair_index] = (mask_left & mask_right).sum(dim=1).float()
+    return {
+        "intersection": intersection,
+        "count1": count1,
+        "count2": count2,
+        "finite": finite,
+    }
+
+
+def tdc_from_components(
+    intersection: torch.Tensor,
+    count1: torch.Tensor,
+    count2: torch.Tensor,
+    finite: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute case-level pair Dice and TDC from globally summed statistics."""
+    pair_nonempty = (count1 + count2) > 0
+    pair_dice = 2.0 * intersection / (count1 + count2).clamp_min(1.0)
+    pair_valid = pair_nonempty & finite.unsqueeze(1)
+    pair_count = pair_valid.sum(dim=1)
+    tdc = (pair_dice * pair_valid.float()).sum(dim=1) / pair_count.clamp_min(1)
+    tdc = torch.where(pair_count > 0, tdc, torch.zeros_like(tdc))
+    return tdc, pair_dice, pair_valid
+
+
+def _average_tie_rank_1d(values: torch.Tensor, descending: bool) -> torch.Tensor:
+    """Match CM-SFDA's zero-based average rank for tied view scores."""
+    ranked = -values if descending else values
+    ranks = torch.empty_like(ranked, dtype=torch.float32)
+    offset = 0
+    for unique_value in torch.unique(ranked, sorted=True):
+        tied = ranked == unique_value
+        count = int(tied.sum())
+        ranks[tied] = offset + 0.5 * (count - 1)
+        offset += count
+    return ranks
 
 
 def _canonical_valid_mask(
@@ -490,6 +592,9 @@ class VoxTellCMTTA:
         self.w_entropy = float(args.w_entropy)
         self.num_aug_views = int(args.num_aug_views)  # K; total views are K+1.
         self.selection_p = float(args.selection_p)
+        self.view_selection_metric = str(getattr(args, "view_selection_metric", "cac"))
+        if self.view_selection_metric not in ("cac", "tdc"):
+            raise ValueError("view_selection_metric must be 'cac' or 'tdc'")
         if self.num_aug_views < 1:
             raise ValueError("num_aug_views must be at least 1")
         if not 0.0 < self.selection_p <= 1.0:
@@ -775,6 +880,27 @@ class VoxTellCMTTA:
             raise ValueError(f"VoxTell must return (B,N,D,H,W) logits, got {logits.shape}")
         return logits
 
+    def _forward_decoder_outputs(
+        self, images: torch.Tensor, ctx: torch.Tensor
+    ) -> list[torch.Tensor]:
+        """Run the analysis-only VoxTell decoder-output interface for TDC."""
+        text_features = self._encode_ctx(ctx)
+        try:
+            outputs = self.model(
+                images,
+                self._text_input(text_features, images.shape[0]),
+                return_decoder_outputs=True,
+            )
+        except TypeError as error:
+            raise RuntimeError(
+                "TDC requires VoxTell forward(return_decoder_outputs=True)"
+            ) from error
+        if not isinstance(outputs, (list, tuple)) or len(outputs) < 4:
+            raise RuntimeError(
+                "VoxTell return_decoder_outputs=True must return [D5,D4,D3,D2,D1]"
+            )
+        return list(outputs)
+
     def _cac_components(
         self, logits: torch.Tensor, valid_mask: Optional[torch.Tensor] = None
     ) -> dict[str, torch.Tensor]:
@@ -930,6 +1056,8 @@ class VoxTellCMTTA:
         if len(valid_masks) != len(patches):
             raise ValueError("patches and valid_masks must have equal lengths")
         accumulator = None
+        tdc_accumulator = None
+        tdc_finite = None
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
                 if valid_mask is None:
@@ -945,7 +1073,17 @@ class VoxTellCMTTA:
                     input_mask_batch = valid_mask.unsqueeze(0).to(
                         self.device, non_blocking=True
                     ).expand(end - start, -1, -1, -1)
-                    logits = self._forward(view_batch, short_ctx.detach())
+                    if self.view_selection_metric == "tdc":
+                        decoder_outputs = self._forward_decoder_outputs(
+                            view_batch, short_ctx.detach()
+                        )
+                        logits = decoder_outputs[0]
+                        local_tdc = tdc_patch_components(
+                            decoder_outputs, input_mask_batch
+                        )
+                    else:
+                        logits = self._forward(view_batch, short_ctx.detach())
+                        local_tdc = None
                     components = self._cac_components(logits, input_mask_batch)
                     probabilities = torch.sigmoid(logits[:, :1])
                     local_entropy_sum, local_entropy_mass = masked_entropy_components(
@@ -969,8 +1107,27 @@ class VoxTellCMTTA:
                             dtype=local_entropy_sum.dtype,
                         )
                         entropy_mass = torch.zeros_like(entropy_sum)
+                        if self.view_selection_metric == "tdc":
+                            tdc_accumulator = {
+                                key: torch.zeros(
+                                    (total_views, *value.shape[1:]),
+                                    device=value.device,
+                                    dtype=value.dtype,
+                                )
+                                for key, value in local_tdc.items()
+                                if key != "finite"
+                            }
+                            tdc_finite = torch.ones(
+                                (total_views,),
+                                device=local_tdc["intersection"].device,
+                                dtype=torch.bool,
+                            )
                     for key, value in components.items():
                         accumulator[key][start:end].add_(value)
+                    if local_tdc is not None:
+                        for key in ("intersection", "count1", "count2"):
+                            tdc_accumulator[key][start:end].add_(local_tdc[key])
+                        tdc_finite[start:end] &= local_tdc["finite"]
                     entropy_sum[start:end].add_(local_entropy_sum)
                     entropy_mass[start:end].add_(local_entropy_mass)
         if accumulator is None:
@@ -994,16 +1151,51 @@ class VoxTellCMTTA:
         if entropy_sum is None or entropy_mass is None:
             raise RuntimeError("Case entropy accumulation produced no statistics")
         entropy_scores = (entropy_sum / entropy_mass.clamp_min(1.0)).detach()
-        entropy_rank = entropy_scores.argsort().argsort().float()
-        cac_rank = (-scores).argsort().argsort().float()
-        combined_rank = entropy_rank + cac_rank
-        selected, _ = select_cac_view_from_entropy(
-            scores, entropy_scores, self.selection_p
-        )
+        tdc_scores = None
+        if self.view_selection_metric == "tdc":
+            if tdc_accumulator is None or tdc_finite is None:
+                raise RuntimeError("TDC case accumulation produced no statistics")
+            tdc_scores, _pair_dice, _pair_valid = tdc_from_components(
+                tdc_accumulator["intersection"],
+                tdc_accumulator["count1"],
+                tdc_accumulator["count2"],
+                tdc_finite,
+            )
+            selection_scores = tdc_scores.detach()
+        else:
+            selection_scores = scores
+        if self.view_selection_metric == "tdc":
+            # CM-SFDA uses zero-based average ranks for ties in both TDC and
+            # entropy; retain the existing argsort ranks for CAC compatibility.
+            entropy_rank = _average_tie_rank_1d(entropy_scores, descending=False)
+            quality_rank = _average_tie_rank_1d(selection_scores, descending=True)
+        else:
+            entropy_rank = entropy_scores.argsort().argsort().float()
+            quality_rank = (-selection_scores).argsort().argsort().float()
+        combined_rank = entropy_rank + quality_rank
+        if self.view_selection_metric == "tdc":
+            num_selected = max(1, int(len(params) * self.selection_p))
+            if num_selected != 1:
+                raise ValueError(
+                    "VoxTell CM-TTA requires exactly one selected view; "
+                    f"selection_p={self.selection_p} with num_views={len(params)} "
+                    f"would select {num_selected} views"
+                )
+            selected = int(torch.argsort(combined_rank, stable=True)[0].item())
+        else:
+            selected, _ = select_cac_view_from_entropy(
+                selection_scores, entropy_scores, self.selection_p
+            )
         self.last_view_selection = {
             "cac": scores.cpu().tolist(),
+            "tdc": None if tdc_scores is None else tdc_scores.cpu().tolist(),
+            "selection_metric": self.view_selection_metric,
+            "selection_scores": selection_scores.cpu().tolist(),
             "entropy": entropy_scores.cpu().tolist(),
-            "cac_rank": cac_rank.cpu().tolist(),
+            "cac_rank": (
+                (-scores).argsort().argsort().float().cpu().tolist()
+            ),
+            "tdc_rank": None if tdc_scores is None else quality_rank.cpu().tolist(),
             "entropy_rank": entropy_rank.cpu().tolist(),
             "combined_rank": combined_rank.cpu().tolist(),
             "selected_view": selected,

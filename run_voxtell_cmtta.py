@@ -248,7 +248,7 @@ def evaluate_all_view_metrics(
     original_shape,
     text_feature: torch.Tensor,
     view_params: list[dict[str, float]],
-    view_selection: dict[str, list[float] | int],
+    view_selection: dict[str, list[float] | int | None],
 ) -> list[dict[str, float | bool | int]]:
     """Evaluate every selected-case view against GT and attach rank diagnostics."""
     target = np.squeeze(load_ras_label(str(label_path)))
@@ -268,10 +268,21 @@ def evaluate_all_view_metrics(
                 "Dice": binary["Dice"],
                 "mIoU": binary["mIoU"],
                 "CAC": float(view_selection["cac"][view_index]),
+                "TDC": (
+                    None
+                    if view_selection["tdc"] is None
+                    else float(view_selection["tdc"][view_index])
+                ),
                 "entropy": float(view_selection["entropy"][view_index]),
                 "CAC_rank": float(view_selection["cac_rank"][view_index]),
+                "TDC_rank": (
+                    None
+                    if view_selection["tdc_rank"] is None
+                    else float(view_selection["tdc_rank"][view_index])
+                ),
                 "entropy_rank": float(view_selection["entropy_rank"][view_index]),
                 "combined_rank": float(view_selection["combined_rank"][view_index]),
+                "selection_metric": view_selection["selection_metric"],
                 "selected": view_index == selected_view,
             }
         )
@@ -298,6 +309,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp_init_scale", type=float, default=1024.0)
     parser.add_argument("--short_memory_length", type=int, default=16)
     parser.add_argument("--selection_p", type=float, default=0.1)
+    parser.add_argument(
+        "--view_selection_metric",
+        choices=("cac", "tdc"),
+        default="cac",
+        help="View quality used for rank fusion; default preserves CM-TTA CAC.",
+    )
     parser.add_argument("--num_aug_views", type=int, default=9)
     parser.add_argument("--view_batch_size", type=int, default=1)
     parser.add_argument("--w_cac", type=float, default=1.0)
@@ -443,6 +460,17 @@ def main() -> None:
             row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
             row["zero_shot_patch_gap"] = zero_shot_patch_gap
             case_rows.append(row)
+            for view_metric in view_metrics:
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    f"view={view_metric['view']} "
+                    f"TDC={view_metric['TDC']} "
+                    f"entropy={view_metric['entropy']:.6f} "
+                    f"TDC_rank={view_metric['TDC_rank']} "
+                    f"entropy_rank={view_metric['entropy_rank']:.1f} "
+                    f"combined_rank={view_metric['combined_rank']:.1f} "
+                    f"selected={view_metric['selected']}"
+                )
             history.append(
                 {
                     "case": image_path.name,

@@ -22,6 +22,8 @@ from method.voxtell_cmtta import (
     masked_entropy_components,
     select_cac_view,
     soft_dice_loss,
+    tdc_from_components,
+    tdc_patch_components,
 )
 from run_voxtell_cmtta import check_prediction_nifti_geometry, save_prediction_nifti
 
@@ -34,7 +36,7 @@ class TinyVoxTell(nn.Module):
         self.project_bottleneck_embed = nn.Linear(1, 2, bias=False)
         self.project_text_embed = nn.Linear(text_dim, 2, bias=False)
 
-    def forward(self, image, text_embedding):
+    def forward(self, image, text_embedding, return_decoder_outputs=False):
         batch, _, depth, height, width = image.shape
         if batch == 1:
             self.last_long_input = image.detach().clone()
@@ -47,7 +49,10 @@ class TinyVoxTell(nn.Module):
         # Keep the logits in the same (D,H,W) order as this test network's
         # projected visual token grid.
         prompt_bias = projected_text.mean(dim=-1).transpose(0, 1).view(batch, 1, 1, 1, 1)
-        return image[:, :1] + prompt_bias
+        logits = image[:, :1] + prompt_bias
+        if return_decoder_outputs:
+            return [logits, logits, logits, logits, logits]
+        return logits
 
 
 class TinyQwenTokenizer:
@@ -346,6 +351,45 @@ class VoxTellCMTTATest(unittest.TestCase):
                 torch.full((3, 1, 1, 1, 1), 0.5),
                 0.7,
             )
+
+    def test_tdc_empty_pair_rules_and_case_level_reduction(self):
+        intersection = torch.tensor([[2.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+        count1 = torch.tensor([[2.0, 2.0, 0.0, 0.0, 0.0, 0.0]])
+        count2 = torch.tensor([[2.0, 0.0, 0.0, 0.0, 0.0, 0.0]])
+        tdc, pair_dice, pair_valid = tdc_from_components(
+            intersection, count1, count2, torch.tensor([True])
+        )
+        self.assertTrue(torch.allclose(pair_dice[0, :2], torch.tensor([1.0, 0.0])))
+        self.assertTrue(torch.equal(pair_valid[0, :2], torch.tensor([True, True])))
+        self.assertTrue(torch.allclose(tdc, torch.tensor([0.5])))
+        self.assertFalse(pair_valid[0, 2:].any())
+
+    def test_tdc_selection_uses_decoder_outputs_and_case_statistics(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(view_selection_metric="tdc", num_aug_views=2, view_batch_size=1),
+        )
+        try:
+            patch = torch.zeros(1, 2, 2, 2)
+            valid = torch.ones(2, 2, 2)
+            params = [
+                {"scale": 1.0, "offset": 0.0},
+                {"scale": 0.9, "offset": 0.1},
+                {"scale": 1.1, "offset": -0.1},
+            ]
+            selected, cac_scores = adapter._select_case_view(
+                [patch, patch + 0.1], params, adapter.ctx.detach(), [valid, valid]
+            )
+            details = adapter.last_view_selection
+            self.assertEqual(cac_scores.shape, (3,))
+            self.assertEqual(details["selection_metric"], "tdc")
+            self.assertEqual(len(details["tdc"]), 3)
+            self.assertEqual(len(details["combined_rank"]), 3)
+            self.assertEqual(details["selected_view"], selected)
+        finally:
+            adapter.close()
 
     def test_cac_matches_source_similarity_map_definition(self):
         vision = torch.tensor(
