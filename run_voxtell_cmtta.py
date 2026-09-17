@@ -240,7 +240,7 @@ def predict_nonoverlap_case(
     )[0]
 
 
-def evaluate_all_view_metrics(
+def evaluate_view_gt_metrics_before_adaptation(
     predictor,
     label_path: Path,
     data: torch.Tensor,
@@ -248,12 +248,10 @@ def evaluate_all_view_metrics(
     original_shape,
     text_feature: torch.Tensor,
     view_params: list[dict[str, float]],
-    view_selection: dict[str, list[float] | int | None],
-) -> list[dict[str, float | bool | int]]:
-    """Evaluate every selected-case view against GT and attach rank diagnostics."""
+) -> list[dict[str, float | int]]:
+    """Evaluate every view with the exact pre-adaptation selection embedding."""
     target = np.squeeze(load_ras_label(str(label_path)))
     metrics = []
-    selected_view = int(view_selection["selected_view"])
     for view_index, param in enumerate(view_params):
         scale = float(param["scale"])
         offset = float(param["offset"])
@@ -265,8 +263,25 @@ def evaluate_all_view_metrics(
         metrics.append(
             {
                 "view": view_index,
-                "Dice": binary["Dice"],
-                "mIoU": binary["mIoU"],
+                "GT_Dice_before_adaptation": binary["Dice"],
+                "mIoU_before_adaptation": binary["mIoU"],
+            }
+        )
+    return metrics
+
+
+def attach_view_selection_metrics(
+    view_gt_metrics: list[dict[str, float | int]],
+    view_selection: dict[str, list[float] | int | None],
+) -> list[dict[str, float | bool | int | str | None]]:
+    """Attach post-selection diagnostics without recomputing GT predictions."""
+    selected_view = int(view_selection["selected_view"])
+    metrics = []
+    for base in view_gt_metrics:
+        view_index = int(base["view"])
+        metrics.append(
+            {
+                **base,
                 "CAC": float(view_selection["cac"][view_index]),
                 "TDC": (
                     None
@@ -415,13 +430,39 @@ def main() -> None:
                 f"diff={zero_shot_patch_gap:.4f}"
             )
 
+            # Prepare the exact short prompt and augmentation parameters that
+            # adapt_case() will use for view selection, without selecting a
+            # view or updating ctx.  All GT view diagnostics are computed
+            # from this pre-adaptation embedding.
+            prepared_case = adapter.prepare_case(patches, valid_masks)
+            with torch.no_grad():
+                selection_text_feature_before = adapter._encode_ctx(
+                    prepared_case["short_ctx"].detach()
+                ).detach()
+            view_gt_metrics_before = evaluate_view_gt_metrics_before_adaptation(
+                predictor,
+                label_path,
+                data,
+                bbox,
+                original_shape,
+                selection_text_feature_before,
+                prepared_case["params"],
+            )
+
             # One complete case is one adaptation time step.  adapt_case sums
             # all patch losses and performs exactly one optimizer/LSPM update.
             with torch.no_grad():
                 prompt_embedding_before = adapter._encode_ctx(
                     adapter.ctx_delta.detach()
                 ).detach()
-            trace = adapter.adapt_case(patches, valid_masks)
+            trace = adapter.adapt_case(
+                patches, valid_masks, prepared_case=prepared_case
+            )
+            if len(view_gt_metrics_before) != trace["num_views"]:
+                raise RuntimeError(
+                    "Pre-adaptation GT view diagnostics do not match the case view count: "
+                    f"{len(view_gt_metrics_before)} vs {trace['num_views']}"
+                )
             with torch.no_grad():
                 prompt_embedding_after = adapter._encode_ctx(
                     adapter.ctx_delta.detach()
@@ -432,17 +473,12 @@ def main() -> None:
                     / prompt_embedding_before.norm().clamp_min(torch.finfo(torch.float32).eps)
                 )
                 text_feature = prompt_embedding_after
-            view_metrics = evaluate_all_view_metrics(
-                predictor,
-                label_path,
-                data,
-                bbox,
-                original_shape,
-                text_feature,
-                trace["view_params"],
-                trace["view_selection"],
+            view_metrics = attach_view_selection_metrics(
+                view_gt_metrics_before, trace["view_selection"]
             )
-            selected_view_dice = view_metrics[trace["selected_view"]]["Dice"]
+            selected_view_dice = view_metrics[trace["selected_view"]][
+                "GT_Dice_before_adaptation"
+            ]
             row_view_metrics = view_metrics
             row = evaluate_case(
                 predictor,
@@ -464,6 +500,8 @@ def main() -> None:
                 print(
                     f"case {case_index}/{len(entries)} {image_path.name} "
                     f"view={view_metric['view']} "
+                    f"GT_Dice_before_adaptation="
+                    f"{view_metric['GT_Dice_before_adaptation']:.4f} "
                     f"TDC={view_metric['TDC']} "
                     f"entropy={view_metric['entropy']:.6f} "
                     f"TDC_rank={view_metric['TDC_rank']} "
@@ -471,6 +509,14 @@ def main() -> None:
                     f"combined_rank={view_metric['combined_rank']:.1f} "
                     f"selected={view_metric['selected']}"
                 )
+            print(
+                f"case {case_index}/{len(entries)} {image_path.name} "
+                "GT_Dice_before_adaptation_vector="
+                + ",".join(
+                    f"{metric['GT_Dice_before_adaptation']:.6f}"
+                    for metric in view_metrics
+                )
+            )
             history.append(
                 {
                     "case": image_path.name,

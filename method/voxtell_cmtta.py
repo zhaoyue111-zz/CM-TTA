@@ -1480,14 +1480,14 @@ class VoxTellCMTTA:
                 self.scaler.scale(local_objective).backward()
         return float(cac_loss.cpu())
 
-    def adapt_case(
+    def prepare_case(
         self,
         patches: list[torch.Tensor],
         valid_masks: Optional[list[torch.Tensor]] = None,
     ) -> dict:
-        """Adapt once on one complete case, aggregating all patch gradients."""
+        """Prepare one case without selecting views or updating any parameter."""
         if not patches:
-            raise ValueError("adapt_case received no patches")
+            raise ValueError("prepare_case received no patches")
         if valid_masks is None:
             valid_masks = [torch.ones(patch.shape[-3:]) for patch in patches]
         if len(valid_masks) != len(patches):
@@ -1514,6 +1514,34 @@ class VoxTellCMTTA:
         else:
             long_ctx = self.ema_momentum * self.long_delta + (1.0 - self.ema_momentum) * short_ctx.detach()
         long_ctx = long_ctx.detach()
+        return {
+            "patches": patches,
+            "valid_masks": valid_masks,
+            "params": params,
+            "short_ctx": short_ctx,
+            "current_cac": current_cac,
+            "historical_cac": historical_cac,
+            "weight_historical": weight_historical,
+            "long_ctx": long_ctx,
+        }
+
+    def adapt_case(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: Optional[list[torch.Tensor]] = None,
+        prepared_case: Optional[dict] = None,
+    ) -> dict:
+        """Adapt once on one complete case, aggregating all patch gradients."""
+        if prepared_case is None:
+            prepared_case = self.prepare_case(patches, valid_masks)
+        patches = prepared_case["patches"]
+        valid_masks = prepared_case["valid_masks"]
+        params = prepared_case["params"]
+        short_ctx = prepared_case["short_ctx"]
+        current_cac = prepared_case["current_cac"]
+        historical_cac = prepared_case["historical_cac"]
+        weight_historical = prepared_case["weight_historical"]
+        long_ctx = prepared_case["long_ctx"]
 
         selected_view, selection_scores = self._select_case_view(
             patches, params, short_ctx, valid_masks
