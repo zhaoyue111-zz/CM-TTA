@@ -1,0 +1,952 @@
+{
+  "cases": [
+    {
+      "basename": "HEM_PA29.nii.gz",
+      "Dice": 0.4947704721092667,
+      "mIoU": 0.3287010139925868,
+      "adaptation_quality": 0.008705989457666874,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.4947704721092667,
+          "mIoU": 0.3287010139925868,
+          "CAC": 0.008202856406569481,
+          "entropy": 0.012316364794969559,
+          "CAC_rank": 7.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 15.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.488436591455328,
+          "mIoU": 0.32313337878798815,
+          "CAC": 0.008472131565213203,
+          "entropy": 0.01224370114505291,
+          "CAC_rank": 2.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 6.0,
+          "selected": false
+        },
+        {
+          "view": 2,
+          "Dice": 0.4942026468922596,
+          "mIoU": 0.32819997051548755,
+          "CAC": 0.008270657621324062,
+          "entropy": 0.0123208649456501,
+          "CAC_rank": 6.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 15.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.48439634328094544,
+          "mIoU": 0.3196062117780555,
+          "CAC": 0.008405305445194244,
+          "entropy": 0.012207542546093464,
+          "CAC_rank": 5.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 8.0,
+          "selected": false
+        },
+        {
+          "view": 4,
+          "Dice": 0.4952190186992775,
+          "mIoU": 0.3290970744933349,
+          "CAC": 0.008178500458598137,
+          "entropy": 0.01231192797422409,
+          "CAC_rank": 8.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 15.0,
+          "selected": false
+        },
+        {
+          "view": 5,
+          "Dice": 0.6399217874053841,
+          "mIoU": 0.4705036677152616,
+          "CAC": 0.00812065415084362,
+          "entropy": 0.012263378128409386,
+          "CAC_rank": 9.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 15.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.46407451938288635,
+          "mIoU": 0.30214650726181563,
+          "CAC": 0.00868438370525837,
+          "entropy": 0.012027442455291748,
+          "CAC_rank": 1.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 3.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.4636565394515495,
+          "mIoU": 0.30179224330868787,
+          "CAC": 0.008471268229186535,
+          "entropy": 0.012005193158984184,
+          "CAC_rank": 3.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 4.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.4902591003051676,
+          "mIoU": 0.32473062126373137,
+          "CAC": 0.008446000516414642,
+          "entropy": 0.012254531495273113,
+          "CAC_rank": 4.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 9.0,
+          "selected": false
+        },
+        {
+          "view": 9,
+          "Dice": 0.4203759451913605,
+          "mIoU": 0.266124046358794,
+          "CAC": 0.008705989457666874,
+          "entropy": 0.011316891759634018,
+          "CAC_rank": 0.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 0.0,
+          "selected": true
+        }
+      ]
+    },
+    {
+      "basename": "HEM_PA101.nii.gz",
+      "Dice": 0.7570271188464073,
+      "mIoU": 0.6090455635233302,
+      "adaptation_quality": 0.011823076754808426,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.7570271188464073,
+          "mIoU": 0.6090455635233302,
+          "CAC": 0.008380655199289322,
+          "entropy": 0.0060342601500451565,
+          "CAC_rank": 3.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 6.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.620908553875978,
+          "mIoU": 0.45023015378788706,
+          "CAC": 0.011823076754808426,
+          "entropy": 0.005181737244129181,
+          "CAC_rank": 0.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 0.0,
+          "selected": true
+        },
+        {
+          "view": 2,
+          "Dice": 0.6313351652134724,
+          "mIoU": 0.4612781370334123,
+          "CAC": 0.009082816541194916,
+          "entropy": 0.005433026235550642,
+          "CAC_rank": 1.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 2.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.8130026121693155,
+          "mIoU": 0.6849236742257125,
+          "CAC": 0.006386051885783672,
+          "entropy": 0.00718992855399847,
+          "CAC_rank": 8.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 15.0,
+          "selected": false
+        },
+        {
+          "view": 4,
+          "Dice": 0.7762147554747079,
+          "mIoU": 0.6342736676611938,
+          "CAC": 0.007866361178457737,
+          "entropy": 0.006143741775304079,
+          "CAC_rank": 4.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 8.0,
+          "selected": false
+        },
+        {
+          "view": 5,
+          "Dice": 0.7778161542318771,
+          "mIoU": 0.636415018022949,
+          "CAC": 0.007817843928933144,
+          "entropy": 0.006153239868581295,
+          "CAC_rank": 5.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 10.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.8189832903815778,
+          "mIoU": 0.693456141400561,
+          "CAC": 0.007149132434278727,
+          "entropy": 0.007528731133788824,
+          "CAC_rank": 7.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 16.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.728527381502867,
+          "mIoU": 0.5729792139479799,
+          "CAC": 0.008885030634701252,
+          "entropy": 0.005963709205389023,
+          "CAC_rank": 2.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 4.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.8139374316754104,
+          "mIoU": 0.6862516813300699,
+          "CAC": 0.006285805255174637,
+          "entropy": 0.007249369286000729,
+          "CAC_rank": 9.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 17.0,
+          "selected": false
+        },
+        {
+          "view": 9,
+          "Dice": 0.7811144844264469,
+          "mIoU": 0.6408431919538312,
+          "CAC": 0.00773548474535346,
+          "entropy": 0.0061811767518520355,
+          "CAC_rank": 6.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 12.0,
+          "selected": false
+        }
+      ]
+    },
+    {
+      "basename": "CYST_PA69.nii.gz",
+      "Dice": 0.8291704437384697,
+      "mIoU": 0.7081905639502462,
+      "adaptation_quality": 0.003595584537833929,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.8291704437384697,
+          "mIoU": 0.7081905639502462,
+          "CAC": 0.003063446842133999,
+          "entropy": 0.01030272152274847,
+          "CAC_rank": 6.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 12.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.8178583463267253,
+          "mIoU": 0.6918446226688569,
+          "CAC": 0.003373777959495783,
+          "entropy": 0.01014532521367073,
+          "CAC_rank": 2.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 6.0,
+          "selected": false
+        },
+        {
+          "view": 2,
+          "Dice": 0.8439020084436876,
+          "mIoU": 0.7299571615963506,
+          "CAC": 0.002542218193411827,
+          "entropy": 0.01104737538844347,
+          "CAC_rank": 8.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 16.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.8171844803996415,
+          "mIoU": 0.6908807560081273,
+          "CAC": 0.003344145603477955,
+          "entropy": 0.01013729814440012,
+          "CAC_rank": 4.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 7.0,
+          "selected": false
+        },
+        {
+          "view": 4,
+          "Dice": 0.8163198896786574,
+          "mIoU": 0.6896456927514351,
+          "CAC": 0.003344468306750059,
+          "entropy": 0.010125204920768738,
+          "CAC_rank": 3.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 5.0,
+          "selected": false
+        },
+        {
+          "view": 5,
+          "Dice": 0.8277581914813225,
+          "mIoU": 0.7061326302013853,
+          "CAC": 0.0031130476854741573,
+          "entropy": 0.010282758623361588,
+          "CAC_rank": 5.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 10.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.7886809281595708,
+          "mIoU": 0.6510926365266262,
+          "CAC": 0.003582641016691923,
+          "entropy": 0.010061638429760933,
+          "CAC_rank": 1.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 2.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.8298437108699086,
+          "mIoU": 0.7091733972449309,
+          "CAC": 0.00306061003357172,
+          "entropy": 0.010313533246517181,
+          "CAC_rank": 7.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 14.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.788332208648474,
+          "mIoU": 0.6506174499935725,
+          "CAC": 0.003595584537833929,
+          "entropy": 0.010060127824544907,
+          "CAC_rank": 0.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 0.0,
+          "selected": true
+        },
+        {
+          "view": 9,
+          "Dice": 0.843806220117332,
+          "mIoU": 0.7298138381292472,
+          "CAC": 0.002456850837916136,
+          "entropy": 0.011049536988139153,
+          "CAC_rank": 9.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 18.0,
+          "selected": false
+        }
+      ]
+    },
+    {
+      "basename": "MET_PA13.nii.gz",
+      "Dice": 0.86507443821169,
+      "mIoU": 0.7622301121217028,
+      "adaptation_quality": 0.024326900020241737,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.86507443821169,
+          "mIoU": 0.7622301121217028,
+          "CAC": 0.024327978491783142,
+          "entropy": 0.003452899167314172,
+          "CAC_rank": 2.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 6.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.8683833472136403,
+          "mIoU": 0.7673829693787515,
+          "CAC": 0.024271603673696518,
+          "entropy": 0.0035498403012752533,
+          "CAC_rank": 5.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 12.0,
+          "selected": false
+        },
+        {
+          "view": 2,
+          "Dice": 0.8647251599366977,
+          "mIoU": 0.7616879449988351,
+          "CAC": 0.024236297234892845,
+          "entropy": 0.003449426731094718,
+          "CAC_rank": 7.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 9.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.8607007109606623,
+          "mIoU": 0.7554649767985101,
+          "CAC": 0.021664246916770935,
+          "entropy": 0.003458495019003749,
+          "CAC_rank": 9.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 14.0,
+          "selected": false
+        },
+        {
+          "view": 4,
+          "Dice": 0.8650952847335994,
+          "mIoU": 0.7622624816837881,
+          "CAC": 0.024326900020241737,
+          "entropy": 0.0034427903592586517,
+          "CAC_rank": 3.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 3.0,
+          "selected": true
+        },
+        {
+          "view": 5,
+          "Dice": 0.8682682817406909,
+          "mIoU": 0.7672032759461356,
+          "CAC": 0.02427062951028347,
+          "entropy": 0.003568570362403989,
+          "CAC_rank": 6.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 15.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.8626293461426231,
+          "mIoU": 0.758441712221981,
+          "CAC": 0.023009618744254112,
+          "entropy": 0.0034465650096535683,
+          "CAC_rank": 8.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 9.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.8676554861123548,
+          "mIoU": 0.7662469111396659,
+          "CAC": 0.02487303502857685,
+          "entropy": 0.0035385058727115393,
+          "CAC_rank": 0.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 6.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.865770007930143,
+          "mIoU": 0.7633108046721625,
+          "CAC": 0.024506673216819763,
+          "entropy": 0.003449521493166685,
+          "CAC_rank": 1.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 4.0,
+          "selected": false
+        },
+        {
+          "view": 9,
+          "Dice": 0.8682311439008668,
+          "mIoU": 0.7671452869744076,
+          "CAC": 0.024277888238430023,
+          "entropy": 0.003562596160918474,
+          "CAC_rank": 4.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 12.0,
+          "selected": false
+        }
+      ]
+    },
+    {
+      "basename": "MET_PA25.nii.gz",
+      "Dice": 0.8955291745755987,
+      "mIoU": 0.810821937493446,
+      "adaptation_quality": -0.0019649360328912735,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.8955291745755987,
+          "mIoU": 0.810821937493446,
+          "CAC": -0.001998179592192173,
+          "entropy": 0.00537313986569643,
+          "CAC_rank": 6.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 9.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.8959363152600948,
+          "mIoU": 0.8114897062945775,
+          "CAC": -0.0019649360328912735,
+          "entropy": 0.0050415294244885445,
+          "CAC_rank": 5.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 5.0,
+          "selected": true
+        },
+        {
+          "view": 2,
+          "Dice": 0.898251634444806,
+          "mIoU": 0.8152965436823303,
+          "CAC": 0.0013222917914390564,
+          "entropy": 0.005410304293036461,
+          "CAC_rank": 0.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 8.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.8953146526010395,
+          "mIoU": 0.8104702888556499,
+          "CAC": -0.0024016238749027252,
+          "entropy": 0.005207982379943132,
+          "CAC_rank": 8.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 9.0,
+          "selected": false
+        },
+        {
+          "view": 4,
+          "Dice": 0.8955634912974938,
+          "mIoU": 0.8108782028127658,
+          "CAC": -0.002064857631921768,
+          "entropy": 0.005380785092711449,
+          "CAC_rank": 7.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 12.0,
+          "selected": false
+        },
+        {
+          "view": 5,
+          "Dice": 0.8958193409394735,
+          "mIoU": 0.8112978013051472,
+          "CAC": -0.0012909285724163055,
+          "entropy": 0.005395655054599047,
+          "CAC_rank": 4.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 11.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.8953424281483165,
+          "mIoU": 0.8105158113817097,
+          "CAC": -0.002480718307197094,
+          "entropy": 0.005311036016792059,
+          "CAC_rank": 9.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 11.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.895561060883927,
+          "mIoU": 0.810874217818398,
+          "CAC": -0.001205960288643837,
+          "entropy": 0.005420120432972908,
+          "CAC_rank": 3.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 12.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.8961558113672567,
+          "mIoU": 0.8118499155911344,
+          "CAC": 0.0002466384321451187,
+          "entropy": 0.005380326882004738,
+          "CAC_rank": 1.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 5.0,
+          "selected": false
+        },
+        {
+          "view": 9,
+          "Dice": 0.8959136369489634,
+          "mIoU": 0.8114524976770767,
+          "CAC": 0.00010419823229312897,
+          "entropy": 0.0053853839635849,
+          "CAC_rank": 2.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 8.0,
+          "selected": false
+        }
+      ]
+    },
+    {
+      "basename": "HCC_10081574_20140213.nii.gz",
+      "Dice": 0.8841978841025098,
+      "mIoU": 0.7924325214164962,
+      "adaptation_quality": 0.018496135249733925,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.8841978841025098,
+          "mIoU": 0.7924325214164962,
+          "CAC": 0.01652594283223152,
+          "entropy": 0.0038099929224699736,
+          "CAC_rank": 7.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 14.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.8818337922985519,
+          "mIoU": 0.7886428566923771,
+          "CAC": 0.01629113033413887,
+          "entropy": 0.0038824663497507572,
+          "CAC_rank": 8.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 16.0,
+          "selected": false
+        },
+        {
+          "view": 2,
+          "Dice": 0.8865035561676231,
+          "mIoU": 0.7961440389665719,
+          "CAC": 0.017119940370321274,
+          "entropy": 0.0037520918995141983,
+          "CAC_rank": 4.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 8.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.8802222723047018,
+          "mIoU": 0.7860687443001352,
+          "CAC": 0.015863360837101936,
+          "entropy": 0.003939878661185503,
+          "CAC_rank": 9.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 18.0,
+          "selected": false
+        },
+        {
+          "view": 4,
+          "Dice": 0.8913835415802802,
+          "mIoU": 0.8040504313375477,
+          "CAC": 0.01841677911579609,
+          "entropy": 0.0037368470802903175,
+          "CAC_rank": 3.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 6.0,
+          "selected": false
+        },
+        {
+          "view": 5,
+          "Dice": 0.8857940393977132,
+          "mIoU": 0.7950002698952489,
+          "CAC": 0.016898617148399353,
+          "entropy": 0.0037685008719563484,
+          "CAC_rank": 6.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 12.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.8861126840317101,
+          "mIoU": 0.7955137573870497,
+          "CAC": 0.01699417270720005,
+          "entropy": 0.003761404426768422,
+          "CAC_rank": 5.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 10.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.8918894375188078,
+          "mIoU": 0.8048740511251519,
+          "CAC": 0.01848672702908516,
+          "entropy": 0.003733742283657193,
+          "CAC_rank": 1.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 2.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.8920105855912009,
+          "mIoU": 0.8050713968843827,
+          "CAC": 0.018496135249733925,
+          "entropy": 0.003731745295226574,
+          "CAC_rank": 0.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 0.0,
+          "selected": true
+        },
+        {
+          "view": 9,
+          "Dice": 0.8915548989418036,
+          "mIoU": 0.8043293241051499,
+          "CAC": 0.018437694758176804,
+          "entropy": 0.0037359760608524084,
+          "CAC_rank": 2.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 4.0,
+          "selected": false
+        }
+      ]
+    },
+    {
+      "basename": "FNH_PA32.nii.gz",
+      "Dice": 0.9409088789154011,
+      "mIoU": 0.8884116391721147,
+      "adaptation_quality": 0.006810369901359081,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.9409088789154011,
+          "mIoU": 0.8884116391721147,
+          "CAC": 0.006233816966414452,
+          "entropy": 0.004166349768638611,
+          "CAC_rank": 5.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 11.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.9408742665564073,
+          "mIoU": 0.8883499256479133,
+          "CAC": 0.0062231202609837055,
+          "entropy": 0.004166269209235907,
+          "CAC_rank": 6.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 11.0,
+          "selected": false
+        },
+        {
+          "view": 2,
+          "Dice": 0.940374023197545,
+          "mIoU": 0.8874584464560159,
+          "CAC": 0.006093160714954138,
+          "entropy": 0.00417603412643075,
+          "CAC_rank": 8.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 16.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.9413316251554317,
+          "mIoU": 0.8891657175398633,
+          "CAC": 0.006810369901359081,
+          "entropy": 0.004098062869161367,
+          "CAC_rank": 0.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 2.0,
+          "selected": true
+        },
+        {
+          "view": 4,
+          "Dice": 0.941220587865891,
+          "mIoU": 0.8889675952129985,
+          "CAC": 0.006787761580199003,
+          "entropy": 0.004089739173650742,
+          "CAC_rank": 1.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 2.0,
+          "selected": false
+        },
+        {
+          "view": 5,
+          "Dice": 0.941421978510985,
+          "mIoU": 0.8893269644751963,
+          "CAC": 0.006719029508531094,
+          "entropy": 0.004152837209403515,
+          "CAC_rank": 4.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 7.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.9411551530504235,
+          "mIoU": 0.8888508602197907,
+          "CAC": 0.006776310037821531,
+          "entropy": 0.004084807820618153,
+          "CAC_rank": 2.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 2.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.9401205981842118,
+          "mIoU": 0.8870071411649236,
+          "CAC": 0.006015139166265726,
+          "entropy": 0.004184115212410688,
+          "CAC_rank": 9.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 18.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.9413484948248672,
+          "mIoU": 0.8891958214985392,
+          "CAC": 0.00672017689794302,
+          "entropy": 0.0041607823222875595,
+          "CAC_rank": 3.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 7.0,
+          "selected": false
+        },
+        {
+          "view": 9,
+          "Dice": 0.9404212961717467,
+          "mIoU": 0.8875426551836204,
+          "CAC": 0.006108027882874012,
+          "entropy": 0.004174583125859499,
+          "CAC_rank": 7.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 14.0,
+          "selected": false
+        }
+      ]
+    },
+    {
+      "basename": "HEM_PA66.nii.gz",
+      "Dice": 0.9621134860416993,
+      "mIoU": 0.9269929545306282,
+      "adaptation_quality": 0.005626631900668144,
+      "view_metrics": [
+        {
+          "view": 0,
+          "Dice": 0.9621134860416993,
+          "mIoU": 0.9269929545306282,
+          "CAC": 0.00568981422111392,
+          "entropy": 0.002958865836262703,
+          "CAC_rank": 1.0,
+          "entropy_rank": 7.0,
+          "combined_rank": 8.0,
+          "selected": false
+        },
+        {
+          "view": 1,
+          "Dice": 0.9632661868677252,
+          "mIoU": 0.929135497141178,
+          "CAC": 0.005471219774335623,
+          "entropy": 0.0029279852751642466,
+          "CAC_rank": 7.0,
+          "entropy_rank": 4.0,
+          "combined_rank": 11.0,
+          "selected": false
+        },
+        {
+          "view": 2,
+          "Dice": 0.9623598465532673,
+          "mIoU": 0.9274504686008859,
+          "CAC": 0.00564900878816843,
+          "entropy": 0.0029537277296185493,
+          "CAC_rank": 4.0,
+          "entropy_rank": 5.0,
+          "combined_rank": 9.0,
+          "selected": false
+        },
+        {
+          "view": 3,
+          "Dice": 0.9637309643060257,
+          "mIoU": 0.930000734472037,
+          "CAC": 0.005626631900668144,
+          "entropy": 0.0029043834656476974,
+          "CAC_rank": 6.0,
+          "entropy_rank": 0.0,
+          "combined_rank": 6.0,
+          "selected": true
+        },
+        {
+          "view": 4,
+          "Dice": 0.9592429075392382,
+          "mIoU": 0.921677992384571,
+          "CAC": 0.005702951457351446,
+          "entropy": 0.003004716243594885,
+          "CAC_rank": 0.0,
+          "entropy_rank": 9.0,
+          "combined_rank": 9.0,
+          "selected": false
+        },
+        {
+          "view": 5,
+          "Dice": 0.9633106704518051,
+          "mIoU": 0.9292182749403146,
+          "CAC": 0.0054525467567145824,
+          "entropy": 0.0029252013191580772,
+          "CAC_rank": 8.0,
+          "entropy_rank": 3.0,
+          "combined_rank": 11.0,
+          "selected": false
+        },
+        {
+          "view": 6,
+          "Dice": 0.9599947572922259,
+          "mIoU": 0.9230672287697017,
+          "CAC": 0.0056685530580580235,
+          "entropy": 0.0029872755985707045,
+          "CAC_rank": 3.0,
+          "entropy_rank": 8.0,
+          "combined_rank": 11.0,
+          "selected": false
+        },
+        {
+          "view": 7,
+          "Dice": 0.9621532869109659,
+          "mIoU": 0.9270668536851892,
+          "CAC": 0.005682356655597687,
+          "entropy": 0.002957823220640421,
+          "CAC_rank": 2.0,
+          "entropy_rank": 6.0,
+          "combined_rank": 8.0,
+          "selected": false
+        },
+        {
+          "view": 8,
+          "Dice": 0.9634790112177047,
+          "mIoU": 0.929531598148919,
+          "CAC": 0.0056298705749213696,
+          "entropy": 0.0029148883186280727,
+          "CAC_rank": 5.0,
+          "entropy_rank": 1.0,
+          "combined_rank": 6.0,
+          "selected": false
+        },
+        {
+          "view": 9,
+          "Dice": 0.963345624089035,
+          "mIoU": 0.9292833238103012,
+          "CAC": 0.005448926705867052,
+          "entropy": 0.00292387162335217,
+          "CAC_rank": 9.0,
+          "entropy_rank": 2.0,
+          "combined_rank": 11.0,
+          "selected": false
+        }
+      ]
+    }
+  ],
+  "average": {
+    "Dice": 0.8285989870676304,
+    "mIoU": 0.728353288275069
+  }
+}

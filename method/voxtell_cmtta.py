@@ -533,6 +533,7 @@ class VoxTellCMTTA:
             ),
         ]
         self.last_trace = {}
+        self.last_view_selection = {}
         self._print_trainable_parameters()
 
     def _capture(self, name):
@@ -993,9 +994,20 @@ class VoxTellCMTTA:
         if entropy_sum is None or entropy_mass is None:
             raise RuntimeError("Case entropy accumulation produced no statistics")
         entropy_scores = (entropy_sum / entropy_mass.clamp_min(1.0)).detach()
+        entropy_rank = entropy_scores.argsort().argsort().float()
+        cac_rank = (-scores).argsort().argsort().float()
+        combined_rank = entropy_rank + cac_rank
         selected, _ = select_cac_view_from_entropy(
             scores, entropy_scores, self.selection_p
         )
+        self.last_view_selection = {
+            "cac": scores.cpu().tolist(),
+            "entropy": entropy_scores.cpu().tolist(),
+            "cac_rank": cac_rank.cpu().tolist(),
+            "entropy_rank": entropy_rank.cpu().tolist(),
+            "combined_rank": combined_rank.cpu().tolist(),
+            "selected_view": selected,
+        }
         return selected, scores
 
     def _forward_case_supervision_stats(
@@ -1380,6 +1392,10 @@ class VoxTellCMTTA:
         self.last_trace = {
             "selected_view": selected_view,
             "pseudo_source_view": selected_view,
+            "selected_view_scale": params[selected_view]["scale"],
+            "selected_view_offset": params[selected_view]["offset"],
+            "view_params": [dict(param) for param in params],
+            "view_selection": dict(self.last_view_selection),
             "num_views": 1 + self.num_aug_views,
             "num_patches": len(patches),
             "optimizer_steps_for_case": 1,

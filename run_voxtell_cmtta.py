@@ -146,6 +146,26 @@ def evaluate_case(
     text_feature: torch.Tensor,
     output_dir: Path,
 ) -> dict[str, float | str]:
+    prediction = predict_case(
+        predictor, data, bbox, original_shape, text_feature
+    )
+    target = np.squeeze(load_ras_label(str(label_path)))
+    metrics = binary_metrics(prediction, target)
+    stem = image_path.name[:-7] if image_path.name.endswith(".nii.gz") else image_path.stem
+    prediction_path = output_dir / f"{stem}.nii.gz"
+    save_prediction_nifti(prediction, image_path, prediction_path)
+    check_prediction_nifti_geometry(prediction_path, image_path, label_path)
+    return {"basename": image_path.name, **metrics}
+
+
+def predict_case(
+    predictor,
+    data: torch.Tensor,
+    bbox,
+    original_shape,
+    text_feature: torch.Tensor,
+) -> np.ndarray:
+    """Run one text-conditioned case prediction in model space."""
     with torch.no_grad():
         logits = predictor.predict_sliding_window_return_logits(
             data, text_feature.to(predictor.device)
@@ -156,13 +176,106 @@ def evaluate_case(
         cropped_prediction,
         bbox,
     )[0]
+    return prediction
+
+
+def predict_nonoverlap_case(
+    adapter,
+    patches: list[torch.Tensor],
+    valid_masks: list[torch.Tensor],
+    locations,
+    data_shape,
+    bbox,
+    original_shape,
+    zero_shot_text: torch.Tensor,
+) -> np.ndarray:
+    """Predict zero-shot with the exact non-overlap adaptation patch layout."""
+    if not patches:
+        raise ValueError("Non-overlap diagnostic received no patches")
+    if len(patches) != len(valid_masks) or len(patches) != len(locations):
+        raise ValueError("patches, valid_masks, and locations must have equal lengths")
+
+    patch_size = tuple(int(size) for size in patches[0].shape[-3:])
+    padded_shape = tuple(
+        max(int(location[axis]) + patch_size[axis] for location in locations)
+        for axis in range(3)
+    )
+    padded_prediction = np.zeros(padded_shape, dtype=np.uint8)
+    write_count = np.zeros(padded_shape, dtype=np.uint8)
+    text_input = adapter._text_input(zero_shot_text.to(adapter.device), 1)
+    autocast_enabled = adapter.device.type == "cuda"
+
+    with torch.no_grad():
+        for patch, valid_mask, location in zip(patches, valid_masks, locations):
+            patch_batch = patch.unsqueeze(0).to(adapter.device, non_blocking=True)
+            with torch.autocast(
+                device_type=adapter.device.type, enabled=autocast_enabled
+            ):
+                logits = adapter.model(patch_batch, text_input)
+            if isinstance(logits, (list, tuple)):
+                logits = logits[0]
+            probabilities = torch.sigmoid(logits[0, 0]).float().cpu().numpy()
+            valid = valid_mask.detach().cpu().numpy() > 0
+            patch_prediction = (probabilities > 0.5) & valid
+            slices = tuple(
+                slice(int(start), int(start) + patch_size[axis])
+                for axis, start in enumerate(location)
+            )
+            padded_prediction[slices] = patch_prediction.astype(np.uint8)
+            write_count[slices] += 1
+
+    if not np.all(write_count == 1):
+        missing = int(np.count_nonzero(write_count == 0))
+        repeated = int(np.count_nonzero(write_count > 1))
+        raise RuntimeError(
+            "Non-overlap patch layout did not cover each padded voxel exactly once: "
+            f"missing={missing}, repeated={repeated}"
+        )
+    crop_slices = tuple(slice(0, int(size)) for size in data_shape)
+    cropped_prediction = padded_prediction[crop_slices]
+    return insert_crop_into_image(
+        np.zeros((1, *original_shape), dtype=np.uint8),
+        cropped_prediction[None],
+        bbox,
+    )[0]
+
+
+def evaluate_all_view_metrics(
+    predictor,
+    label_path: Path,
+    data: torch.Tensor,
+    bbox,
+    original_shape,
+    text_feature: torch.Tensor,
+    view_params: list[dict[str, float]],
+    view_selection: dict[str, list[float] | int],
+) -> list[dict[str, float | bool | int]]:
+    """Evaluate every selected-case view against GT and attach rank diagnostics."""
     target = np.squeeze(load_ras_label(str(label_path)))
-    metrics = binary_metrics(prediction, target)
-    stem = image_path.name[:-7] if image_path.name.endswith(".nii.gz") else image_path.stem
-    prediction_path = output_dir / f"{stem}.nii.gz"
-    save_prediction_nifti(prediction, image_path, prediction_path)
-    check_prediction_nifti_geometry(prediction_path, image_path, label_path)
-    return {"basename": image_path.name, **metrics}
+    metrics = []
+    selected_view = int(view_selection["selected_view"])
+    for view_index, param in enumerate(view_params):
+        scale = float(param["scale"])
+        offset = float(param["offset"])
+        view_data = data if scale == 1.0 and offset == 0.0 else data * scale + offset
+        prediction = predict_case(
+            predictor, view_data, bbox, original_shape, text_feature
+        )
+        binary = binary_metrics(prediction, target)
+        metrics.append(
+            {
+                "view": view_index,
+                "Dice": binary["Dice"],
+                "mIoU": binary["mIoU"],
+                "CAC": float(view_selection["cac"][view_index]),
+                "entropy": float(view_selection["entropy"][view_index]),
+                "CAC_rank": float(view_selection["cac_rank"][view_index]),
+                "entropy_rank": float(view_selection["entropy_rank"][view_index]),
+                "combined_rank": float(view_selection["combined_rank"][view_index]),
+                "selected": view_index == selected_view,
+            }
+        )
+    return metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -247,11 +360,73 @@ def main() -> None:
                 data, predictor.patch_size
             )
 
+            # Diagnostic only: compare the official zero-shot sliding-window
+            # path with the exact non-overlap adaptation patch layout before
+            # any ctx/prompt update or view augmentation.
+            with torch.no_grad():
+                zero_ctx = torch.zeros_like(adapter.ctx_delta.detach())
+                zero_shot_text = adapter._encode_ctx(zero_ctx).detach()
+            zero_shot_sliding_prediction = predict_case(
+                predictor,
+                data,
+                bbox,
+                original_shape,
+                zero_shot_text,
+            )
+            zero_shot_nonoverlap_prediction = predict_nonoverlap_case(
+                adapter,
+                patches,
+                valid_masks,
+                _locations,
+                data.shape[-3:],
+                bbox,
+                original_shape,
+                zero_shot_text,
+            )
+            zero_shot_target = np.squeeze(load_ras_label(str(label_path)))
+            zero_shot_sliding_dice = binary_metrics(
+                zero_shot_sliding_prediction, zero_shot_target
+            )["Dice"]
+            zero_shot_nonoverlap_dice = binary_metrics(
+                zero_shot_nonoverlap_prediction, zero_shot_target
+            )["Dice"]
+            zero_shot_patch_gap = zero_shot_nonoverlap_dice - zero_shot_sliding_dice
+            print(
+                f"case {case_index}/{len(entries)} {image_path.name} "
+                f"zero_shot_sliding_Dice={zero_shot_sliding_dice:.4f} "
+                f"zero_shot_nonoverlap_Dice={zero_shot_nonoverlap_dice:.4f} "
+                f"diff={zero_shot_patch_gap:.4f}"
+            )
+
             # One complete case is one adaptation time step.  adapt_case sums
             # all patch losses and performs exactly one optimizer/LSPM update.
+            with torch.no_grad():
+                prompt_embedding_before = adapter._encode_ctx(
+                    adapter.ctx_delta.detach()
+                ).detach()
             trace = adapter.adapt_case(patches, valid_masks)
             with torch.no_grad():
-                text_feature = adapter._encode_ctx(adapter.ctx_delta.detach())
+                prompt_embedding_after = adapter._encode_ctx(
+                    adapter.ctx_delta.detach()
+                ).detach()
+                prompt_embedding_change = prompt_embedding_after - prompt_embedding_before
+                prompt_embedding_change_rate = float(
+                    prompt_embedding_change.norm()
+                    / prompt_embedding_before.norm().clamp_min(torch.finfo(torch.float32).eps)
+                )
+                text_feature = prompt_embedding_after
+            view_metrics = evaluate_all_view_metrics(
+                predictor,
+                label_path,
+                data,
+                bbox,
+                original_shape,
+                text_feature,
+                trace["view_params"],
+                trace["view_selection"],
+            )
+            selected_view_dice = view_metrics[trace["selected_view"]]["Dice"]
+            row_view_metrics = view_metrics
             row = evaluate_case(
                 predictor,
                 image_path,
@@ -263,8 +438,33 @@ def main() -> None:
                 predictions_dir,
             )
             row["adaptation_quality"] = trace["selected_cac"]
+            row["view_metrics"] = row_view_metrics
+            row["zero_shot_sliding_dice"] = zero_shot_sliding_dice
+            row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
+            row["zero_shot_patch_gap"] = zero_shot_patch_gap
             case_rows.append(row)
-            history.append({"case": image_path.name, **trace})
+            history.append(
+                {
+                    "case": image_path.name,
+                    "zero_shot_sliding_dice": zero_shot_sliding_dice,
+                    "zero_shot_nonoverlap_dice": zero_shot_nonoverlap_dice,
+                    "zero_shot_patch_gap": zero_shot_patch_gap,
+                    "prompt_embedding_change_rate": prompt_embedding_change_rate,
+                    "view_metrics": view_metrics,
+                    **trace,
+                }
+            )
+            print(
+                f"case {case_index}/{len(entries)} {image_path.name} "
+                f"prompt_embedding_change="
+                f"{prompt_embedding_change_rate:.6e} "
+                f"({prompt_embedding_change_rate * 100.0:.4f}%)"
+            )
+            print(
+                f"case {case_index}/{len(entries)} {image_path.name} "
+                f"selected_view={trace['selected_view']} "
+                f"selected_view_GT_Dice={selected_view_dice:.4f}"
+            )
             if case_index % args.print_freq == 0 or case_index == len(entries):
                 print(
                     f"case {case_index}/{len(entries)} {image_path.name} "
