@@ -1,3 +1,5 @@
+import os
+import sys
 import types
 import unittest
 import warnings
@@ -318,14 +320,25 @@ class VoxTellCMTTATest(unittest.TestCase):
         expected = torch.tensor((0.0 + 1.0 + (1.0 - 2.0 / 3.0)) / 3.0)
         self.assertTrue(torch.allclose(result, expected, atol=1e-6))
 
-    def test_cac_selects_highest_score_and_entropy_is_binary(self):
+    def test_cac_selection_uses_combined_cac_entropy_rank_and_official_entropy(self):
         probabilities = torch.full((3, 1, 2, 2, 2), 0.5)
         selected, selected_indices = select_cac_view(
             torch.tensor([0.1, 0.9, 0.2]), probabilities.squeeze(1), 0.1
         )
         self.assertEqual(selected, 1)
         self.assertEqual(selected_indices.tolist(), [1])
-        self.assertAlmostEqual(float(avg_entropy(probabilities[0])), 0.693147, places=5)
+        self.assertAlmostEqual(float(avg_entropy(probabilities[0])), 0.346573, places=5)
+
+        # The CAC winner is view 0, but official rank fusion selects view 1:
+        # CAC ranks are [0,1,2], entropy ranks are [2,0,1].
+        rank_probabilities = torch.tensor(
+            [[[[[0.5]]]], [[[[0.99]]]], [[[[0.2]]]]]
+        )
+        selected, selected_indices = select_cac_view(
+            torch.tensor([0.9, 0.8, 0.1]), rank_probabilities, 0.1
+        )
+        self.assertEqual(selected, 1)
+        self.assertEqual(selected_indices.tolist(), [1])
 
     def test_cac_matches_source_similarity_map_definition(self):
         vision = torch.tensor(
@@ -897,6 +910,68 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertEqual(trace["optimizer_steps_for_case"], 1)
             self.assertEqual(adapter.optimizer_step_count, 1)
             self.assertIn("scale", adapter.scaler.state_dict())
+        finally:
+            adapter.close()
+
+    def test_real_voxtell_qwen_zero_delta_and_first_update(self):
+        if os.environ.get("RUN_REAL_VOXTELL_TESTS") != "1":
+            self.skipTest("set RUN_REAL_VOXTELL_TESTS=1 to run the real VoxTell/Qwen test")
+        from run_voxtell_cmtta import DEFAULT_QWEN, DEFAULT_VOXTELL_ROOT
+
+        root = Path(os.environ.get("VOXTELL_ROOT", str(DEFAULT_VOXTELL_ROOT)))
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        try:
+            from voxtell.inference.predictor import VoxTellPredictor
+        except (ImportError, ModuleNotFoundError) as error:
+            self.skipTest(f"real VoxTell dependencies unavailable: {error}")
+
+        model_dir = Path(os.environ.get("VOXTELL_MODEL_DIR", str(root / "model")))
+        text_model = Path(os.environ.get("VOXTELL_TEXT_MODEL", str(DEFAULT_QWEN)))
+        if not model_dir.exists() or not text_model.exists():
+            self.skipTest("real VoxTell model or Qwen weights are unavailable")
+        device = torch.device(
+            os.environ.get("VOXTELL_TEST_DEVICE", "cuda:0" if torch.cuda.is_available() else "cpu")
+        )
+        predictor = VoxTellPredictor(
+            model_dir=str(model_dir), device=device, text_encoding_model=str(text_model)
+        )
+        native = predictor.embed_text_prompts(["liver"]).detach().to(device)
+        args = make_args(num_aug_views=9, view_batch_size=1)
+        args.max_text_length = predictor.max_text_length
+        adapter = VoxTellCMTTA(
+            predictor.network,
+            None,
+            device,
+            args,
+            qwen_text_encoder=predictor.text_backbone,
+            qwen_tokenizer=predictor.tokenizer,
+            text_prompt="liver",
+        )
+        try:
+            with torch.no_grad():
+                zero_text = adapter._encode_ctx(adapter.ctx_delta.detach())
+            self.assertTrue(torch.allclose(zero_text, native, atol=2e-5, rtol=2e-5))
+
+            generator = torch.Generator(device="cpu").manual_seed(17)
+            patch = torch.randn((1, *predictor.patch_size), generator=generator)
+            model_patch = patch.unsqueeze(0).to(device)
+            with torch.no_grad():
+                native_logits = predictor.network(model_patch, native.unsqueeze(2))
+                adapted_logits = adapter._forward(model_patch, adapter.ctx_delta.detach())
+                if isinstance(native_logits, (list, tuple)):
+                    native_logits = native_logits[0]
+            self.assertTrue(torch.allclose(native_logits, adapted_logits, atol=2e-4, rtol=2e-4))
+
+            delta_norm_before = float(adapter.ctx_delta.detach().norm().cpu())
+            trace = adapter.adapt_case([patch], [torch.ones(predictor.patch_size)])
+            delta_norm_after = float(adapter.ctx_delta.detach().norm().cpu())
+            print(
+                "[real VoxTell] first update ctx_delta norm: "
+                f"before={delta_norm_before:.8g}, after={delta_norm_after:.8g}"
+            )
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertGreater(delta_norm_after, delta_norm_before)
         finally:
             adapter.close()
 

@@ -27,14 +27,11 @@ def avg_entropy(
     valid_mask: Optional[torch.Tensor] = None,
     eps: float = EPS,
 ) -> torch.Tensor:
-    """CM-TTA binary entropy, averaged over valid 3-D voxels."""
+    """Official CM-TTA entropy ``-p log(p)`` over valid 3-D voxels."""
     probabilities = probabilities.float()
     safe_eps = max(float(eps), float(torch.finfo(probabilities.dtype).eps))
     probabilities = probabilities.clamp(safe_eps, 1.0 - safe_eps)
-    entropy = -(
-        probabilities * probabilities.log()
-        + (1.0 - probabilities) * (1.0 - probabilities).log()
-    )
+    entropy = -probabilities * probabilities.log()
     if valid_mask is None:
         valid_mask = torch.ones_like(probabilities)
     else:
@@ -118,10 +115,7 @@ def masked_entropy_components(
     probabilities = probabilities.float()
     safe_eps = max(float(eps), float(torch.finfo(probabilities.dtype).eps))
     probabilities = probabilities.clamp(safe_eps, 1.0 - safe_eps)
-    entropy = -(
-        probabilities * probabilities.log()
-        + (1.0 - probabilities) * (1.0 - probabilities).log()
-    )
+    entropy = -probabilities * probabilities.log()
     valid_mask = _broadcast_valid_mask(probabilities, valid_mask).float()
     return (
         (entropy * valid_mask).flatten(start_dim=1).sum(dim=1),
@@ -319,17 +313,37 @@ def select_cac_view(
     probabilities: torch.Tensor,
     selection_p: float,
 ) -> tuple[int, torch.Tensor]:
-    """Select the highest-CAC view, as specified by CM-TTA Eq. (2)."""
+    """Select views by the official CAC-rank plus entropy-rank rule."""
     if cac_scores.ndim != 1 or probabilities.ndim < 2:
         raise ValueError("Expected one CAC score and one probability map per view")
     if cac_scores.shape[0] != probabilities.shape[0]:
         raise ValueError("CAC scores and probabilities must agree in view count")
     if not 0.0 < float(selection_p) <= 1.0:
         raise ValueError("selection_p must be in (0, 1]")
-    del probabilities
-    del selection_p  # retained for CLI/API compatibility; CAC selects one view
-    selected = cac_scores.argmax().reshape(1)
-    return int(selected[0].item()), selected
+    probabilities = probabilities.float().clamp(EPS, 1.0 - EPS)
+    entropy = -(probabilities * probabilities.log())
+    entropy = entropy.flatten(start_dim=1).mean(dim=1)
+    return select_cac_view_from_entropy(cac_scores, entropy, selection_p)
+
+
+def select_cac_view_from_entropy(
+    cac_scores: torch.Tensor,
+    entropy_scores: torch.Tensor,
+    selection_p: float,
+) -> tuple[int, torch.Tensor]:
+    """Apply CM-TTA's combined CAC/entropy rank to case-level statistics."""
+    if cac_scores.ndim != 1 or entropy_scores.ndim != 1:
+        raise ValueError("CAC and entropy scores must have shape (num_views,)")
+    if cac_scores.shape != entropy_scores.shape:
+        raise ValueError("CAC and entropy scores must agree in view count")
+    if not 0.0 < float(selection_p) <= 1.0:
+        raise ValueError("selection_p must be in (0, 1]")
+    entropy_rank = entropy_scores.argsort().argsort().float()
+    cac_rank = (-cac_scores).argsort().argsort().float()
+    combined_rank = entropy_rank + cac_rank
+    num_selected = max(1, int(cac_scores.numel() * float(selection_p)))
+    selected_indices = torch.argsort(combined_rank, descending=False)[:num_selected]
+    return int(selected_indices[0].item()), selected_indices
 
 
 class ShortPromptMemory:
@@ -809,6 +823,8 @@ class VoxTellCMTTA:
         if len(valid_masks) != len(patches):
             raise ValueError("patches and valid_masks must have equal lengths")
         accumulator = None
+        entropy_sum = None
+        entropy_mass = None
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
                 patch = patch.unsqueeze(0).to(self.device, non_blocking=True)
@@ -929,6 +945,10 @@ class VoxTellCMTTA:
                     ).expand(end - start, -1, -1, -1)
                     logits = self._forward(view_batch, short_ctx.detach())
                     components = self._cac_components(logits, input_mask_batch)
+                    probabilities = torch.sigmoid(logits[:, :1])
+                    local_entropy_sum, local_entropy_mass = masked_entropy_components(
+                        probabilities, input_mask_batch
+                    )
                     if accumulator is None:
                         # Keep a real global view axis.  Adding successive
                         # chunks directly would align their local index 0s
@@ -941,8 +961,16 @@ class VoxTellCMTTA:
                             )
                             for key, value in components.items()
                         }
+                        entropy_sum = torch.zeros(
+                            (total_views,),
+                            device=local_entropy_sum.device,
+                            dtype=local_entropy_sum.dtype,
+                        )
+                        entropy_mass = torch.zeros_like(entropy_sum)
                     for key, value in components.items():
                         accumulator[key][start:end].add_(value)
+                    entropy_sum[start:end].add_(local_entropy_sum)
+                    entropy_mass[start:end].add_(local_entropy_mass)
         if accumulator is None:
             raise ValueError("A complete case must contain at least one patch")
         foreground_counts = accumulator["foreground_mass"].detach().cpu().tolist()
@@ -961,8 +989,11 @@ class VoxTellCMTTA:
             accumulator["background_sum"],
             accumulator["background_mass"],
         ).detach()
-        selected, _ = select_cac_view(
-            scores, torch.ones((scores.shape[0], 1), device=scores.device), self.selection_p
+        if entropy_sum is None or entropy_mass is None:
+            raise RuntimeError("Case entropy accumulation produced no statistics")
+        entropy_scores = (entropy_sum / entropy_mass.clamp_min(1.0)).detach()
+        selected, _ = select_cac_view_from_entropy(
+            scores, entropy_scores, self.selection_p
         )
         return selected, scores
 
