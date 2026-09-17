@@ -61,6 +61,22 @@ class TinyQwenTokenizer:
         }
 
 
+class MultiTokenQwenTokenizer:
+    """Tokenizer double where ``liver`` is represented by two tokens."""
+
+    def __call__(self, texts, **kwargs):
+        del texts
+        if kwargs.get("add_special_tokens") is False:
+            return {"input_ids": torch.tensor([[11, 12]]), "attention_mask": torch.tensor([[1, 1]])}
+        return {
+            "input_ids": torch.tensor([[1, 10, 11, 12, 2]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 1]]),
+            "offset_mapping": torch.tensor(
+                [[[0, 0], [0, 7], [7, 9], [9, 12], [0, 0]]]
+            ),
+        }
+
+
 class TinyQwen(nn.Module):
     """Frozen differentiable text encoder used to test ctx input learning."""
 
@@ -71,7 +87,10 @@ class TinyQwen(nn.Module):
     def get_input_embeddings(self):
         return self.token_embedding
 
-    def forward(self, inputs_embeds, attention_mask):
+    def forward(self, inputs_embeds=None, attention_mask=None, input_ids=None):
+        if inputs_embeds is None:
+            inputs_embeds = self.token_embedding(input_ids)
+        self.last_inputs_embeds = inputs_embeds
         del attention_mask
         hidden = inputs_embeds + inputs_embeds.mean(dim=1, keepdim=True)
         return types.SimpleNamespace(last_hidden_state=hidden)
@@ -137,11 +156,13 @@ class VoxTellCMTTATest(unittest.TestCase):
             formatted_text_prompt="prefix liver",
         )
         try:
-            self.assertEqual(adapter.optimizer_parameters, [adapter.ctx])
-            self.assertTrue(adapter.ctx.requires_grad)
-            self.assertEqual(tuple(adapter.ctx.shape), (2, 4))
-            self.assertEqual(tuple(adapter._encode_ctx(adapter.ctx).shape), (1, 1, 4))
-            self.assertEqual(adapter._ctx_insert_index, 2)
+            self.assertEqual(adapter.optimizer_parameters, [adapter.ctx_delta])
+            self.assertTrue(adapter.ctx_delta.requires_grad)
+            self.assertEqual(tuple(adapter.ctx_delta.shape), (1, 4))
+            self.assertEqual(tuple(adapter._encode_ctx(adapter.ctx_delta).shape), (1, 1, 4))
+            self.assertEqual(adapter._liver_token_indices.tolist(), [2])
+            self.assertTrue(torch.equal(adapter._fixed_attention_mask, torch.tensor([[1, 1, 1, 1]], dtype=torch.bool)))
+            self.assertTrue(torch.equal(adapter.ctx_delta, torch.zeros_like(adapter.ctx_delta)))
             self.assertTrue(
                 torch.equal(
                     adapter._fixed_token_embeddings[0, 2],
@@ -150,21 +171,21 @@ class VoxTellCMTTATest(unittest.TestCase):
             )
             self.assertTrue(all(not p.requires_grad for p in model.parameters()))
             self.assertTrue(all(not p.requires_grad for p in adapter.qwen_text_encoder.parameters()))
-            self.assertEqual(adapter.ctx.dtype, torch.float32)
+            self.assertEqual(adapter.ctx_delta.dtype, torch.float32)
             self.assertIsInstance(adapter.optimizer, torch.optim.Adam)
             self.assertEqual(adapter.optimizer.param_groups[0]["lr"], 0.05)
             self.assertEqual(adapter.optimizer.param_groups[0]["weight_decay"], 0.0)
 
-            adapter._encode_ctx(adapter.ctx).sum().backward()
-            self.assertIsNotNone(adapter.ctx.grad)
-            self.assertGreater(float(adapter.ctx.grad.norm()), 0.0)
+            adapter._encode_ctx(adapter.ctx_delta).sum().backward()
+            self.assertIsNotNone(adapter.ctx_delta.grad)
+            self.assertGreater(float(adapter.ctx_delta.grad.norm()), 0.0)
             self.assertTrue(all(p.grad is None for p in model.parameters()))
             self.assertTrue(all(p.grad is None for p in qwen.parameters()))
             adapter.optimizer.zero_grad(set_to_none=True)
-            ctx_before = adapter.ctx.detach().clone()
+            ctx_before = adapter.ctx_delta.detach().clone()
             trace = adapter.adapt_case([torch.zeros(1, 2, 2, 2)])
             self.assertEqual(trace["optimizer_steps_for_case"], 1)
-            self.assertFalse(torch.equal(ctx_before, adapter.ctx.detach()))
+            self.assertFalse(torch.equal(ctx_before, adapter.ctx_delta.detach()))
             self.assertTrue(all(p.grad is None for p in model.parameters()))
             self.assertTrue(all(p.grad is None for p in qwen.parameters()))
         finally:
@@ -201,6 +222,86 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertTrue(trace["optimizer_step_skipped"])
             self.assertEqual(trace["optimizer_steps_for_case"], 1)
             self.assertTrue(any("skipped" in str(item.message) for item in caught))
+        finally:
+            adapter.close()
+
+    def test_zero_delta_matches_native_text_embedding_and_logits(self):
+        model = TinyVoxTell(text_dim=4)
+        qwen = TinyQwen()
+        tokenizer = TinyQwenTokenizer()
+        adapter = VoxTellCMTTA(
+            model,
+            None,
+            "cpu",
+            make_args(),
+            qwen,
+            tokenizer,
+            text_prompt="liver",
+            formatted_text_prompt="prefix liver",
+        )
+        try:
+            tokenized = tokenizer(
+                ["prefix liver"],
+                padding=True,
+                truncation=True,
+                max_length=8192,
+                return_tensors="pt",
+            )
+            with torch.no_grad():
+                native = qwen(
+                    input_ids=tokenized["input_ids"],
+                    attention_mask=tokenized["attention_mask"].bool(),
+                ).last_hidden_state[:, -1].unsqueeze(1)
+            adapted = adapter._encode_ctx(adapter.ctx_delta)
+            self.assertTrue(torch.allclose(adapted, native, atol=1e-7))
+            image = torch.randn(1, 1, 2, 2, 2)
+            native_logits = model(image, adapter._text_input(native, 1))
+            adapted_logits = adapter._forward(image, adapter.ctx_delta)
+            self.assertTrue(torch.allclose(adapted_logits, native_logits, atol=1e-7))
+            self.assertEqual(tuple(qwen.last_inputs_embeds.shape), (1, 4, 4))
+            self.assertEqual(tuple(adapter._fixed_attention_mask.shape), (1, 4))
+            self.assertEqual(tuple(adapter._liver_token_indices.tolist()), (2,))
+        finally:
+            adapter.close()
+
+    def test_multi_token_liver_delta_replaces_all_query_tokens_without_insertion(self):
+        qwen = TinyQwen()
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(text_dim=4),
+            None,
+            "cpu",
+            make_args(),
+            qwen,
+            MultiTokenQwenTokenizer(),
+            text_prompt="liver",
+            n_ctx=1,  # Deliberately ignored for Qwen; tokenizer determines the count.
+            formatted_text_prompt="prefix liver",
+        )
+        try:
+            self.assertEqual(tuple(adapter.ctx_delta.shape), (2, 4))
+            self.assertEqual(adapter._liver_token_indices.tolist(), [2, 3])
+            self.assertEqual(tuple(adapter._fixed_attention_mask.shape), (1, 5))
+            original = adapter._fixed_token_embeddings.clone()
+            zero = adapter._encode_ctx(adapter.ctx_delta)
+            self.assertTrue(torch.equal(qwen.last_inputs_embeds, original))
+            adapter.ctx_delta.data.copy_(torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]]))
+            adapter._encode_ctx(adapter.ctx_delta)
+            updated = qwen.last_inputs_embeds.detach()
+            self.assertEqual(tuple(updated.shape), tuple(original.shape))
+            self.assertTrue(torch.equal(updated[0, 0], original[0, 0]))
+            self.assertTrue(torch.equal(updated[0, 1], original[0, 1]))
+            self.assertTrue(torch.allclose(updated[0, 2], original[0, 2] + adapter.ctx_delta[0]))
+            self.assertTrue(torch.allclose(updated[0, 3], original[0, 3] + adapter.ctx_delta[1]))
+            self.assertTrue(torch.equal(updated[0, 4], original[0, 4]))
+            self.assertTrue(torch.allclose(zero, adapter._encode_ctx(torch.zeros_like(adapter.ctx_delta)), atol=1e-7))
+        finally:
+            adapter.close()
+
+    def test_legacy_random_ctx_checkpoint_is_rejected(self):
+        adapter = VoxTellCMTTA(TinyVoxTell(), torch.zeros(1, 1, 2), "cpu", make_args())
+        try:
+            with self.assertRaisesRegex(ValueError, "Legacy random-ctx"):
+                adapter.load_state_dict({"ctx": torch.zeros(1, 2)})
         finally:
             adapter.close()
 
@@ -814,11 +915,11 @@ class VoxTellCMTTATest(unittest.TestCase):
         try:
             state = adapter.state_dict()
             self.assertTrue(
-                set(("ctx", "initial_ctx", "short_ctx", "long_ctx", "ctx_memory", "optimizer", "scaler"))
+                set(("ctx_delta", "initial_ctx_delta", "short_delta", "long_delta", "ctx_delta_memory", "optimizer", "scaler"))
                 <= set(state)
             )
-            self.assertIn("ctxs", state["ctx_memory"])
-            self.assertIn("cacs", state["ctx_memory"])
+            self.assertIn("deltas", state["ctx_delta_memory"])
+            self.assertIn("cacs", state["ctx_delta_memory"])
         finally:
             adapter.close()
 

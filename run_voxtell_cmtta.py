@@ -173,12 +173,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_dir", default=str(DEFAULT_VOXTELL_ROOT / "model"))
     parser.add_argument("--text_model", default=str(DEFAULT_QWEN))
     parser.add_argument("--prompt", default="liver")
-    parser.add_argument(
-        "--n_ctx",
-        type=int,
-        default=1,
-        help="Number of learnable Qwen input context tokens",
-    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output_dir", default="results_/voxtell_cmtta_p0")
     parser.add_argument("--checkpoint", default=None)
@@ -237,7 +231,6 @@ def main() -> None:
         qwen_text_encoder=predictor.text_backbone,
         qwen_tokenizer=predictor.tokenizer,
         text_prompt=args.prompt,
-        n_ctx=args.n_ctx,
     )
     if args.checkpoint:
         load_cmtta_checkpoint(args.checkpoint, adapter)
@@ -258,7 +251,7 @@ def main() -> None:
             # all patch losses and performs exactly one optimizer/LSPM update.
             trace = adapter.adapt_case(patches, valid_masks)
             with torch.no_grad():
-                text_feature = adapter._encode_ctx(adapter.ctx.detach())
+                text_feature = adapter._encode_ctx(adapter.ctx_delta.detach())
             row = evaluate_case(
                 predictor,
                 image_path,

@@ -333,36 +333,49 @@ def select_cac_view(
 
 
 class ShortPromptMemory:
-    """FIFO memory M_i containing recent short ctx tensors and CAC scores."""
+    """FIFO memory M_i containing recent short prompt deltas and CAC scores."""
 
     def __init__(self, max_length: int):
         self.max_length = int(max_length)
         if self.max_length < 1:
             raise ValueError("short memory length must be positive")
-        self.contexts: deque[torch.Tensor] = deque(maxlen=self.max_length)
+        self.deltas: deque[torch.Tensor] = deque(maxlen=self.max_length)
         self.cacs: deque[float] = deque(maxlen=self.max_length)
 
-    def __len__(self) -> int:
-        return len(self.contexts)
+    @property
+    def contexts(self):
+        """Compatibility view; memory entries are prompt deltas."""
+        return self.deltas
 
-    def weighted_ctx(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        if not self.contexts:
-            raise RuntimeError("Cannot fuse an empty short ctx memory")
+    def __len__(self) -> int:
+        return len(self.deltas)
+
+    def weighted_delta(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if not self.deltas:
+            raise RuntimeError("Cannot fuse an empty short-delta memory")
         scores = torch.tensor(list(self.cacs), device=device, dtype=torch.float32)
         weights = torch.softmax(scores, dim=0)
-        result = torch.zeros_like(self.contexts[0], device=device, dtype=dtype)
-        for weight, ctx in zip(weights, self.contexts):
-            result = result + weight.to(dtype) * ctx.to(device=device, dtype=dtype)
+        result = torch.zeros_like(self.deltas[0], device=device, dtype=dtype)
+        for weight, delta in zip(weights, self.deltas):
+            result = result + weight.to(dtype) * delta.to(device=device, dtype=dtype)
         return result
 
-    def append(self, ctx: torch.Tensor, cac: float) -> None:
-        self.contexts.append(ctx.detach().cpu().clone())
+    def weighted_ctx(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Compatibility alias for callers that use the old ctx name."""
+        return self.weighted_delta(device, dtype)
+
+    def append_delta(self, delta: torch.Tensor, cac: float) -> None:
+        self.deltas.append(delta.detach().cpu().clone())
         self.cacs.append(float(cac))
+
+    def append(self, ctx: torch.Tensor, cac: float) -> None:
+        """Compatibility alias; ``ctx`` is stored as a delta."""
+        self.append_delta(ctx, cac)
 
     def state_dict(self) -> dict:
         return {
             "max_length": self.max_length,
-            "ctxs": [ctx.clone() for ctx in self.contexts],
+            "deltas": [delta.clone() for delta in self.deltas],
             "cacs": list(self.cacs),
         }
 
@@ -370,18 +383,22 @@ class ShortPromptMemory:
         self.max_length = int(state["max_length"])
         if self.max_length < 1:
             raise ValueError("short memory length must be positive")
-        contexts = state.get("ctxs", state.get("prompts", []))
+        if "ctxs" in state or "prompts" in state:
+            raise ValueError(
+                "Legacy random-ctx memory is incompatible with ctx_delta checkpoints"
+            )
+        contexts = state.get("deltas", [])
         cacs = state.get("cacs", [])
         if len(contexts) != len(cacs):
-            raise ValueError("short memory ctxs and CAC scores must have equal lengths")
-        self.contexts = deque(maxlen=self.max_length)
+            raise ValueError("short memory deltas and CAC scores must have equal lengths")
+        self.deltas = deque(maxlen=self.max_length)
         self.cacs = deque(maxlen=self.max_length)
-        for ctx, cac in zip(contexts, cacs):
-            self.append(ctx, float(cac))
+        for delta, cac in zip(contexts, cacs):
+            self.append_delta(delta, float(cac))
 
 
 class VoxTellCMTTA:
-    """CM-TTA/LSPM/DSPU with one trainable FP32 text context."""
+    """CM-TTA/LSPM/DSPU with one trainable FP32 token-tuning delta."""
 
     def __init__(
         self,
@@ -392,7 +409,7 @@ class VoxTellCMTTA:
         qwen_text_encoder: Optional[nn.Module] = None,
         qwen_tokenizer=None,
         text_prompt: str = "liver",
-        n_ctx: int = 1,
+        n_ctx: Optional[int] = None,
         formatted_text_prompt: Optional[str] = None,
     ):
         self.device = torch.device(device)
@@ -413,12 +430,12 @@ class VoxTellCMTTA:
                 raise RuntimeError("Qwen text encoder must be completely frozen")
 
         self.text_prompt = str(text_prompt)
-        self.n_ctx = int(n_ctx)
+        self.n_ctx = 1 if n_ctx is None else int(n_ctx)
         if self.n_ctx < 1:
             raise ValueError("n_ctx must be positive")
         self._fixed_token_embeddings = None
         self._fixed_attention_mask = None
-        self._ctx_insert_index = None
+        self._liver_token_indices = None
 
         if self.qwen_text_encoder is not None:
             if qwen_tokenizer is None:
@@ -445,10 +462,10 @@ class VoxTellCMTTA:
                     f"got {tuple(initial_ctx.shape)}"
                 )
             initial_ctx = initial_ctx.to(self.device, dtype=torch.float32)
-            self.ctx = nn.Parameter(initial_ctx.clone())
-            self.initial_ctx = initial_ctx.clone()
-        self.long_ctx: Optional[torch.Tensor] = None
-        self.short_ctx: Optional[torch.Tensor] = None
+            self.ctx_delta = nn.Parameter(initial_ctx.clone())
+            self.initial_ctx_delta = initial_ctx.clone()
+        self.long_delta: Optional[torch.Tensor] = None
+        self.short_delta: Optional[torch.Tensor] = None
 
         self.lr = float(args.lr)
         self.ema_momentum = float(args.ema_momentum)
@@ -461,7 +478,7 @@ class VoxTellCMTTA:
         if not 0.0 < self.selection_p <= 1.0:
             raise ValueError("selection_p must be in (0, 1]")
 
-        self.optimizer = torch.optim.Adam([self.ctx], lr=self.lr)
+        self.optimizer = torch.optim.Adam([self.ctx_delta], lr=self.lr)
         amp_enabled = self.device.type == "cuda"
         if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
             self.scaler = torch.amp.GradScaler(
@@ -516,7 +533,7 @@ class VoxTellCMTTA:
         initial_ctx: Optional[torch.Tensor],
         formatted_text_prompt: Optional[str],
     ) -> None:
-        """Build fixed Qwen inputs and a CoOp-style context parameter."""
+        """Build fixed Qwen inputs and zero-initialized token deltas."""
         if self.text_prompt != "liver":
             raise ValueError('VoxTell CM-TTA fixes the text prompt to "liver"')
         if formatted_text_prompt is None:
@@ -528,6 +545,8 @@ class VoxTellCMTTA:
                 ) from error
             formatted_prompt = wrap_with_instruction([self.text_prompt])[0]
         else:
+            # This explicit form is retained for small test doubles; the
+            # production path always takes VoxTell's wrapper above.
             formatted_prompt = formatted_text_prompt
         max_length = int(getattr(self.args, "max_text_length", 8192))
         try:
@@ -566,89 +585,92 @@ class VoxTellCMTTA:
         self._fixed_attention_mask = attention_mask.to(self.device)
 
         query_start = formatted_prompt.rfind(self.text_prompt)
+        query_end = query_start + len(self.text_prompt)
         offsets = tokenized.get("offset_mapping")
-        insert_index = None
+        liver_indices = []
         if offsets is not None and query_start >= 0:
             for index, (start, end) in enumerate(torch.as_tensor(offsets)[0].tolist()):
-                if end > start and end > query_start:
-                    insert_index = index
-                    break
-        if insert_index is None:
+                if end > start and start < query_end and end > query_start:
+                    liver_indices.append(index)
+        if not liver_indices:
             active_indices = torch.nonzero(attention_mask[0], as_tuple=False).flatten().tolist()
-            query_tokens = tokenizer(
-                [self.text_prompt], add_special_tokens=False, return_tensors="pt"
-            )["input_ids"][0].tolist()
             active_ids = input_ids[0, active_indices].tolist()
-            for start in range(max(1, len(active_ids) - len(query_tokens) + 1)):
-                if active_ids[start:start + len(query_tokens)] == query_tokens:
-                    insert_index = active_indices[start]
+            query_token_candidates = []
+            for query in (self.text_prompt, " " + self.text_prompt):
+                query_tokens = tokenizer(
+                    [query], add_special_tokens=False, return_tensors="pt"
+                )["input_ids"][0].tolist()
+                if query_tokens and query_tokens not in query_token_candidates:
+                    query_token_candidates.append(query_tokens)
+            for query_tokens in query_token_candidates:
+                for start in range(max(0, len(active_ids) - len(query_tokens) + 1)):
+                    if active_ids[start:start + len(query_tokens)] == query_tokens:
+                        liver_indices = active_indices[start:start + len(query_tokens)]
+                        break
+                if liver_indices:
                     break
-            if insert_index is None:
-                if len(active_indices) < 2:
-                    raise ValueError("Could not locate the fixed liver token in Qwen input")
-                insert_index = active_indices[-2]
+        if not liver_indices:
+            raise ValueError(
+                "Could not locate all fixed 'liver' tokens in the wrapped Qwen prompt"
+            )
 
         embedding_dim = int(token_embedding.embedding_dim)
-        if initial_ctx is None:
-            ctx = torch.empty(
-                (self.n_ctx, embedding_dim),
-                device=self.device,
-                dtype=torch.float32,
-            )
-            nn.init.normal_(ctx, std=0.02)
-        else:
-            ctx = initial_ctx.detach()
-            if ctx.ndim == 3 and ctx.shape[0] == 1:
-                ctx = ctx[0]
-            elif ctx.ndim != 2:
+        if initial_ctx is not None and torch.as_tensor(initial_ctx).numel():
+            if torch.as_tensor(initial_ctx).detach().abs().max().item() != 0.0:
                 raise ValueError(
-                    "Expected initial ctx with shape (n_ctx,D) or (1,n_ctx,D), "
-                    f"got {tuple(ctx.shape)}"
+                    "Non-zero initial ctx is incompatible with zero-initialized ctx_delta"
                 )
-            if tuple(ctx.shape) != (self.n_ctx, embedding_dim):
-                raise ValueError(
-                    "Expected initial ctx with shape "
-                    f"({self.n_ctx},{embedding_dim}), got {tuple(ctx.shape)}"
-                )
-            ctx = ctx.to(self.device, dtype=torch.float32)
-        self.ctx = nn.Parameter(ctx.clone())
-        self.initial_ctx = ctx.clone()
-        self._ctx_insert_index = int(insert_index)
+        self._liver_token_indices = torch.tensor(
+            liver_indices, device=self.device, dtype=torch.long
+        )
+        self.n_ctx = len(liver_indices)
+        delta = torch.zeros(
+            (self.n_ctx, embedding_dim), device=self.device, dtype=torch.float32
+        )
+        self.ctx_delta = nn.Parameter(delta)
+        self.initial_ctx_delta = delta.clone()
 
-    def _encode_ctx(self, ctx: torch.Tensor) -> torch.Tensor:
-        """Encode ctx + fixed wrapped ``liver`` tokens into VoxTell text features."""
+    def _encode_ctx(self, ctx_delta: torch.Tensor) -> torch.Tensor:
+        """Encode fixed wrapped ``liver`` tokens plus position-local deltas."""
         if self.qwen_text_encoder is None:
-            return ctx.unsqueeze(0) if ctx.ndim == 2 else ctx
-        if ctx.ndim == 2:
-            ctx = ctx.unsqueeze(0)
-        if tuple(ctx.shape[:2]) != (1, self.n_ctx):
+            return ctx_delta.unsqueeze(0) if ctx_delta.ndim == 2 else ctx_delta
+        if ctx_delta.ndim == 2:
+            ctx_delta = ctx_delta.unsqueeze(0)
+        if tuple(ctx_delta.shape[:2]) != (1, self.n_ctx):
             raise ValueError(
-                f"Expected ctx shape (1,{self.n_ctx},D), got {tuple(ctx.shape)}"
+                f"Expected ctx_delta shape (1,{self.n_ctx},D), got {tuple(ctx_delta.shape)}"
             )
         fixed = self._fixed_token_embeddings
         fixed_mask = self._fixed_attention_mask
-        index = self._ctx_insert_index
-        if fixed is None or fixed_mask is None or index is None:
+        indices = self._liver_token_indices
+        if fixed is None or fixed_mask is None or indices is None:
             raise RuntimeError("Qwen context inputs were not initialized")
-        ctx = ctx.to(device=fixed.device, dtype=fixed.dtype)
-        context_mask = torch.ones(
-            (1, self.n_ctx), device=fixed_mask.device, dtype=fixed_mask.dtype
-        )
-        inputs_embeds = torch.cat(
-            [fixed[:, :index], ctx, fixed[:, index:]], dim=1
-        )
-        attention_mask = torch.cat(
-            [fixed_mask[:, :index], context_mask, fixed_mask[:, index:]], dim=1
-        )
+        ctx_delta = ctx_delta.to(device=fixed.device, dtype=fixed.dtype)
+        delta_embeddings = torch.zeros_like(fixed)
+        delta_embeddings = delta_embeddings.index_copy(1, indices, ctx_delta)
+        inputs_embeds = fixed + delta_embeddings
+        attention_mask = fixed_mask
         outputs = self.qwen_text_encoder(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
         )
         hidden_states = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
-        last_index = attention_mask.shape[1] - 1 - torch.flip(
-            attention_mask, dims=(1,)
-        ).float().argmax(dim=1)
-        pooled = hidden_states[torch.arange(hidden_states.shape[0], device=hidden_states.device), last_index]
+        try:
+            from voxtell.utils.text_embedding import last_token_pool
+        except ModuleNotFoundError:
+            # The fallback is only for the lightweight test double; production
+            # VoxTell always uses its own pooling helper above.
+            left_padding = attention_mask[:, -1].sum() == attention_mask.shape[0]
+            if left_padding:
+                pooled = hidden_states[:, -1]
+            else:
+                last_index = attention_mask.sum(dim=1) - 1
+                pooled = hidden_states[
+                    torch.arange(hidden_states.shape[0], device=hidden_states.device),
+                    last_index,
+                ]
+        else:
+            pooled = last_token_pool(hidden_states, attention_mask)
         return pooled.unsqueeze(1)
 
     def close(self) -> None:
@@ -657,32 +679,60 @@ class VoxTellCMTTA:
         self._hooks.clear()
 
     @property
+    def ctx(self) -> torch.Tensor:
+        """Compatibility alias for the sole trainable prompt delta."""
+        return self.ctx_delta
+
+    @property
+    def initial_ctx(self) -> torch.Tensor:
+        """Compatibility alias for the initial prompt delta."""
+        return self.initial_ctx_delta
+
+    @property
+    def short_ctx(self) -> Optional[torch.Tensor]:
+        """Compatibility alias for the short prompt delta."""
+        return self.short_delta
+
+    @short_ctx.setter
+    def short_ctx(self, value: Optional[torch.Tensor]) -> None:
+        self.short_delta = value
+
+    @property
+    def long_ctx(self) -> Optional[torch.Tensor]:
+        """Compatibility alias for the long prompt delta."""
+        return self.long_delta
+
+    @long_ctx.setter
+    def long_ctx(self, value: Optional[torch.Tensor]) -> None:
+        self.long_delta = value
+
+    @property
     def optimizer_parameters(self):
         return [parameter for group in self.optimizer.param_groups for parameter in group["params"]]
 
     def _print_trainable_parameters(self) -> None:
-        trainable = [("ctx", self.ctx)]
+        trainable = [("ctx_delta", self.ctx_delta)]
         unexpected = [
             name
             for name, parameter in trainable
             if not parameter.requires_grad
         ]
         optimizer_parameters = self.optimizer_parameters
-        if unexpected or len(optimizer_parameters) != 1 or optimizer_parameters[0] is not self.ctx:
-            raise RuntimeError("Only ctx may be trainable and optimized")
+        if unexpected or len(optimizer_parameters) != 1 or optimizer_parameters[0] is not self.ctx_delta:
+            raise RuntimeError("Only ctx_delta may be trainable and optimized")
         print(
             "[VoxTell-CM-TTA] trainable parameters: "
-            f"ctx shape={tuple(self.ctx.shape)}, dtype={self.ctx.dtype}, "
-            f"numel={self.ctx.numel()}"
+            f"ctx_delta shape={tuple(self.ctx_delta.shape)}, dtype={self.ctx_delta.dtype}, "
+            f"numel={self.ctx_delta.numel()}"
         )
 
     def _check_case_gradients(self, allow_nonfinite: bool = False) -> None:
-        if self.ctx.grad is None:
-            raise RuntimeError("ctx did not receive a gradient during case adaptation")
-        if self.ctx.grad.norm() == 0:
-            raise RuntimeError("ctx gradient is zero during case adaptation")
-        if not allow_nonfinite and not torch.isfinite(self.ctx.grad).all():
-            raise RuntimeError("ctx gradient is zero or non-finite during case adaptation")
+        if self.ctx_delta.grad is None:
+            raise RuntimeError("ctx_delta did not receive a gradient during case adaptation")
+        if self.ctx_delta.grad.norm() == 0:
+            raise RuntimeError("ctx_delta gradient is zero during case adaptation")
+        if not allow_nonfinite and not torch.isfinite(self.ctx_delta.grad).all():
+            raise RuntimeError("ctx_delta gradient is zero or non-finite during case adaptation")
         frozen_modules = [("VoxTell", self.model)]
         if self.qwen_text_encoder is not None:
             frozen_modules.append(("Qwen", self.qwen_text_encoder))
@@ -835,13 +885,13 @@ class VoxTellCMTTA:
         patches: list[torch.Tensor],
         valid_masks: Optional[list[torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, float, float, float]:
-        current = self.ctx
+        current = self.ctx_delta
         current_cac = self._case_cac(current, patches, valid_masks)
         if len(self.short_memory) == 0:
             short = current
             return short, current_cac, current_cac, 0.0
 
-        historical = self.short_memory.weighted_ctx(self.device, current.dtype)
+        historical = self.short_memory.weighted_delta(self.device, current.dtype)
         historical_cac = self._case_cac(historical, patches, valid_masks)
         weights = torch.softmax(
             torch.tensor([historical_cac, current_cac], device=self.device), dim=0
@@ -955,7 +1005,7 @@ class VoxTellCMTTA:
                         device_type=self.device.type, enabled=autocast_enabled
                     ):
                         student_ctx = short_ctx_value + short_current_weight * (
-                            self.ctx - self.ctx.detach()
+                            self.ctx_delta - self.ctx_delta.detach()
                         )
                         student_logits = self._forward(view_batch, student_ctx)
                         probabilities = torch.sigmoid(student_logits[:, :1])
@@ -1067,7 +1117,7 @@ class VoxTellCMTTA:
                     device_type=self.device.type, enabled=autocast_enabled
                 ):
                     student_ctx = short_ctx_value + short_current_weight * (
-                        self.ctx - self.ctx.detach()
+                        self.ctx_delta - self.ctx_delta.detach()
                     )
                     student_logits = self._forward(view_batch, student_ctx)
                     probabilities = torch.sigmoid(student_logits[:, :1])
@@ -1131,7 +1181,7 @@ class VoxTellCMTTA:
                 )
                 with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
                     student_ctx = short_ctx_value + short_current_weight * (
-                        self.ctx - self.ctx.detach()
+                        self.ctx_delta - self.ctx_delta.detach()
                     )
                     selected_logits = self._forward(selected, student_ctx)
                     components = self._cac_components(selected_logits, input_mask)
@@ -1167,7 +1217,7 @@ class VoxTellCMTTA:
             )
             with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
                 student_ctx = short_ctx_value + short_current_weight * (
-                    self.ctx - self.ctx.detach()
+                    self.ctx_delta - self.ctx_delta.detach()
                 )
                 selected_logits = self._forward(selected, student_ctx)
                 components = self._cac_components(selected_logits, input_mask)
@@ -1220,10 +1270,10 @@ class VoxTellCMTTA:
             patches, valid_masks
         )
 
-        if self.long_ctx is None:
+        if self.long_delta is None:
             long_ctx = short_ctx.detach().clone()
         else:
-            long_ctx = self.ema_momentum * self.long_ctx + (1.0 - self.ema_momentum) * short_ctx.detach()
+            long_ctx = self.ema_momentum * self.long_delta + (1.0 - self.ema_momentum) * short_ctx.detach()
         long_ctx = long_ctx.detach()
 
         selected_view, selection_scores = self._select_case_view(
@@ -1267,7 +1317,7 @@ class VoxTellCMTTA:
         self._check_case_gradients(allow_nonfinite=True)
         scale_before_step = float(self.scaler.get_scale())
         self.scaler.unscale_(self.optimizer)
-        if torch.isfinite(self.ctx.grad).all():
+        if torch.isfinite(self.ctx_delta.grad).all():
             self._check_case_gradients()
         else:
             warnings.warn(
@@ -1276,7 +1326,7 @@ class VoxTellCMTTA:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        torch.nn.utils.clip_grad_norm_([self.ctx], float(self.args.grad_clip))
+        torch.nn.utils.clip_grad_norm_([self.ctx_delta], float(self.args.grad_clip))
         self.scaler.step(self.optimizer)
         self.scaler.update()
         scale_after_step = float(self.scaler.get_scale())
@@ -1289,12 +1339,12 @@ class VoxTellCMTTA:
             )
         self.optimizer_step_count += 1
 
-        self.short_ctx = short_snapshot
-        self.long_ctx = long_ctx
+        self.short_delta = short_snapshot
+        self.long_delta = long_ctx
         selected_cac = float(selection_scores[selected_view].detach().cpu())
         # Store the actual short prompt used for this case, paired with its
         # selected-view CAC.  The deque itself supplies FIFO eviction.
-        self.short_memory.append(self.short_ctx, selected_cac)
+        self.short_memory.append_delta(self.short_delta, selected_cac)
         self.last_trace = {
             "selected_view": selected_view,
             "pseudo_source_view": selected_view,
@@ -1312,11 +1362,11 @@ class VoxTellCMTTA:
 
     def state_dict(self) -> dict:
         return {
-            "ctx": self.ctx.detach().cpu(),
-            "initial_ctx": self.initial_ctx.detach().cpu(),
-            "short_ctx": None if self.short_ctx is None else self.short_ctx.cpu(),
-            "long_ctx": None if self.long_ctx is None else self.long_ctx.cpu(),
-            "ctx_memory": self.short_memory.state_dict(),
+            "ctx_delta": self.ctx_delta.detach().cpu(),
+            "initial_ctx_delta": self.initial_ctx_delta.detach().cpu(),
+            "short_delta": None if self.short_delta is None else self.short_delta.cpu(),
+            "long_delta": None if self.long_delta is None else self.long_delta.cpu(),
+            "ctx_delta_memory": self.short_memory.state_dict(),
             "text_prompt": self.text_prompt,
             "n_ctx": self.n_ctx,
             "optimizer": self.optimizer.state_dict(),
@@ -1325,20 +1375,47 @@ class VoxTellCMTTA:
         }
 
     def load_state_dict(self, state: dict) -> None:
-        if "ctx" not in state:
+        if "ctx" in state or "initial_ctx" in state or "ctx_memory" in state:
             raise ValueError(
-                "Checkpoint does not contain ctx; final text-embedding checkpoints "
-                "cannot be loaded by the ctx-based adapter"
+                "Legacy random-ctx checkpoint is incompatible with ctx_delta format"
             )
-        self.ctx.data.copy_(state["ctx"].to(self.device))
-        self.initial_ctx.copy_(state.get("initial_ctx", state["ctx"]).to(self.device))
-        self.short_ctx = (
-            None if state.get("short_ctx") is None else state["short_ctx"].to(self.device)
+        required = {
+            "ctx_delta",
+            "initial_ctx_delta",
+            "short_delta",
+            "long_delta",
+            "ctx_delta_memory",
+            "text_prompt",
+            "n_ctx",
+            "optimizer",
+            "scaler",
+        }
+        missing = sorted(required.difference(state))
+        if missing:
+            raise ValueError(
+                "ctx_delta checkpoint is incomplete; missing keys: "
+                + ", ".join(missing)
+            )
+        if state["text_prompt"] != self.text_prompt or int(state["n_ctx"]) != self.n_ctx:
+            raise ValueError(
+                "ctx_delta checkpoint prompt/token count does not match the current "
+                "fixed VoxTell tokenizer"
+            )
+        delta = state["ctx_delta"].to(self.device)
+        if tuple(delta.shape) != tuple(self.ctx_delta.shape):
+            raise ValueError(
+                "ctx_delta shape does not match the current tokenizer-derived liver token count: "
+                f"checkpoint={tuple(delta.shape)}, current={tuple(self.ctx_delta.shape)}"
+            )
+        self.ctx_delta.data.copy_(delta)
+        self.initial_ctx_delta.copy_(state["initial_ctx_delta"].to(self.device))
+        self.short_delta = (
+            None if state["short_delta"] is None else state["short_delta"].to(self.device)
         )
-        self.long_ctx = (
-            None if state.get("long_ctx") is None else state["long_ctx"].to(self.device)
+        self.long_delta = (
+            None if state["long_delta"] is None else state["long_delta"].to(self.device)
         )
-        self.short_memory.load_state_dict(state["ctx_memory"])
+        self.short_memory.load_state_dict(state["ctx_delta_memory"])
         self.optimizer.load_state_dict(state["optimizer"])
         for optimizer_state in self.optimizer.state.values():
             for key, value in optimizer_state.items():
@@ -1352,7 +1429,7 @@ def save_cmtta_checkpoint(path: str, adapter: VoxTellCMTTA, args, history: list[
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
-            "format": "voxtell-cmtta-lspm-dspu-ctx-v1",
+            "format": "voxtell-cmtta-lspm-dspu-ctx-delta-v1",
             "adapter": adapter.state_dict(),
             "args": vars(args),
             "history": history,
@@ -1363,7 +1440,11 @@ def save_cmtta_checkpoint(path: str, adapter: VoxTellCMTTA, args, history: list[
 
 def load_cmtta_checkpoint(path: str, adapter: VoxTellCMTTA) -> dict:
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if checkpoint.get("format") != "voxtell-cmtta-lspm-dspu-ctx-v1":
+    if checkpoint.get("format") == "voxtell-cmtta-lspm-dspu-ctx-v1":
+        raise ValueError(
+            "Legacy random-ctx checkpoint is incompatible with ctx_delta format"
+        )
+    if checkpoint.get("format") != "voxtell-cmtta-lspm-dspu-ctx-delta-v1":
         raise ValueError(f"Unsupported CM-TTA checkpoint format: {checkpoint.get('format')}")
     adapter.load_state_dict(checkpoint["adapter"])
     return checkpoint
