@@ -1,5 +1,6 @@
 import types
 import unittest
+import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -20,7 +21,7 @@ from method.voxtell_cmtta import (
     select_cac_view,
     soft_dice_loss,
 )
-from run_voxtell_cmtta import save_prediction_nifti
+from run_voxtell_cmtta import check_prediction_nifti_geometry, save_prediction_nifti
 
 
 class TinyVoxTell(nn.Module):
@@ -93,26 +94,33 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
-    def test_prediction_is_transposed_back_to_nifti_axis_order(self):
+    def test_prediction_roundtrips_with_voxtell_reader_writer_geometry(self):
         import nibabel as nib
+        from nnunetv2.imageio.nibabel_reader_writer import NibabelIOWithReorient
 
         with TemporaryDirectory() as temp_dir:
             temp_dir = Path(temp_dir)
             image_path = temp_dir / "image.nii.gz"
+            label_path = temp_dir / "label.nii.gz"
             output_path = temp_dir / "prediction.nii.gz"
             source_data = np.arange(4 * 3 * 2, dtype=np.float32).reshape(4, 3, 2)
-            affine = np.diag([1.0, 2.0, 3.0, 1.0])
+            affine = np.array(
+                [[-1.0, 0.0, 0.0, 10.0], [0.0, 2.0, 0.0, 20.0], [0.0, 0.0, 3.0, 30.0], [0, 0, 0, 1]],
+                dtype=np.float64,
+            )
             nib.save(nib.Nifti1Image(source_data, affine), str(image_path))
+            nib.save(nib.Nifti1Image((source_data > 0).astype(np.uint8), affine), str(label_path))
 
             model_space_prediction = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
             save_prediction_nifti(model_space_prediction, image_path, output_path)
 
-            saved = nib.as_closest_canonical(nib.load(str(output_path)))
-            self.assertEqual(tuple(saved.shape), (4, 3, 2))
-            self.assertTrue(
-                np.array_equal(saved.get_fdata(), model_space_prediction.transpose(2, 1, 0))
-            )
-            self.assertTrue(np.allclose(saved.affine, affine))
+            saved = nib.load(str(output_path))
+            source = nib.load(str(image_path))
+            self.assertEqual(tuple(saved.shape), tuple(source.shape))
+            self.assertTrue(np.allclose(saved.affine, source.affine))
+            check_prediction_nifti_geometry(output_path, image_path, label_path)
+            restored, _ = NibabelIOWithReorient().read_images([str(output_path)])
+            self.assertTrue(np.array_equal(restored[0], model_space_prediction))
 
     def test_only_ctx_and_qwen_are_frozen(self):
         model = TinyVoxTell(text_dim=4)
@@ -162,6 +170,40 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             adapter.close()
 
+    def test_amp_skipped_step_does_not_require_ctx_value_change(self):
+        class SkippedScaler:
+            def __init__(self):
+                self.scale_value = 8.0
+
+            def scale(self, objective):
+                return objective
+
+            def unscale_(self, optimizer):
+                del optimizer
+
+            def step(self, optimizer):
+                del optimizer  # emulate GradScaler skipping an overflowed step
+
+            def update(self):
+                self.scale_value /= 2.0
+
+            def get_scale(self):
+                return self.scale_value
+
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(), torch.zeros(1, 1, 2), "cpu", make_args()
+        )
+        adapter.scaler = SkippedScaler()
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                trace = adapter.adapt_case([torch.zeros(1, 2, 2, 2)])
+            self.assertTrue(trace["optimizer_step_skipped"])
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertTrue(any("skipped" in str(item.message) for item in caught))
+        finally:
+            adapter.close()
+
     def test_soft_dice_is_averaged_over_all_views(self):
         pseudo = torch.ones(1, 1, 2, 2, 2)
         predictions = torch.stack(
@@ -184,10 +226,7 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(selected_indices.tolist(), [1])
         self.assertAlmostEqual(float(avg_entropy(probabilities[0])), 0.693147, places=5)
 
-    def test_cac_pools_features_before_cosine(self):
-        # The foreground average is [1, 1] and background average [1, -1].
-        # Cosine-after-pooling therefore gives 1 - 0 = 1.  Averaging voxel
-        # cosines would incorrectly produce a different result.
+    def test_cac_matches_source_similarity_map_definition(self):
         vision = torch.tensor(
             [
                 [[2.0, 0.0]],
@@ -199,9 +238,10 @@ class VoxTellCMTTATest(unittest.TestCase):
         text = torch.tensor([[[1.0, 1.0]]])
         logits = torch.tensor([[[[[20.0, 20.0], [-20.0, -20.0]]]]])
         result = cac_from_features(vision, text, logits)
-        self.assertTrue(torch.allclose(result, torch.ones(1), atol=1e-5))
+        expected = torch.tensor([(2.0 ** -0.5) - 0.0])
+        self.assertTrue(torch.allclose(result, expected, atol=1e-5))
 
-    def test_cac_uses_hard_half_probability_masks_for_feature_pooling(self):
+    def test_cac_uses_hard_half_probability_masks_for_similarity_map(self):
         vision = torch.tensor(
             [
                 [[1.0, 0.0]],
@@ -212,7 +252,8 @@ class VoxTellCMTTATest(unittest.TestCase):
         )
         probabilities = torch.tensor([0.9, 0.6, 0.4, 0.1]).reshape(1, 1, 1, 4)
         logits = torch.logit(probabilities).unsqueeze(1)
-        components = cac_components_from_features(vision, logits)
+        text = torch.tensor([[[1.0, 0.0]]])
+        components = cac_components_from_features(vision, text, logits)
         self.assertTrue(
             torch.equal(components["foreground_mass"], torch.tensor([2.0]))
         )
@@ -220,48 +261,77 @@ class VoxTellCMTTATest(unittest.TestCase):
             torch.equal(components["background_mass"], torch.tensor([2.0]))
         )
         self.assertTrue(
-            torch.allclose(components["foreground_sum"], torch.tensor([[1.0, 1.0]]))
+            torch.allclose(components["foreground_sum"], torch.tensor([1.0]))
         )
         self.assertTrue(
-            torch.allclose(components["background_sum"], torch.tensor([[3.0, 1.0]]))
+            torch.allclose(
+                components["background_sum"], torch.tensor([1.0 + 2.0 ** -0.5])
+            )
         )
 
         all_foreground = cac_components_from_features(
-            vision, torch.full_like(logits, 20.0)
+            vision, text, torch.full_like(logits, 20.0)
         )
         all_background = cac_components_from_features(
-            vision, torch.full_like(logits, -20.0)
+            vision, text, torch.full_like(logits, -20.0)
         )
         self.assertTrue(torch.isfinite(cac_from_components(
             all_foreground["foreground_sum"],
             all_foreground["foreground_mass"],
             all_foreground["background_sum"],
             all_foreground["background_mass"],
-            torch.tensor([[1.0, 0.0]]),
         )).all())
         self.assertTrue(torch.isfinite(cac_from_components(
             all_background["foreground_sum"],
             all_background["foreground_mass"],
             all_background["background_sum"],
             all_background["background_mass"],
-            torch.tensor([[1.0, 0.0]]),
         )).all())
 
     def test_case_cac_uses_global_sums_not_patch_cac_mean(self):
-        text = torch.tensor([[1.0, 0.0]])
         first = cac_from_components(
-            torch.tensor([[10.0, 0.0]]), torch.tensor([10.0]),
-            torch.tensor([[0.0, 10.0]]), torch.tensor([10.0]), text
+            torch.tensor([10.0]), torch.tensor([10.0]),
+            torch.tensor([0.0]), torch.tensor([10.0]),
         )
         second = cac_from_components(
-            torch.tensor([[0.0, 1.0]]), torch.tensor([1.0]),
-            torch.tensor([[0.0, 1.0]]), torch.tensor([1.0]), text
+            torch.tensor([0.0]), torch.tensor([1.0]),
+            torch.tensor([0.0]), torch.tensor([1.0]),
         )
         global_score = cac_from_components(
-            torch.tensor([[10.0, 1.0]]), torch.tensor([11.0]),
-            torch.tensor([[0.0, 11.0]]), torch.tensor([11.0]), text
+            torch.tensor([10.0]), torch.tensor([11.0]),
+            torch.tensor([0.0]), torch.tensor([11.0]),
         )
         self.assertFalse(torch.allclose(global_score, (first + second) / 2.0))
+
+    def test_case_cac_is_invariant_to_patch_partition_and_empty_padding(self):
+        volume = torch.tensor(
+            [[[[0.0, 0.2], [0.4, 0.6]], [[0.8, 1.0], [0.3, 0.1]]]]
+        )
+        model = TinyVoxTell()
+        with torch.no_grad():
+            model.project_text_embed.weight.copy_(torch.eye(2))
+        adapter = VoxTellCMTTA(
+            model, torch.zeros(1, 1, 2), "cpu", make_args()
+        )
+        try:
+            full_mask = torch.ones(2, 2, 2)
+            full_score = adapter._case_cac(
+                adapter.ctx.detach(), [volume], [full_mask]
+            )
+            split_patches = [volume[:, :1], volume[:, 1:]]
+            split_masks = [full_mask[:1], full_mask[1:]]
+            split_score = adapter._case_cac(
+                adapter.ctx.detach(), split_patches, split_masks
+            )
+            padded_score = adapter._case_cac(
+                adapter.ctx.detach(),
+                split_patches + [torch.full_like(volume, 99.0)],
+                split_masks + [torch.zeros_like(full_mask)],
+            )
+        finally:
+            adapter.close()
+        self.assertAlmostEqual(full_score, split_score, places=6)
+        self.assertAlmostEqual(full_score, padded_score, places=6)
 
     def test_padding_mask_excludes_padding_and_augmentation_keeps_it_zero(self):
         volume = torch.ones(1, 3, 4, 5)
@@ -352,9 +422,8 @@ class VoxTellCMTTATest(unittest.TestCase):
             {"scale": 1.1, "offset": -0.05},
         ]
         model = TinyVoxTell()
-        # Make pooled foreground/background directions different so both the
-        # probability-weighted visual path and the prompt-text path contribute
-        # a non-zero gradient.
+        # Make foreground/background token similarities different while the
+        # prompt-text path remains differentiable.
         model.project_bottleneck_embed = nn.Linear(1, 2, bias=True)
         with torch.no_grad():
             model.project_bottleneck_embed.weight.copy_(torch.tensor([[1.0], [0.0]]))
@@ -367,10 +436,9 @@ class VoxTellCMTTATest(unittest.TestCase):
             make_args(num_aug_views=1, view_batch_size=1),
         )
 
-        def direct_cac_gradient(detach_components=False, detach_text=False):
+        def direct_cac_gradient():
             adapter.optimizer.zero_grad(set_to_none=True)
             components_sum = None
-            text_sum = None
             for patch, valid_mask in zip(patches, valid_masks):
                 selected = adapter._make_view_batch(
                     patch, params, valid_mask, 1, 2
@@ -382,30 +450,18 @@ class VoxTellCMTTATest(unittest.TestCase):
                 components = adapter._cac_components(
                     logits, valid_mask.unsqueeze(0)
                 )
-                if detach_components:
-                    components = {key: value.detach() for key, value in components.items()}
                 components_sum = adapter._add_components(components_sum, components)
-                text = adapter._text_features[0].float()
-                text_sum = text if text_sum is None else text_sum + text
-            if detach_text:
-                text_sum = text_sum.detach()
             case_cac = cac_from_components(
                 components_sum["foreground_sum"],
                 components_sum["foreground_mass"],
                 components_sum["background_sum"],
                 components_sum["background_mass"],
-                text_sum / len(patches),
             )
-            if case_cac[0].requires_grad:
-                (-adapter.w_cac * case_cac[0]).backward()
-            else:
-                return torch.zeros_like(adapter.ctx)
+            (-adapter.w_cac * case_cac[0]).backward()
             return adapter.ctx.grad.detach().clone()
 
         try:
             direct_gradient = direct_cac_gradient()
-            visual_probability_gradient = direct_cac_gradient(detach_text=True)
-            text_gradient = direct_cac_gradient(detach_components=True)
 
             adapter.optimizer.zero_grad(set_to_none=True)
             adapter._backward_case_cac(
@@ -423,8 +479,22 @@ class VoxTellCMTTATest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(two_stage_gradient, direct_gradient, atol=1e-6))
         self.assertGreater(float(direct_gradient.norm()), 0.0)
-        self.assertEqual(float(visual_probability_gradient.norm()), 0.0)
-        self.assertGreater(float(text_gradient.norm()), 0.0)
+
+        # Hard CAC regions must be insensitive to probability perturbations.
+        logits = torch.tensor(
+            [[[[[2.0, -2.0, 2.0, -2.0]]]]],
+            requires_grad=True,
+        )
+        vision = torch.randn(4, 1, 2)
+        text = torch.tensor([[[1.0, 0.0]]], requires_grad=True)
+        components = cac_components_from_features(vision, text, logits)
+        (-cac_from_components(
+            components["foreground_sum"], components["foreground_mass"],
+            components["background_sum"], components["background_mass"],
+        )).backward()
+        self.assertIsNone(logits.grad)
+        self.assertIsNotNone(text.grad)
+        self.assertGreater(float(text.grad.norm()), 0.0)
 
     def test_case_dice_entropy_and_gradient_are_patch_partition_invariant(self):
         full_patch = torch.tensor(
@@ -618,7 +688,6 @@ class VoxTellCMTTATest(unittest.TestCase):
             entropy_sum = None
             entropy_mass = None
             cac_components = None
-            text_sum = None
             with torch.autocast(device_type="cuda", enabled=True):
                 student_prompt = short_value + (
                     adapter.ctx - adapter.ctx.detach()
@@ -662,8 +731,6 @@ class VoxTellCMTTATest(unittest.TestCase):
                         valid_mask.unsqueeze(0),
                     )
                     cac_components = adapter._add_components(cac_components, local_cac)
-                    text = adapter._text_features[0].float()
-                    text_sum = text if text_sum is None else text_sum + text
                 dice = (
                     1.0
                     - 2.0 * dice_stats["intersection"]
@@ -679,7 +746,6 @@ class VoxTellCMTTATest(unittest.TestCase):
                     cac_components["foreground_mass"],
                     cac_components["background_sum"],
                     cac_components["background_mass"],
-                    text_sum / len(patches),
                 )[0]
                 objective = dice + adapter.w_entropy * entropy - adapter.w_cac * case_cac
             adapter.scaler.scale(objective).backward()

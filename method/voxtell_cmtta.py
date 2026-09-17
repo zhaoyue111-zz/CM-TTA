@@ -8,6 +8,7 @@ case, after losses from all of that case's patches have been accumulated.
 
 from __future__ import annotations
 
+import warnings
 from collections import deque
 from pathlib import Path
 from typing import Iterable, Optional
@@ -153,19 +154,16 @@ def cac_from_features(
         raise ValueError(f"Expected logits (B,N,D,H,W), got {logits.shape}")
     components = cac_components_from_features(
         vision_features,
+        text_features,
         logits,
         valid_mask=valid_mask,
         feature_spatial_shape=feature_spatial_shape,
     )
-    text = text_features[0].float()
-    if text.shape[0] != components["foreground_sum"].shape[0]:
-        raise ValueError("Projected text and visual feature batch dimensions must agree")
     return cac_from_components(
         components["foreground_sum"],
         components["foreground_mass"],
         components["background_sum"],
         components["background_mass"],
-        text,
     )
 
 
@@ -206,15 +204,22 @@ def _canonical_valid_mask(
 
 def cac_components_from_features(
     vision_features: torch.Tensor,
+    text_features: torch.Tensor,
     logits: torch.Tensor,
     valid_mask: Optional[torch.Tensor] = None,
     feature_spatial_shape: Optional[tuple[int, int, int]] = None,
 ) -> dict[str, torch.Tensor]:
-    """Accumulate unnormalized visual evidence for Eq. (1).
+    """Accumulate CM-TTA's per-token similarity-map statistics.
 
-    No voxel-wise cosine is computed here.  The returned sums can be added
-    across patches and normalized/cosined exactly once at case level.
+    CM-TTA normalizes every visual token and the text feature first, computes
+    their cosine map, and only then averages the map inside the hard
+    foreground/background regions.  The returned similarity sums and masses
+    can therefore be added across patches and reduced exactly once at case
+    level.  The hard partition is detached by construction and cannot carry
+    a gradient to the segmentation probabilities.
     """
+    if text_features.ndim != 3:
+        raise ValueError(f"Expected text features (N,B,C), got {text_features.shape}")
     if logits.ndim != 5:
         raise ValueError(f"Expected logits (B,N,D,H,W) or (B,N,H,W,D), got {logits.shape}")
     batch = logits.shape[0]
@@ -272,15 +277,23 @@ def cac_components_from_features(
             mask.unsqueeze(1), size=vision.shape[2:], mode="nearest"
         ).squeeze(1)
     mask = mask.to(dtype=probability.dtype)
-    # CM-TTA's CAC uses hard foreground/background regions for visual feature
-    # pooling. Probability values are used only to form the 0.5 partition;
-    # they are never used as token weights.
-    foreground_mask = (probability > 0.5).to(dtype=probability.dtype) * mask
-    background_mask = (probability <= 0.5).to(dtype=probability.dtype) * mask
+    # CM-TTA uses probability only for a hard region partition.  In
+    # particular, the probability value itself must not weight visual tokens.
+    foreground_mask = (probability.detach() > 0.5).to(dtype=probability.dtype) * mask
+    background_mask = (probability.detach() <= 0.5).to(dtype=probability.dtype) * mask
+    visual_tokens = F.normalize(vision.float(), dim=1)
+    text = text_features[0].float()
+    if text.shape[0] != batch or text.shape[1] != vision.shape[1]:
+        raise ValueError(
+            "Projected text and visual feature batch/channel dimensions must agree: "
+            f"text={tuple(text.shape)}, visual={(batch, vision.shape[1])}"
+        )
+    text = F.normalize(text, dim=1).view(batch, vision.shape[1], 1, 1, 1)
+    similarity_map = (visual_tokens * text).sum(dim=1)
     return {
-        "foreground_sum": (vision * foreground_mask.unsqueeze(1)).sum(dim=(2, 3, 4)),
+        "foreground_sum": (similarity_map * foreground_mask).sum(dim=(1, 2, 3)),
         "foreground_mass": foreground_mask.sum(dim=(1, 2, 3)),
-        "background_sum": (vision * background_mask.unsqueeze(1)).sum(dim=(2, 3, 4)),
+        "background_sum": (similarity_map * background_mask).sum(dim=(1, 2, 3)),
         "background_mass": background_mask.sum(dim=(1, 2, 3)),
     }
 
@@ -290,19 +303,15 @@ def cac_from_components(
     foreground_mass: torch.Tensor,
     background_sum: torch.Tensor,
     background_mass: torch.Tensor,
-    text_features: torch.Tensor,
 ) -> torch.Tensor:
-    """Finish CAC after sums from all valid voxels have been accumulated."""
-    if text_features.ndim != 2:
-        raise ValueError(f"Expected text features (B,C), got {tuple(text_features.shape)}")
-    if foreground_sum.shape != background_sum.shape or foreground_sum.shape != text_features.shape:
-        raise ValueError("CAC feature sums and text features must have matching (B,C) shapes")
-    foreground = foreground_sum / foreground_mass.unsqueeze(1).clamp_min(1.0)
-    background = background_sum / background_mass.unsqueeze(1).clamp_min(1.0)
-    text = F.normalize(text_features.float(), dim=1)
-    foreground = F.normalize(foreground.float(), dim=1)
-    background = F.normalize(background.float(), dim=1)
-    return (foreground * text).sum(dim=1) - (background * text).sum(dim=1)
+    """Finish CAC from globally accumulated similarity-map sums and masses."""
+    if foreground_sum.ndim != 1 or background_sum.ndim != 1:
+        raise ValueError("CAC similarity sums must have shape (B,)")
+    if foreground_sum.shape != background_sum.shape:
+        raise ValueError("Foreground/background CAC statistics must have matching shapes")
+    foreground = foreground_sum / foreground_mass.clamp_min(1.0)
+    background = background_sum / background_mass.clamp_min(1.0)
+    return foreground - background
 
 
 def select_cac_view(
@@ -667,10 +676,12 @@ class VoxTellCMTTA:
             f"numel={self.ctx.numel()}"
         )
 
-    def _check_case_gradients(self) -> None:
+    def _check_case_gradients(self, allow_nonfinite: bool = False) -> None:
         if self.ctx.grad is None:
             raise RuntimeError("ctx did not receive a gradient during case adaptation")
-        if not torch.isfinite(self.ctx.grad).all() or self.ctx.grad.norm() == 0:
+        if self.ctx.grad.norm() == 0:
+            raise RuntimeError("ctx gradient is zero during case adaptation")
+        if not allow_nonfinite and not torch.isfinite(self.ctx.grad).all():
             raise RuntimeError("ctx gradient is zero or non-finite during case adaptation")
         frozen_modules = [("VoxTell", self.model)]
         if self.qwen_text_encoder is not None:
@@ -703,6 +714,7 @@ class VoxTellCMTTA:
             raise RuntimeError("VoxTell CAC feature hooks did not capture a forward pass")
         return cac_components_from_features(
             self._vision_features,
+            self._text_features,
             logits,
             valid_mask=valid_mask,
             feature_spatial_shape=self.feature_spatial_shape,
@@ -747,7 +759,6 @@ class VoxTellCMTTA:
         if len(valid_masks) != len(patches):
             raise ValueError("patches and valid_masks must have equal lengths")
         accumulator = None
-        text_sum = None
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
                 patch = patch.unsqueeze(0).to(self.device, non_blocking=True)
@@ -758,17 +769,13 @@ class VoxTellCMTTA:
                 logits = self._forward(patch, ctx)
                 components = self._cac_components(logits, valid_mask)
                 accumulator = self._add_components(accumulator, components)
-                text = self._text_features[0].float()
-                text_sum = text if text_sum is None else text_sum + text
         if accumulator is None:
             raise ValueError("A complete case must contain at least one patch")
-        text = text_sum / len(patches)
         score = cac_from_components(
             accumulator["foreground_sum"],
             accumulator["foreground_mass"],
             accumulator["background_sum"],
             accumulator["background_mass"],
-            text,
         )
         return float(score[0].detach().cpu())
 
@@ -855,7 +862,6 @@ class VoxTellCMTTA:
         if len(valid_masks) != len(patches):
             raise ValueError("patches and valid_masks must have equal lengths")
         accumulator = None
-        text_sum = None
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
                 if valid_mask is None:
@@ -887,14 +893,6 @@ class VoxTellCMTTA:
                         }
                     for key, value in components.items():
                         accumulator[key][start:end].add_(value)
-                    text = self._text_features[0].float()
-                    if text_sum is None:
-                        text_sum = torch.zeros(
-                            (total_views, text.shape[1]),
-                            device=text.device,
-                            dtype=text.dtype,
-                        )
-                    text_sum[start:end] += text
         if accumulator is None:
             raise ValueError("A complete case must contain at least one patch")
         foreground_counts = accumulator["foreground_mass"].detach().cpu().tolist()
@@ -912,7 +910,6 @@ class VoxTellCMTTA:
             accumulator["foreground_mass"],
             accumulator["background_sum"],
             accumulator["background_mass"],
-            text_sum,
         ).detach()
         selected, _ = select_cac_view(
             scores, torch.ones((scores.shape[0], 1), device=scores.device), self.selection_p
@@ -1124,7 +1121,6 @@ class VoxTellCMTTA:
         # later pass applies the global CAC derivative patch by patch, so no
         # collection of patch graphs is needed.
         case_components = None
-        case_text_sum = None
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
                 selected = self._make_view_batch(
@@ -1140,13 +1136,11 @@ class VoxTellCMTTA:
                     selected_logits = self._forward(selected, student_ctx)
                     components = self._cac_components(selected_logits, input_mask)
                     case_components = self._add_components(case_components, components)
-                    text = self._text_features[0].float()
-                    case_text_sum = text if case_text_sum is None else case_text_sum + text
-        if case_components is None or case_text_sum is None:
+        if case_components is None:
             raise RuntimeError("Selected-view case CAC accumulation produced no statistics")
 
-        # Differentiate the one global pooled-CAC expression with respect to
-        # its five aggregate inputs.  Each derivative is then supplied to a
+        # Differentiate the one global similarity-map CAC expression with
+        # respect to its four aggregate inputs.  Each derivative is then supplied to a
         # one-patch autograd graph below; this is exact chain-rule gradient
         # accumulation and has the same result as retaining every patch graph.
         global_inputs = tuple(
@@ -1158,11 +1152,8 @@ class VoxTellCMTTA:
                 "background_mass",
             )
         )
-        global_text = (case_text_sum / len(patches)).detach().requires_grad_(True)
-        case_cac_graph = cac_from_components(*global_inputs, global_text)
-        global_derivatives = torch.autograd.grad(
-            case_cac_graph[0], (*global_inputs, global_text)
-        )
+        case_cac_graph = cac_from_components(*global_inputs)
+        global_derivatives = torch.autograd.grad(case_cac_graph[0], global_inputs)
         cac_loss = -case_cac_graph[0].detach()
 
         # Backpropagate the derivative of w_cac * (-case_cac), one selected
@@ -1180,23 +1171,18 @@ class VoxTellCMTTA:
                 )
                 selected_logits = self._forward(selected, student_ctx)
                 components = self._cac_components(selected_logits, input_mask)
-                local_text = self._text_features[0].float()
             local_inputs = (
                 components["foreground_sum"],
                 components["foreground_mass"],
                 components["background_sum"],
                 components["background_mass"],
-                local_text,
             )
             local_tensors = []
             local_gradients = []
             for local, derivative in zip(local_inputs, global_derivatives):
                 if local.requires_grad:
                     local_tensors.append(local)
-                    text_factor = 1.0 / len(patches) if local is local_text else 1.0
-                    local_gradients.append(
-                        derivative * (-self.w_cac * text_factor)
-                    )
+                    local_gradients.append(derivative * (-self.w_cac))
             if local_tensors:
                 local_objective = sum(
                     (tensor * gradient).sum()
@@ -1275,14 +1261,32 @@ class VoxTellCMTTA:
         sums["cac_loss"] = float(cac_loss)
         sums["loss"] += self.w_cac * sums["cac_loss"]
 
+        # Check that backward produced a real ctx gradient before handing it
+        # to GradScaler.  Non-finite values are allowed to reach the scaler:
+        # an AMP overflow is a recoverable skipped step, not a protocol error.
+        self._check_case_gradients(allow_nonfinite=True)
+        scale_before_step = float(self.scaler.get_scale())
         self.scaler.unscale_(self.optimizer)
-        self._check_case_gradients()
-        ctx_before_step = self.ctx.detach().clone()
+        if torch.isfinite(self.ctx.grad).all():
+            self._check_case_gradients()
+        else:
+            warnings.warn(
+                "GradScaler detected a non-finite ctx gradient; this case's "
+                "optimizer step may be skipped",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         torch.nn.utils.clip_grad_norm_([self.ctx], float(self.args.grad_clip))
         self.scaler.step(self.optimizer)
         self.scaler.update()
-        if torch.equal(ctx_before_step, self.ctx.detach()):
-            raise RuntimeError("ctx was not updated during case adaptation")
+        scale_after_step = float(self.scaler.get_scale())
+        optimizer_step_skipped = scale_after_step < scale_before_step
+        if optimizer_step_skipped:
+            warnings.warn(
+                "GradScaler skipped the ctx optimizer step after AMP overflow",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         self.optimizer_step_count += 1
 
         self.short_ctx = short_snapshot
@@ -1297,6 +1301,7 @@ class VoxTellCMTTA:
             "num_views": 1 + self.num_aug_views,
             "num_patches": len(patches),
             "optimizer_steps_for_case": 1,
+            "optimizer_step_skipped": optimizer_step_skipped,
             "current_cac": current_cac,
             "historical_cac": historical_cac,
             "historical_weight": weight_historical,

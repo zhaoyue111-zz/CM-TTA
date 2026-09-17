@@ -54,31 +54,69 @@ def binary_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, floa
 
 
 def save_prediction_nifti(prediction: np.ndarray, image_path: Path, output_path: Path) -> None:
-    """Save a model-space (Z, Y, X) prediction in canonical NIfTI order."""
+    """Save prediction using the same reader/writer orientation as VoxTell.
+
+    ``load_ras_image`` returns the nnUNet model array and discards reader
+    properties.  Re-reading the source here gives ``NibabelIOWithReorient``
+    the properties it needs to restore the original NIfTI shape, affine, and
+    orientation; no model-space axis order is assumed in this script.
+    """
+    from nnunetv2.imageio.nibabel_reader_writer import NibabelIOWithReorient
     import nibabel as nib
 
-    source = nib.as_closest_canonical(nib.load(str(image_path)))
+    reader = NibabelIOWithReorient()
+    source_data, properties = reader.read_images([str(image_path)])
     prediction = np.asarray(prediction)
     if prediction.ndim != 3:
         raise ValueError(
             f"Prediction must be a 3-D model-space array, got {prediction.shape}"
         )
-    # NibabelIOWithReorient follows nnUNet/SimpleITK order internally and
-    # returns (Z, Y, X), whereas a NIfTI array is stored as (X, Y, Z).
-    prediction_nifti = prediction.transpose(2, 1, 0)
-    if tuple(source.shape[:3]) != tuple(prediction_nifti.shape):
+    if tuple(source_data.shape[1:]) != tuple(prediction.shape):
         raise ValueError(
             f"Prediction/source shape mismatch for {image_path.name}: "
-            f"model-space {prediction.shape} -> NIfTI {prediction_nifti.shape} "
-            f"vs {source.shape[:3]}"
+            f"model-space {prediction.shape} vs reader model shape {source_data.shape[1:]}"
         )
-    header = source.header.copy()
-    header.set_data_dtype(np.uint8)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    nib.save(
-        nib.Nifti1Image(prediction_nifti.astype(np.uint8), source.affine, header),
-        str(output_path),
-    )
+    reader.write_seg(prediction.astype(np.uint8, copy=False), str(output_path), properties)
+
+    # Fail early if a future reader/writer change silently alters the source
+    # image geometry.  The data values are checked through the same reader in
+    # tests; these checks cover the on-disk NIfTI geometry at runtime.
+    source_nifti = nib.load(str(image_path))
+    saved_nifti = nib.load(str(output_path))
+    if tuple(saved_nifti.shape[:3]) != tuple(source_nifti.shape[:3]):
+        raise RuntimeError(
+            f"Saved prediction shape does not match source {image_path.name}: "
+            f"{saved_nifti.shape[:3]} vs {source_nifti.shape[:3]}"
+        )
+    if not np.allclose(saved_nifti.affine, source_nifti.affine):
+        raise RuntimeError(
+            f"Saved prediction affine does not match source {image_path.name}"
+        )
+
+
+def check_prediction_nifti_geometry(
+    prediction_path: Path, image_path: Path, label_path: Path
+) -> None:
+    """Verify that prediction, image, and GT share the case geometry."""
+    import nibabel as nib
+
+    prediction = nib.load(str(prediction_path))
+    image = nib.load(str(image_path))
+    label = nib.load(str(label_path))
+    if tuple(image.shape[:3]) != tuple(label.shape[:3]):
+        raise ValueError(
+            f"Image/GT shape mismatch: {image_path.name} {image.shape[:3]} vs "
+            f"{label_path.name} {label.shape[:3]}"
+        )
+    if not np.allclose(image.affine, label.affine):
+        raise ValueError(f"Image/GT affine mismatch for {image_path.name}")
+    if tuple(prediction.shape[:3]) != tuple(image.shape[:3]):
+        raise ValueError(
+            f"Prediction/image shape mismatch: {prediction.shape[:3]} vs {image.shape[:3]}"
+        )
+    if not np.allclose(prediction.affine, image.affine):
+        raise ValueError(f"Prediction/image affine mismatch for {image_path.name}")
 
 
 def build_predictor(args):
@@ -121,7 +159,9 @@ def evaluate_case(
     target = np.squeeze(load_ras_label(str(label_path)))
     metrics = binary_metrics(prediction, target)
     stem = image_path.name[:-7] if image_path.name.endswith(".nii.gz") else image_path.stem
-    save_prediction_nifti(prediction, image_path, output_dir / f"{stem}.nii.gz")
+    prediction_path = output_dir / f"{stem}.nii.gz"
+    save_prediction_nifti(prediction, image_path, prediction_path)
+    check_prediction_nifti_geometry(prediction_path, image_path, label_path)
     return {"basename": image_path.name, **metrics}
 
 
