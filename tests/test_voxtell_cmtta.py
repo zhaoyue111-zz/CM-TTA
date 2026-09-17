@@ -25,7 +25,12 @@ from method.voxtell_cmtta import (
     tdc_from_components,
     tdc_patch_components,
 )
-from run_voxtell_cmtta import check_prediction_nifti_geometry, save_prediction_nifti
+from run_voxtell_cmtta import (
+    check_prediction_nifti_geometry,
+    save_prediction_nifti,
+    selector_only_case_report,
+    summarize_selector_only,
+)
 
 
 class TinyVoxTell(nn.Module):
@@ -418,6 +423,91 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertEqual(details["selected_view"], selected)
         finally:
             adapter.close()
+
+    def test_quality_only_rank_does_not_add_entropy(self):
+        patch = torch.zeros(1, 2, 2, 2)
+        valid = torch.ones(2, 2, 2)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.9, "offset": 0.1},
+            {"scale": 1.1, "offset": -0.1},
+        ]
+        for metric, rank_key in (("cac", "cac_rank"), ("tdc", "tdc_rank")):
+            adapter = VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric=metric,
+                    use_entropy_rank=False,
+                    num_aug_views=2,
+                    view_batch_size=1,
+                ),
+            )
+            try:
+                adapter._select_case_view(
+                    [patch], params, adapter.ctx.detach(), [valid]
+                )
+                details = adapter.last_view_selection
+                self.assertTrue(
+                    torch.equal(
+                        torch.tensor(details["combined_rank"]),
+                        torch.tensor(details[rank_key]),
+                    )
+                )
+            finally:
+                adapter.close()
+
+    def test_selector_only_view_selection_does_not_update_prompt_or_optimizer(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(num_aug_views=2, view_batch_size=1),
+        )
+        try:
+            patch = torch.zeros(1, 2, 2, 2)
+            valid = torch.ones(2, 2, 2)
+            params = [
+                {"scale": 1.0, "offset": 0.0},
+                {"scale": 0.9, "offset": 0.1},
+                {"scale": 1.1, "offset": -0.1},
+            ]
+            before = adapter.ctx_delta.detach().clone()
+            adapter._select_case_view(
+                [patch], params, adapter.ctx_delta.detach(), [valid], collect_tdc=True
+            )
+            self.assertTrue(torch.equal(adapter.ctx_delta.detach(), before))
+            self.assertEqual(adapter.optimizer_step_count, 0)
+            self.assertIsNone(adapter.ctx_delta.grad)
+        finally:
+            adapter.close()
+
+    def test_selector_only_report_has_four_shared_top1_selectors(self):
+        view_metrics = [
+            {"view": 0, "GT_Dice_before_adaptation": 0.4},
+            {"view": 1, "GT_Dice_before_adaptation": 0.9},
+            {"view": 2, "GT_Dice_before_adaptation": 0.6},
+        ]
+        selection = {
+            "cac": [0.8, 0.2, 0.5],
+            "tdc": [0.1, 0.9, 0.4],
+            "cac_rank": [0.0, 2.0, 1.0],
+            "tdc_rank": [2.0, 0.0, 1.0],
+            "cac_entropy_rank": [0.0, 2.0, 1.0],
+            "tdc_entropy_rank": [1.0, 1.0, 1.0],
+            "selected_view": 0,
+        }
+        report = selector_only_case_report(view_metrics, selection)
+        self.assertEqual(
+            set(report["selectors"]),
+            {"cac_only", "tdc_only", "cac_entropy", "tdc_entropy"},
+        )
+        for result in report["selectors"].values():
+            self.assertEqual(result["oracle_best_view"], 1)
+            self.assertIn("regret", result)
+        summary = summarize_selector_only([report])
+        self.assertEqual(set(summary), set(report["selectors"]))
 
     def test_cac_matches_source_similarity_map_definition(self):
         vision = torch.tensor(

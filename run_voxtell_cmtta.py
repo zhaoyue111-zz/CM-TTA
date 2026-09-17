@@ -304,6 +304,74 @@ def attach_view_selection_metrics(
     return metrics
 
 
+def selector_only_case_report(
+    view_metrics: list[dict[str, float | bool | int | str | None]],
+    view_selection: dict[str, list[float] | int | None],
+) -> dict:
+    """Evaluate all four top-1 selectors on one shared frozen-view result."""
+    if not view_metrics:
+        raise ValueError("Selector-only evaluation requires at least one view")
+    if view_selection["tdc"] is None:
+        raise RuntimeError("Selector-only evaluation requires TDC statistics")
+    dice = np.asarray(
+        [float(metric["GT_Dice_before_adaptation"]) for metric in view_metrics],
+        dtype=np.float64,
+    )
+    if not np.isfinite(dice).all():
+        raise RuntimeError("Selector-only GT Dice contains a non-finite value")
+    oracle_view = int(np.argmax(dice))
+    oracle_dice = float(dice[oracle_view])
+    rank_values = {
+        "cac_only": view_selection["cac_rank"],
+        "tdc_only": view_selection["tdc_rank"],
+        "cac_entropy": view_selection["cac_entropy_rank"],
+        "tdc_entropy": view_selection["tdc_entropy_rank"],
+    }
+    ranks = {}
+    for name, values in rank_values.items():
+        if values is None:
+            raise RuntimeError(f"Selector-only statistics missing {name} ranks")
+        rank = np.asarray(values, dtype=np.float64)
+        if rank.shape != dice.shape:
+            raise RuntimeError(
+                f"{name} rank count {rank.size} does not match view count {dice.size}"
+            )
+        if not np.isfinite(rank).all():
+            raise RuntimeError(f"Selector-only {name} ranks contain non-finite values")
+        ranks[name] = rank
+    selectors = {}
+    for name, rank in ranks.items():
+        selected_view = int(np.argsort(rank, kind="stable")[0])
+        selected_dice = float(dice[selected_view])
+        selectors[name] = {
+            "selected_view": selected_view,
+            "selected_GT_Dice": selected_dice,
+            "oracle_best_view": oracle_view,
+            "oracle_GT_Dice": oracle_dice,
+            "regret": oracle_dice - selected_dice,
+            "exact_top1_hit": selected_view == oracle_view,
+        }
+    return {"oracle_best_view": oracle_view, "oracle_GT_Dice": oracle_dice, "selectors": selectors}
+
+
+def summarize_selector_only(reports: list[dict]) -> dict[str, dict[str, float | int]]:
+    """Summarize hit rate and Dice regret for selector-only reports."""
+    methods = ("cac_only", "tdc_only", "cac_entropy", "tdc_entropy")
+    summary = {}
+    count = len(reports)
+    for method in methods:
+        rows = [report["selectors"][method] for report in reports]
+        regrets = np.asarray([float(row["regret"]) for row in rows], dtype=np.float64)
+        hits = sum(bool(row["exact_top1_hit"]) for row in rows)
+        summary[method] = {
+            "exact_top1_hit_count": int(hits),
+            "exact_top1_hit_rate": float(hits / max(1, count)),
+            "mean_regret": float(regrets.mean()) if count else 0.0,
+            "max_regret": float(regrets.max()) if count else 0.0,
+        }
+    return summary
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Original CM-TTA with VoxTell on P0")
     parser.add_argument("--data_dir", default="/data/zy/CT_MRI_DATA_3D")
@@ -329,6 +397,25 @@ def parse_args() -> argparse.Namespace:
         choices=("cac", "tdc"),
         default="cac",
         help="View quality used for rank fusion; default preserves CM-TTA CAC.",
+    )
+    entropy_group = parser.add_mutually_exclusive_group()
+    entropy_group.add_argument(
+        "--use_entropy_rank",
+        dest="use_entropy_rank",
+        action="store_true",
+        help="Include entropy rank in view selection (default).",
+    )
+    entropy_group.add_argument(
+        "--no_entropy_rank",
+        dest="use_entropy_rank",
+        action="store_false",
+        help="Use only the selected CAC/TDC quality rank.",
+    )
+    parser.set_defaults(use_entropy_rank=True)
+    parser.add_argument(
+        "--selector_only_eval",
+        action="store_true",
+        help="Evaluate CAC/TDC selectors without any adaptation or optimizer update.",
     )
     parser.add_argument("--num_aug_views", type=int, default=9)
     parser.add_argument("--view_batch_size", type=int, default=1)
@@ -383,9 +470,12 @@ def main() -> None:
 
     case_rows = []
     history = []
+    selector_reports = []
     predictions_dir = output_dir / "predictions"
     try:
         for case_index, (image_path, label_path) in enumerate(entries, start=1):
+            if args.selector_only_eval:
+                adapter.reset_case_adaptation_state()
             image = load_ras_image(str(image_path))
             data, bbox, original_shape = predictor.preprocess(image)
             patches, valid_masks, _locations, _padded_shape = make_case_patches(
@@ -419,6 +509,9 @@ def main() -> None:
             zero_shot_sliding_dice = binary_metrics(
                 zero_shot_sliding_prediction, zero_shot_target
             )["Dice"]
+            zero_shot_sliding_miou = binary_metrics(
+                zero_shot_sliding_prediction, zero_shot_target
+            )["mIoU"]
             zero_shot_nonoverlap_dice = binary_metrics(
                 zero_shot_nonoverlap_prediction, zero_shot_target
             )["Dice"]
@@ -448,6 +541,70 @@ def main() -> None:
                 selection_text_feature_before,
                 prepared_case["params"],
             )
+
+            if args.selector_only_eval:
+                # Compute both quality families from this one shared frozen
+                # view batch.  No backward, optimizer, or prompt update occurs.
+                adapter._select_case_view(
+                    patches,
+                    prepared_case["params"],
+                    prepared_case["short_ctx"],
+                    prepared_case["valid_masks"],
+                    collect_tdc=True,
+                )
+                selection = dict(adapter.last_view_selection)
+                view_metrics = attach_view_selection_metrics(
+                    view_gt_metrics_before, selection
+                )
+                selector_report = selector_only_case_report(view_metrics, selection)
+                selector_reports.append(selector_report)
+                row = {
+                    "basename": image_path.name,
+                    "Dice": zero_shot_sliding_dice,
+                    "mIoU": zero_shot_sliding_miou,
+                    "selected_view": None,
+                    "selected_view_GT_Dice_before_adaptation": None,
+                    "Dice_change_from_before_adaptation": 0.0,
+                    "selector_only_eval": True,
+                    "view_metrics": view_metrics,
+                    "selector_results": selector_report["selectors"],
+                    "zero_shot_sliding_dice": zero_shot_sliding_dice,
+                    "zero_shot_nonoverlap_dice": zero_shot_nonoverlap_dice,
+                    "zero_shot_patch_gap": zero_shot_patch_gap,
+                }
+                case_rows.append(row)
+                for view_metric in view_metrics:
+                    print(
+                        f"case {case_index}/{len(entries)} {image_path.name} "
+                        f"view={view_metric['view']} "
+                        f"GT_Dice_before_adaptation="
+                        f"{view_metric['GT_Dice_before_adaptation']:.4f} "
+                        f"CAC={view_metric['CAC']:.6f} "
+                        f"TDC={view_metric['TDC']} "
+                        f"entropy={view_metric['entropy']:.6f} "
+                        f"CAC_rank={view_metric['CAC_rank']:.1f} "
+                        f"TDC_rank={view_metric['TDC_rank']} "
+                        f"entropy_rank={view_metric['entropy_rank']:.1f} "
+                        f"combined_rank={view_metric['combined_rank']:.1f} "
+                        f"selected={view_metric['selected']}"
+                    )
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    f"selector_only={json.dumps(selector_report['selectors'], sort_keys=True)}"
+                )
+                history.append(
+                    {
+                        "case": image_path.name,
+                        "selector_only_eval": True,
+                        "view_metrics": view_metrics,
+                        "selector_results": selector_report["selectors"],
+                        "zero_shot_sliding_dice": zero_shot_sliding_dice,
+                        "zero_shot_nonoverlap_dice": zero_shot_nonoverlap_dice,
+                        "zero_shot_patch_gap": zero_shot_patch_gap,
+                        **selection,
+                    }
+                )
+                continue
 
             # One complete case is one adaptation time step.  adapt_case sums
             # all patch losses and performs exactly one optimizer/LSPM update.
@@ -491,6 +648,11 @@ def main() -> None:
                 predictions_dir,
             )
             row["adaptation_quality"] = trace["selected_cac"]
+            row["selected_view"] = trace["selected_view"]
+            row["selected_view_GT_Dice_before_adaptation"] = selected_view_dice
+            row["Dice_change_from_before_adaptation"] = (
+                row["Dice"] - zero_shot_sliding_dice
+            )
             row["view_metrics"] = row_view_metrics
             row["zero_shot_sliding_dice"] = zero_shot_sliding_dice
             row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
@@ -554,8 +716,13 @@ def main() -> None:
         "Dice": float(np.mean([row["Dice"] for row in case_rows])),
         "mIoU": float(np.mean([row["mIoU"] for row in case_rows])),
     }
+    output = {"cases": case_rows, "average": average}
+    if args.selector_only_eval:
+        selector_summary = summarize_selector_only(selector_reports)
+        output["selector_only_summary"] = selector_summary
+        print(f"Selector-only summary: {json.dumps(selector_summary, sort_keys=True)}")
     (output_dir / "results.json").write_text(
-        json.dumps({"cases": case_rows, "average": average}, indent=2, ensure_ascii=False),
+        json.dumps(output, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     save_cmtta_checkpoint(str(output_dir / "last.pt"), adapter, args, history)

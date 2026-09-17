@@ -596,6 +596,7 @@ class VoxTellCMTTA:
         self.num_aug_views = int(args.num_aug_views)  # K; total views are K+1.
         self.selection_p = float(args.selection_p)
         self.view_selection_metric = str(getattr(args, "view_selection_metric", "cac"))
+        self.use_entropy_rank = bool(getattr(args, "use_entropy_rank", True))
         if self.view_selection_metric not in ("cac", "tdc"):
             raise ValueError("view_selection_metric must be 'cac' or 'tdc'")
         if self.num_aug_views < 1:
@@ -643,6 +644,19 @@ class VoxTellCMTTA:
         self.last_trace = {}
         self.last_view_selection = {}
         self._print_trainable_parameters()
+
+    def reset_case_adaptation_state(self) -> None:
+        """Reset prompt/memory/optimizer state for selector-only evaluation."""
+        self.ctx_delta.data.copy_(self.initial_ctx_delta)
+        self.ctx_delta.grad = None
+        self.short_delta = None
+        self.long_delta = None
+        self.short_memory = ShortPromptMemory(self.short_memory.max_length)
+        self.optimizer.state.clear()
+        self.optimizer.zero_grad(set_to_none=True)
+        self.optimizer_step_count = 0
+        self.last_trace = {}
+        self.last_view_selection = {}
 
     def _capture(self, name):
         def hook(_module, _inputs, output):
@@ -1053,12 +1067,14 @@ class VoxTellCMTTA:
         params: list[dict[str, float]],
         short_ctx: torch.Tensor,
         valid_masks: Optional[list[torch.Tensor]] = None,
+        collect_tdc: bool = False,
     ) -> tuple[int, torch.Tensor]:
         if valid_masks is None:
             valid_masks = [None] * len(patches)
         if len(valid_masks) != len(patches):
             raise ValueError("patches and valid_masks must have equal lengths")
         accumulator = None
+        collect_tdc = collect_tdc or self.view_selection_metric == "tdc"
         tdc_accumulator = None
         tdc_finite = None
         with torch.no_grad():
@@ -1076,7 +1092,7 @@ class VoxTellCMTTA:
                     input_mask_batch = valid_mask.unsqueeze(0).to(
                         self.device, non_blocking=True
                     ).expand(end - start, -1, -1, -1)
-                    if self.view_selection_metric == "tdc":
+                    if collect_tdc:
                         decoder_outputs = self._forward_decoder_outputs(
                             view_batch, short_ctx.detach()
                         )
@@ -1110,7 +1126,7 @@ class VoxTellCMTTA:
                             dtype=local_entropy_sum.dtype,
                         )
                         entropy_mass = torch.zeros_like(entropy_sum)
-                        if self.view_selection_metric == "tdc":
+                        if collect_tdc:
                             tdc_accumulator = {
                                 key: torch.zeros(
                                     (total_views, *value.shape[1:]),
@@ -1155,7 +1171,7 @@ class VoxTellCMTTA:
             raise RuntimeError("Case entropy accumulation produced no statistics")
         entropy_scores = (entropy_sum / entropy_mass.clamp_min(1.0)).detach()
         tdc_scores = None
-        if self.view_selection_metric == "tdc":
+        if collect_tdc:
             if tdc_accumulator is None or tdc_finite is None:
                 raise RuntimeError("TDC case accumulation produced no statistics")
             tdc_scores, _pair_dice, _pair_valid = tdc_from_components(
@@ -1164,19 +1180,32 @@ class VoxTellCMTTA:
                 tdc_accumulator["count2"],
                 tdc_finite,
             )
-            selection_scores = tdc_scores.detach()
+            if self.view_selection_metric == "tdc":
+                selection_scores = tdc_scores.detach()
+            else:
+                selection_scores = scores
         else:
             selection_scores = scores
+        cac_rank = (-scores).argsort().argsort().float()
+        tdc_rank = None
+        if tdc_scores is not None:
+            tdc_rank = _average_tie_rank_1d(tdc_scores, descending=True)
+        cac_entropy_rank = entropy_scores.argsort().argsort().float()
+        tdc_entropy_rank = (
+            _average_tie_rank_1d(entropy_scores, descending=False)
+            if tdc_scores is not None
+            else None
+        )
         if self.view_selection_metric == "tdc":
             # CM-SFDA uses zero-based average ranks for ties in both TDC and
             # entropy; retain the existing argsort ranks for CAC compatibility.
-            entropy_rank = _average_tie_rank_1d(entropy_scores, descending=False)
-            quality_rank = _average_tie_rank_1d(selection_scores, descending=True)
+            entropy_rank = tdc_entropy_rank
+            quality_rank = tdc_rank
         else:
-            entropy_rank = entropy_scores.argsort().argsort().float()
-            quality_rank = (-selection_scores).argsort().argsort().float()
-        combined_rank = entropy_rank + quality_rank
-        if self.view_selection_metric == "tdc":
+            entropy_rank = cac_entropy_rank
+            quality_rank = cac_rank
+        combined_rank = quality_rank if not self.use_entropy_rank else entropy_rank + quality_rank
+        if self.view_selection_metric == "tdc" or not self.use_entropy_rank:
             num_selected = max(1, int(len(params) * self.selection_p))
             if num_selected != 1:
                 raise ValueError(
@@ -1195,11 +1224,13 @@ class VoxTellCMTTA:
             "selection_metric": self.view_selection_metric,
             "selection_scores": selection_scores.cpu().tolist(),
             "entropy": entropy_scores.cpu().tolist(),
-            "cac_rank": (
-                (-scores).argsort().argsort().float().cpu().tolist()
-            ),
-            "tdc_rank": None if tdc_scores is None else quality_rank.cpu().tolist(),
+            "cac_rank": cac_rank.cpu().tolist(),
+            "tdc_rank": None if tdc_rank is None else tdc_rank.cpu().tolist(),
             "entropy_rank": entropy_rank.cpu().tolist(),
+            "cac_entropy_rank": cac_entropy_rank.cpu().tolist(),
+            "tdc_entropy_rank": (
+                None if tdc_entropy_rank is None else tdc_entropy_rank.cpu().tolist()
+            ),
             "combined_rank": combined_rank.cpu().tolist(),
             "selected_view": selected,
         }
