@@ -502,11 +502,13 @@ def main() -> None:
                     f"view={view_metric['view']} "
                     f"GT_Dice_before_adaptation="
                     f"{view_metric['GT_Dice_before_adaptation']:.4f} "
+                    f"CAC={view_metric['CAC']:.6f} "
                     f"TDC={view_metric['TDC']} "
                     f"entropy={view_metric['entropy']:.6f} "
                     f"TDC_rank={view_metric['TDC_rank']} "
                     f"entropy_rank={view_metric['entropy_rank']:.1f} "
                     f"combined_rank={view_metric['combined_rank']:.1f} "
+                    f"selection_metric={view_metric['selection_metric']} "
                     f"selected={view_metric['selected']}"
                 )
             print(
