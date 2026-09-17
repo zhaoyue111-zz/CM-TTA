@@ -1,6 +1,9 @@
 import types
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -16,15 +19,16 @@ from method.voxtell_cmtta import (
     select_cac_view,
     soft_dice_loss,
 )
+from run_voxtell_cmtta import save_prediction_nifti
 
 
 class TinyVoxTell(nn.Module):
     """Small frozen VoxTell-shaped network for protocol tests."""
 
-    def __init__(self):
+    def __init__(self, text_dim=2):
         super().__init__()
         self.project_bottleneck_embed = nn.Linear(1, 2, bias=False)
-        self.project_text_embed = nn.Linear(2, 2, bias=False)
+        self.project_text_embed = nn.Linear(text_dim, 2, bias=False)
 
     def forward(self, image, text_embedding):
         batch, _, depth, height, width = image.shape
@@ -40,6 +44,35 @@ class TinyVoxTell(nn.Module):
         # projected visual token grid.
         prompt_bias = projected_text.mean(dim=-1).transpose(0, 1).view(batch, 1, 1, 1, 1)
         return image[:, :1] + prompt_bias
+
+
+class TinyQwenTokenizer:
+    """Minimal tokenizer exposing the Hugging Face fields used by the adapter."""
+
+    def __call__(self, texts, **kwargs):
+        if kwargs.get("add_special_tokens") is False:
+            return {"input_ids": torch.tensor([[11]]), "attention_mask": torch.tensor([[1]])}
+        return {
+            "input_ids": torch.tensor([[1, 10, 11, 2]]),
+            "attention_mask": torch.tensor([[1, 1, 1, 1]]),
+            "offset_mapping": torch.tensor([[[0, 0], [0, 7], [7, 12], [0, 0]]]),
+        }
+
+
+class TinyQwen(nn.Module):
+    """Frozen differentiable text encoder used to test ctx input learning."""
+
+    def __init__(self):
+        super().__init__()
+        self.token_embedding = nn.Embedding(32, 4)
+
+    def get_input_embeddings(self):
+        return self.token_embedding
+
+    def forward(self, inputs_embeds, attention_mask):
+        del attention_mask
+        hidden = inputs_embeds + inputs_embeds.mean(dim=1, keepdim=True)
+        return types.SimpleNamespace(last_hidden_state=hidden)
 
 
 def make_args(**overrides):
@@ -59,19 +92,72 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
-    def test_only_soft_prompt_and_qwen_are_frozen(self):
-        model = TinyVoxTell()
-        qwen = nn.Linear(2, 2)
-        adapter = VoxTellCMTTA(model, torch.ones(1, 1, 2), "cpu", make_args(), qwen)
+    def test_prediction_is_transposed_back_to_nifti_axis_order(self):
+        import nibabel as nib
+
+        with TemporaryDirectory() as temp_dir:
+            temp_dir = Path(temp_dir)
+            image_path = temp_dir / "image.nii.gz"
+            output_path = temp_dir / "prediction.nii.gz"
+            source_data = np.arange(4 * 3 * 2, dtype=np.float32).reshape(4, 3, 2)
+            affine = np.diag([1.0, 2.0, 3.0, 1.0])
+            nib.save(nib.Nifti1Image(source_data, affine), str(image_path))
+
+            model_space_prediction = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
+            save_prediction_nifti(model_space_prediction, image_path, output_path)
+
+            saved = nib.as_closest_canonical(nib.load(str(output_path)))
+            self.assertEqual(tuple(saved.shape), (4, 3, 2))
+            self.assertTrue(
+                np.array_equal(saved.get_fdata(), model_space_prediction.transpose(2, 1, 0))
+            )
+            self.assertTrue(np.allclose(saved.affine, affine))
+
+    def test_only_ctx_and_qwen_are_frozen(self):
+        model = TinyVoxTell(text_dim=4)
+        qwen = TinyQwen()
+        adapter = VoxTellCMTTA(
+            model,
+            None,
+            "cpu",
+            make_args(),
+            qwen,
+            TinyQwenTokenizer(),
+            text_prompt="liver",
+            n_ctx=2,
+            formatted_text_prompt="prefix liver",
+        )
         try:
-            self.assertEqual(adapter.optimizer_parameters, [adapter.soft_prompt])
-            self.assertTrue(adapter.soft_prompt.requires_grad)
+            self.assertEqual(adapter.optimizer_parameters, [adapter.ctx])
+            self.assertTrue(adapter.ctx.requires_grad)
+            self.assertEqual(tuple(adapter.ctx.shape), (2, 4))
+            self.assertEqual(tuple(adapter._encode_ctx(adapter.ctx).shape), (1, 1, 4))
+            self.assertEqual(adapter._ctx_insert_index, 2)
+            self.assertTrue(
+                torch.equal(
+                    adapter._fixed_token_embeddings[0, 2],
+                    qwen.token_embedding.weight[11],
+                )
+            )
             self.assertTrue(all(not p.requires_grad for p in model.parameters()))
-            self.assertTrue(all(not p.requires_grad for p in qwen.parameters()))
-            self.assertEqual(adapter.soft_prompt.dtype, torch.float32)
+            self.assertTrue(all(not p.requires_grad for p in adapter.qwen_text_encoder.parameters()))
+            self.assertEqual(adapter.ctx.dtype, torch.float32)
             self.assertIsInstance(adapter.optimizer, torch.optim.Adam)
             self.assertEqual(adapter.optimizer.param_groups[0]["lr"], 0.05)
             self.assertEqual(adapter.optimizer.param_groups[0]["weight_decay"], 0.0)
+
+            adapter._encode_ctx(adapter.ctx).sum().backward()
+            self.assertIsNotNone(adapter.ctx.grad)
+            self.assertGreater(float(adapter.ctx.grad.norm()), 0.0)
+            self.assertTrue(all(p.grad is None for p in model.parameters()))
+            self.assertTrue(all(p.grad is None for p in qwen.parameters()))
+            adapter.optimizer.zero_grad(set_to_none=True)
+            ctx_before = adapter.ctx.detach().clone()
+            trace = adapter.adapt_case([torch.zeros(1, 2, 2, 2)])
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertFalse(torch.equal(ctx_before, adapter.ctx.detach()))
+            self.assertTrue(all(p.grad is None for p in model.parameters()))
+            self.assertTrue(all(p.grad is None for p in qwen.parameters()))
         finally:
             adapter.close()
 
@@ -193,7 +279,7 @@ class VoxTellCMTTATest(unittest.TestCase):
             )
             try:
                 selected, scores = adapter._select_case_view(
-                    patches, params, adapter.soft_prompt.detach(), valid_masks
+                    patches, params, adapter.ctx.detach(), valid_masks
                 )
                 results.append((selected, scores))
             finally:
@@ -242,8 +328,8 @@ class VoxTellCMTTATest(unittest.TestCase):
                 selected = adapter._make_view_batch(
                     patch, params, valid_mask, 1, 2
                 )
-                student_prompt = adapter.soft_prompt.detach().clone() + (
-                    adapter.soft_prompt - adapter.soft_prompt.detach()
+                student_prompt = adapter.ctx.detach().clone() + (
+                    adapter.ctx - adapter.ctx.detach()
                 )
                 logits = adapter._forward(selected, student_prompt)
                 components = adapter._cac_components(
@@ -264,7 +350,7 @@ class VoxTellCMTTATest(unittest.TestCase):
                 text_sum / len(patches),
             )
             (-adapter.w_cac * case_cac[0]).backward()
-            return adapter.soft_prompt.grad.detach().clone()
+            return adapter.ctx.grad.detach().clone()
 
         try:
             direct_gradient = direct_cac_gradient()
@@ -277,11 +363,11 @@ class VoxTellCMTTATest(unittest.TestCase):
                 valid_masks,
                 params,
                 1,
-                adapter.soft_prompt.detach().clone(),
+                adapter.ctx.detach().clone(),
                 1.0,
                 False,
             )
-            two_stage_gradient = adapter.soft_prompt.grad.detach().clone()
+            two_stage_gradient = adapter.ctx.grad.detach().clone()
         finally:
             adapter.close()
 
@@ -319,12 +405,12 @@ class VoxTellCMTTATest(unittest.TestCase):
                 masks,
                 params,
                 1,
-                adapter.soft_prompt.detach().clone(),
+                adapter.ctx.detach().clone(),
                 1.0,
-                adapter.soft_prompt.detach().clone(),
+                adapter.ctx.detach().clone(),
                 False,
             )
-            return dice, entropy, adapter.soft_prompt.grad.detach().clone()
+            return dice, entropy, adapter.ctx.grad.detach().clone()
 
         def direct_run(adapter, patches, masks):
             adapter.optimizer.zero_grad(set_to_none=True)
@@ -335,11 +421,11 @@ class VoxTellCMTTATest(unittest.TestCase):
                 selected = adapter._make_view_batch(patch, params, mask, 1, 2)
                 with torch.no_grad():
                     pseudo = torch.sigmoid(
-                        adapter._forward(selected, adapter.soft_prompt.detach())[:, :1]
+                        adapter._forward(selected, adapter.ctx.detach())[:, :1]
                     )
                 views = adapter._make_view_batch(patch, params, mask, 0, 2)
-                prompt = adapter.soft_prompt.detach().clone() + (
-                    adapter.soft_prompt - adapter.soft_prompt.detach()
+                prompt = adapter.ctx.detach().clone() + (
+                    adapter.ctx - adapter.ctx.detach()
                 )
                 probabilities = torch.sigmoid(adapter._forward(views, prompt)[:, :1])
                 local_mask = mask.unsqueeze(0).expand(2, -1, -1, -1)
@@ -358,7 +444,7 @@ class VoxTellCMTTATest(unittest.TestCase):
             dice = dice.mean()
             entropy = entropy_sum / entropy_mass.clamp_min(1.0)
             (dice + adapter.w_entropy * entropy).backward()
-            return float(dice.detach()), float(entropy.detach()), adapter.soft_prompt.grad.detach().clone()
+            return float(dice.detach()), float(entropy.detach()), adapter.ctx.grad.detach().clone()
 
         unsplit = make_adapter()
         split = make_adapter()
@@ -476,7 +562,7 @@ class VoxTellCMTTATest(unittest.TestCase):
 
         def direct_gradient(adapter):
             adapter.optimizer.zero_grad(set_to_none=True)
-            short_value = adapter.soft_prompt.detach().clone()
+            short_value = adapter.ctx.detach().clone()
             long_prompt = short_value.clone()
             dice_stats = None
             entropy_sum = None
@@ -485,7 +571,7 @@ class VoxTellCMTTATest(unittest.TestCase):
             text_sum = None
             with torch.autocast(device_type="cuda", enabled=True):
                 student_prompt = short_value + (
-                    adapter.soft_prompt - adapter.soft_prompt.detach()
+                    adapter.ctx - adapter.ctx.detach()
                 )
                 for patch, valid_mask in zip(patches, valid_masks):
                     selected = adapter._make_view_batch(
@@ -547,14 +633,14 @@ class VoxTellCMTTATest(unittest.TestCase):
                 )[0]
                 objective = dice + adapter.w_entropy * entropy - adapter.w_cac * case_cac
             adapter.scaler.scale(objective).backward()
-            return adapter.soft_prompt.grad.detach().clone()
+            return adapter.ctx.grad.detach().clone()
 
         direct_adapter = make_adapter()
         two_stage_adapter = make_adapter()
         try:
             direct_gradient_value = direct_gradient(direct_adapter)
             two_stage_adapter.optimizer.zero_grad(set_to_none=True)
-            short_value = two_stage_adapter.soft_prompt.detach().clone()
+            short_value = two_stage_adapter.ctx.detach().clone()
             two_stage_adapter._backward_case_supervision(
                 patches,
                 valid_masks,
@@ -574,7 +660,7 @@ class VoxTellCMTTATest(unittest.TestCase):
                 1.0,
                 True,
             )
-            two_stage_gradient_value = two_stage_adapter.soft_prompt.grad.detach().clone()
+            two_stage_gradient_value = two_stage_adapter.ctx.grad.detach().clone()
         finally:
             direct_adapter.close()
             two_stage_adapter.close()
@@ -601,22 +687,22 @@ class VoxTellCMTTATest(unittest.TestCase):
         memory = ShortPromptMemory(2)
         memory.append(torch.tensor([1.0]), 0.0)
         memory.append(torch.tensor([3.0]), 2.0)
-        fused = memory.weighted_prompt(torch.device("cpu"), torch.float32)
+        fused = memory.weighted_ctx(torch.device("cpu"), torch.float32)
         self.assertGreater(float(fused), 2.5)
         memory.append(torch.tensor([5.0]), 4.0)
         self.assertEqual(len(memory), 2)
-        self.assertEqual([float(x) for x in memory.prompts], [3.0, 5.0])
+        self.assertEqual([float(x) for x in memory.contexts], [3.0, 5.0])
 
     def test_checkpoint_contains_lspm_optimizer_and_scaler_state(self):
         adapter = VoxTellCMTTA(TinyVoxTell(), torch.zeros(1, 1, 2), "cpu", make_args())
         try:
             state = adapter.state_dict()
             self.assertTrue(
-                set(("soft_prompt", "short_prompt", "long_prompt", "short_memory", "optimizer", "scaler"))
+                set(("ctx", "initial_ctx", "short_ctx", "long_ctx", "ctx_memory", "optimizer", "scaler"))
                 <= set(state)
             )
-            self.assertIn("prompts", state["short_memory"])
-            self.assertIn("cacs", state["short_memory"])
+            self.assertIn("ctxs", state["ctx_memory"])
+            self.assertIn("cacs", state["ctx_memory"])
         finally:
             adapter.close()
 

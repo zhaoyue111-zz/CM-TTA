@@ -54,18 +54,31 @@ def binary_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, floa
 
 
 def save_prediction_nifti(prediction: np.ndarray, image_path: Path, output_path: Path) -> None:
+    """Save a model-space (Z, Y, X) prediction in canonical NIfTI order."""
     import nibabel as nib
 
     source = nib.as_closest_canonical(nib.load(str(image_path)))
-    if tuple(source.shape[:3]) != tuple(prediction.shape):
+    prediction = np.asarray(prediction)
+    if prediction.ndim != 3:
+        raise ValueError(
+            f"Prediction must be a 3-D model-space array, got {prediction.shape}"
+        )
+    # NibabelIOWithReorient follows nnUNet/SimpleITK order internally and
+    # returns (Z, Y, X), whereas a NIfTI array is stored as (X, Y, Z).
+    prediction_nifti = prediction.transpose(2, 1, 0)
+    if tuple(source.shape[:3]) != tuple(prediction_nifti.shape):
         raise ValueError(
             f"Prediction/source shape mismatch for {image_path.name}: "
-            f"{prediction.shape} vs {source.shape[:3]}"
+            f"model-space {prediction.shape} -> NIfTI {prediction_nifti.shape} "
+            f"vs {source.shape[:3]}"
         )
     header = source.header.copy()
     header.set_data_dtype(np.uint8)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    nib.save(nib.Nifti1Image(prediction.astype(np.uint8), source.affine, header), str(output_path))
+    nib.save(
+        nib.Nifti1Image(prediction_nifti.astype(np.uint8), source.affine, header),
+        str(output_path),
+    )
 
 
 def build_predictor(args):
@@ -92,12 +105,12 @@ def evaluate_case(
     data: torch.Tensor,
     bbox,
     original_shape,
-    prompt: torch.Tensor,
+    text_feature: torch.Tensor,
     output_dir: Path,
 ) -> dict[str, float | str]:
     with torch.no_grad():
         logits = predictor.predict_sliding_window_return_logits(
-            data, prompt.to(predictor.device)
+            data, text_feature.to(predictor.device)
         ).float().cpu()
     cropped_prediction = (torch.sigmoid(logits) > 0.5).numpy().astype(np.uint8)
     prediction = insert_crop_into_image(
@@ -120,6 +133,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_dir", default=str(DEFAULT_VOXTELL_ROOT / "model"))
     parser.add_argument("--text_model", default=str(DEFAULT_QWEN))
     parser.add_argument("--prompt", default="liver")
+    parser.add_argument(
+        "--n_ctx",
+        type=int,
+        default=1,
+        help="Number of learnable Qwen input context tokens",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output_dir", default="results_/voxtell_cmtta_p0")
     parser.add_argument("--checkpoint", default=None)
@@ -152,6 +171,8 @@ def main() -> None:
         raise ValueError("VoxTell CM-TTA uses exactly one TTA step per complete 3-D case")
     if args.print_freq < 1:
         raise ValueError("--print_freq must be positive")
+    if args.prompt != "liver":
+        raise ValueError('VoxTell CM-TTA fixes the original text prompt to "liver"')
     seed_everything(args.seed)
     args.device = torch.device(args.device)
     if args.device.type == "cuda":
@@ -167,16 +188,16 @@ def main() -> None:
     entries = read_test_entries(args.data_dir, args.split_file)
     predictor = build_predictor(args)
     predictor.text_backbone.requires_grad_(False)
-    with torch.no_grad():
-        initial_prompt = predictor.embed_text_prompts([args.prompt]).detach().float()
-    predictor.text_backbone.requires_grad_(False)
 
     adapter = VoxTellCMTTA(
         predictor.network,
-        initial_prompt,
+        None,
         args.device,
         args,
         qwen_text_encoder=predictor.text_backbone,
+        qwen_tokenizer=predictor.tokenizer,
+        text_prompt=args.prompt,
+        n_ctx=args.n_ctx,
     )
     if args.checkpoint:
         load_cmtta_checkpoint(args.checkpoint, adapter)
@@ -196,6 +217,8 @@ def main() -> None:
             # One complete case is one adaptation time step.  adapt_case sums
             # all patch losses and performs exactly one optimizer/LSPM update.
             trace = adapter.adapt_case(patches, valid_masks)
+            with torch.no_grad():
+                text_feature = adapter._encode_ctx(adapter.ctx.detach())
             row = evaluate_case(
                 predictor,
                 image_path,
@@ -203,7 +226,7 @@ def main() -> None:
                 data,
                 bbox,
                 original_shape,
-                adapter.soft_prompt.detach(),
+                text_feature,
                 predictions_dir,
             )
             row["adaptation_quality"] = trace["selected_cac"]
