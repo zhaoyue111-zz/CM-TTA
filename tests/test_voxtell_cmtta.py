@@ -364,6 +364,34 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertTrue(torch.allclose(tdc, torch.tensor([0.5])))
         self.assertFalse(pair_valid[0, 2:].any())
 
+    def test_tdc_fixed_hwd_conversion_excludes_single_axis_padding(self):
+        # Input/valid-mask order is (D,H,W)=(3,3,4), with only the last D
+        # plane padded. VoxTell decoder logits use (H,W,D)=(3,4,3).
+        volume = torch.zeros(1, 2, 3, 4)
+        patches, valid_masks, locations, data_shape = make_case_patches(
+            volume, (3, 3, 4)
+        )
+        self.assertEqual(tuple(valid_masks[0].shape), (3, 3, 4))
+        self.assertEqual(tuple(data_shape), (2, 3, 4))
+        self.assertEqual(locations, [(0, 0, 0)])
+
+        decoder_mask = torch.full((1, 1, 3, 4, 3), -20.0)
+        decoder_mask[..., -1] = 20.0  # only the padded D5 D-plane is foreground
+        result = tdc_patch_components(
+            [decoder_mask, decoder_mask, decoder_mask, decoder_mask],
+            valid_masks[0].unsqueeze(0),
+        )
+        self.assertTrue(torch.equal(result["count1"], torch.zeros_like(result["count1"])))
+        self.assertFalse(result["finite"].logical_not().any())
+        tdc, _pair_dice, pair_valid = tdc_from_components(
+            result["intersection"],
+            result["count1"],
+            result["count2"],
+            result["finite"],
+        )
+        self.assertTrue(torch.allclose(tdc, torch.zeros_like(tdc)))
+        self.assertFalse(pair_valid.any())
+
     def test_tdc_selection_uses_decoder_outputs_and_case_statistics(self):
         adapter = VoxTellCMTTA(
             TinyVoxTell(),

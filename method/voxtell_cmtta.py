@@ -174,10 +174,15 @@ def tdc_patch_components(
         raise ValueError("TDC requires decoder outputs [D5,D4,D3,D2,D1]")
     if not 0.0 <= float(threshold) <= 1.0:
         raise ValueError(f"TDC threshold must be in [0, 1], got {threshold}")
+    # VoxTell's decoder emits logits in (B,N,H,W,D) order: its final
+    # einsum consumes decoder features laid out as b,c,h,w,d.  In contrast,
+    # make_case_patches() and its valid masks use the model input order
+    # (C,D,H,W)/(D,H,W).  Convert this semantic order explicitly; do not infer
+    # it from shapes because a cubic 192^3 patch makes both orders identical.
     reference = decoder_outputs[0]
     if reference.ndim != 5 or reference.shape[1] != 1:
         raise ValueError(
-            "TDC expects decoder logits with shape (B,1,D,H,W), "
+            "TDC expects VoxTell decoder logits with shape (B,1,H,W,D), "
             f"got {tuple(reference.shape)}"
         )
     batch = reference.shape[0]
@@ -191,10 +196,8 @@ def tdc_patch_components(
             f"got {tuple(valid.shape)}"
         )
     valid = valid.to(device=reference.device, dtype=torch.bool)
-    input_spatial_shape = tuple(int(size) for size in valid.shape[2:])
-    if input_spatial_shape != spatial_shape and input_spatial_shape[::-1] == spatial_shape:
-        valid = valid.permute(0, 1, 3, 4, 2).contiguous()
-    elif input_spatial_shape != spatial_shape:
+    valid = valid.permute(0, 1, 3, 4, 2).contiguous()
+    if tuple(valid.shape[2:]) != spatial_shape:
         valid = F.interpolate(valid.float(), size=spatial_shape, mode="nearest").bool()
 
     masks = []
