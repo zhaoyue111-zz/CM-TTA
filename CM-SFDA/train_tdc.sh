@@ -29,4 +29,4 @@ exec python "$SCRIPT_DIR/run_sfda_voxtell.py" \
   --quality_config "$SCRIPT_DIR/configs/tse.json" \
   --no_entropy_rank \
   --w_quality 0 \
-  --w_cac 0
+  --w_cac 1.0
