@@ -455,14 +455,19 @@ def select_cac_view_from_entropy(
 
 
 class ShortPromptMemory:
-    """FIFO memory M_i containing recent short prompt deltas and CAC scores."""
+    """FIFO memory of recent short prompt deltas and their quality scores."""
 
     def __init__(self, max_length: int):
         self.max_length = int(max_length)
         if self.max_length < 1:
             raise ValueError("short memory length must be positive")
         self.deltas: deque[torch.Tensor] = deque(maxlen=self.max_length)
-        self.cacs: deque[float] = deque(maxlen=self.max_length)
+        self.qualities: deque[float] = deque(maxlen=self.max_length)
+
+    @property
+    def cacs(self):
+        """Compatibility view for checkpoints/tools written before TDC LSPM."""
+        return self.qualities
 
     @property
     def contexts(self):
@@ -475,7 +480,7 @@ class ShortPromptMemory:
     def weighted_delta(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         if not self.deltas:
             raise RuntimeError("Cannot fuse an empty short-delta memory")
-        scores = torch.tensor(list(self.cacs), device=device, dtype=torch.float32)
+        scores = torch.tensor(list(self.qualities), device=device, dtype=torch.float32)
         weights = torch.softmax(scores, dim=0)
         result = torch.zeros_like(self.deltas[0], device=device, dtype=dtype)
         for weight, delta in zip(weights, self.deltas):
@@ -486,19 +491,21 @@ class ShortPromptMemory:
         """Compatibility alias for callers that use the old ctx name."""
         return self.weighted_delta(device, dtype)
 
-    def append_delta(self, delta: torch.Tensor, cac: float) -> None:
+    def append_delta(self, delta: torch.Tensor, quality: float) -> None:
         self.deltas.append(delta.detach().cpu().clone())
-        self.cacs.append(float(cac))
+        self.qualities.append(float(quality))
 
-    def append(self, ctx: torch.Tensor, cac: float) -> None:
+    def append(self, ctx: torch.Tensor, quality: float) -> None:
         """Compatibility alias; ``ctx`` is stored as a delta."""
-        self.append_delta(ctx, cac)
+        self.append_delta(ctx, quality)
 
     def state_dict(self) -> dict:
         return {
             "max_length": self.max_length,
             "deltas": [delta.clone() for delta in self.deltas],
-            "cacs": list(self.cacs),
+            "qualities": list(self.qualities),
+            # Keep the old key so older analysis scripts can still inspect it.
+            "cacs": list(self.qualities),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -510,13 +517,13 @@ class ShortPromptMemory:
                 "Legacy random-ctx memory is incompatible with ctx_delta checkpoints"
             )
         contexts = state.get("deltas", [])
-        cacs = state.get("cacs", [])
-        if len(contexts) != len(cacs):
-            raise ValueError("short memory deltas and CAC scores must have equal lengths")
+        qualities = state.get("qualities", state.get("cacs", []))
+        if len(contexts) != len(qualities):
+            raise ValueError("short memory deltas and quality scores must have equal lengths")
         self.deltas = deque(maxlen=self.max_length)
-        self.cacs = deque(maxlen=self.max_length)
-        for delta, cac in zip(contexts, cacs):
-            self.append_delta(delta, float(cac))
+        self.qualities = deque(maxlen=self.max_length)
+        for delta, quality in zip(contexts, qualities):
+            self.append_delta(delta, float(quality))
 
 
 class VoxTellCMTTA:
@@ -990,6 +997,66 @@ class VoxTellCMTTA:
         )
         return float(score[0].detach().cpu())
 
+    def _case_tdc(
+        self,
+        ctx: torch.Tensor,
+        patches: Iterable[torch.Tensor],
+        valid_masks: Optional[Iterable[torch.Tensor]] = None,
+    ) -> float:
+        """Compute one exact case-level D5--D2 TDC score for a prompt."""
+        patches = list(patches)
+        if valid_masks is None:
+            valid_masks = [None] * len(patches)
+        else:
+            valid_masks = list(valid_masks)
+        if len(valid_masks) != len(patches):
+            raise ValueError("patches and valid_masks must have equal lengths")
+        accumulator = None
+        finite = None
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                patch = patch.unsqueeze(0).to(self.device, non_blocking=True)
+                if valid_mask is None:
+                    valid_mask = torch.ones(
+                        (1, *patch.shape[-3:]), device=self.device
+                    )
+                else:
+                    if valid_mask.ndim == 3:
+                        valid_mask = valid_mask.unsqueeze(0)
+                    valid_mask = valid_mask.to(self.device, non_blocking=True)
+                decoder_outputs = self._forward_decoder_outputs(patch, ctx)
+                local = tdc_patch_components(decoder_outputs, valid_mask)
+                if accumulator is None:
+                    accumulator = {
+                        key: local[key].clone()
+                        for key in ("intersection", "count1", "count2")
+                    }
+                    finite = local["finite"].clone()
+                else:
+                    for key in ("intersection", "count1", "count2"):
+                        accumulator[key].add_(local[key])
+                    finite &= local["finite"]
+        if accumulator is None or finite is None:
+            raise ValueError("A complete case must contain at least one patch")
+        score, _pair_dice, _pair_valid = tdc_from_components(
+            accumulator["intersection"],
+            accumulator["count1"],
+            accumulator["count2"],
+            finite,
+        )
+        return float(score[0].detach().cpu())
+
+    def _case_quality(
+        self,
+        ctx: torch.Tensor,
+        patches: Iterable[torch.Tensor],
+        valid_masks: Optional[Iterable[torch.Tensor]] = None,
+    ) -> float:
+        """Return the primary quality used by both LSPM and view selection."""
+        if self.view_selection_metric == "tdc":
+            return self._case_tdc(ctx, patches, valid_masks)
+        return self._case_cac(ctx, patches, valid_masks)
+
     @staticmethod
     def _sample_intensity_params(num_views: int) -> list[dict[str, float]]:
         params = [{"scale": 1.0, "offset": 0.0}]
@@ -1047,19 +1114,19 @@ class VoxTellCMTTA:
         valid_masks: Optional[list[torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, float, float, float]:
         current = self.ctx_delta
-        current_cac = self._case_cac(current, patches, valid_masks)
+        current_quality = self._case_quality(current, patches, valid_masks)
         if len(self.short_memory) == 0:
             short = current
-            return short, current_cac, current_cac, 0.0
+            return short, current_quality, current_quality, 0.0
 
         historical = self.short_memory.weighted_delta(self.device, current.dtype)
-        historical_cac = self._case_cac(historical, patches, valid_masks)
+        historical_quality = self._case_quality(historical, patches, valid_masks)
         weights = torch.softmax(
-            torch.tensor([historical_cac, current_cac], device=self.device), dim=0
+            torch.tensor([historical_quality, current_quality], device=self.device), dim=0
         )
         weight_historical = float(weights[0].detach().cpu())
         short = weight_historical * historical + (1.0 - weight_historical) * current
-        return short, current_cac, historical_cac, weight_historical
+        return short, current_quality, historical_quality, weight_historical
 
     def _select_case_view(
         self,
@@ -1246,6 +1313,9 @@ class VoxTellCMTTA:
             "combined_rank": combined_rank.cpu().tolist(),
             "selected_view": selected,
         }
+        # Keep the historical return value (CAC scores) for callers/results;
+        # LSPM uses last_view_selection["selection_scores"] below so TDC mode
+        # can independently use its primary quality.
         return selected, scores
 
     def _forward_case_supervision_stats(
@@ -1548,7 +1618,7 @@ class VoxTellCMTTA:
             normalized_masks.append(mask.float().contiguous())
         valid_masks = normalized_masks
         params = self._sample_intensity_params(self.num_aug_views)
-        short_ctx, current_cac, historical_cac, weight_historical = self._dynamic_short_ctx(
+        short_ctx, current_quality, historical_quality, weight_historical = self._dynamic_short_ctx(
             patches, valid_masks
         )
 
@@ -1562,8 +1632,11 @@ class VoxTellCMTTA:
             "valid_masks": valid_masks,
             "params": params,
             "short_ctx": short_ctx,
-            "current_cac": current_cac,
-            "historical_cac": historical_cac,
+            "current_quality": current_quality,
+            "historical_quality": historical_quality,
+            # Compatibility fields retained for existing result consumers.
+            "current_cac": current_quality,
+            "historical_cac": historical_quality,
             "weight_historical": weight_historical,
             "long_ctx": long_ctx,
         }
@@ -1581,8 +1654,10 @@ class VoxTellCMTTA:
         valid_masks = prepared_case["valid_masks"]
         params = prepared_case["params"]
         short_ctx = prepared_case["short_ctx"]
-        current_cac = prepared_case["current_cac"]
-        historical_cac = prepared_case["historical_cac"]
+        current_quality = prepared_case.get("current_quality", prepared_case["current_cac"])
+        historical_quality = prepared_case.get(
+            "historical_quality", prepared_case["historical_cac"]
+        )
         weight_historical = prepared_case["weight_historical"]
         long_ctx = prepared_case["long_ctx"]
 
@@ -1652,9 +1727,17 @@ class VoxTellCMTTA:
         self.short_delta = short_snapshot
         self.long_delta = long_ctx
         selected_cac = float(selection_scores[selected_view].detach().cpu())
-        # Store the actual short prompt used for this case, paired with its
-        # selected-view CAC.  The deque itself supplies FIFO eviction.
-        self.short_memory.append_delta(self.short_delta, selected_cac)
+        # Keep compatibility with callers/tests that provide a custom view
+        # selector without populating ``last_view_selection``.  The real
+        # selector always stores the configured primary (CAC or TDC) quality.
+        selection_quality = self.last_view_selection.get("selection_scores")
+        if selection_quality is None:
+            selected_quality = selected_cac
+        else:
+            selected_quality = float(selection_quality[selected_view])
+        # Store the actual short prompt paired with the configured primary
+        # case/view quality.  Entropy is never used by LSPM.
+        self.short_memory.append_delta(self.short_delta, selected_quality)
         self.last_trace = {
             "selected_view": selected_view,
             "pseudo_source_view": selected_view,
@@ -1666,9 +1749,12 @@ class VoxTellCMTTA:
             "num_patches": len(patches),
             "optimizer_steps_for_case": 1,
             "optimizer_step_skipped": optimizer_step_skipped,
-            "current_cac": current_cac,
-            "historical_cac": historical_cac,
+            "current_quality": current_quality,
+            "historical_quality": historical_quality,
+            "current_cac": current_quality,
+            "historical_cac": historical_quality,
             "historical_weight": weight_historical,
+            "selected_quality": selected_quality,
             "selected_cac": selected_cac,
             **sums,
         }

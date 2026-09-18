@@ -14,7 +14,12 @@ import torch
 
 from acvl_utils.cropping_and_padding.bounding_boxes import insert_crop_into_image
 
-from data.sfda_voxtell import load_ras_image, load_ras_label, make_target_loader, read_image_entries
+from data.sfda_voxtell import (
+    load_ras_image,
+    load_ras_label,
+    make_target_case_loader,
+    read_image_entries,
+)
 from method.sfda_voxtell import VoxTellPromptSFDA, load_sfda_checkpoint, save_sfda_checkpoint
 
 
@@ -177,6 +182,50 @@ def should_evaluate_epoch(epoch, total_epochs, interval):
     return epoch % interval == 0 or epoch == total_epochs
 
 
+def _training_label_map(data_dir):
+    """Return optional train-case labels used only for view-quality diagnostics."""
+    entries = read_image_entries(data_dir, "train")
+    label_dir = Path(data_dir) / "labels" / "P0"
+    return {
+        image_path.name: label_dir / image_path.name
+        for image_path, _ in entries
+        if (label_dir / image_path.name).exists()
+    }
+
+
+def evaluate_training_case_views(
+    predictor, label_path, data, bbox, original_shape, prompt, view_params
+):
+    """Evaluate all fixed case views with GT; never used by adaptation."""
+    if label_path is None or not Path(label_path).exists():
+        return None
+    target = np.squeeze(load_ras_label(str(label_path)))
+    rows = []
+    for view, param in enumerate(view_params):
+        view_data = data
+        if float(param["scale"]) != 1.0 or float(param["offset"]) != 0.0:
+            view_data = data * float(param["scale"]) + float(param["offset"])
+        with torch.inference_mode():
+            logits = predictor.predict_sliding_window_return_logits(
+                view_data, prompt.to(predictor.device)
+            ).float().cpu()
+        cropped_prediction = (torch.sigmoid(logits) > 0.5).numpy().astype(np.uint8)
+        prediction = insert_crop_into_image(
+            np.zeros((cropped_prediction.shape[0], *original_shape), dtype=np.uint8),
+            cropped_prediction,
+            bbox,
+        )[0]
+        metrics = binary_segmentation_metrics(prediction, target)
+        rows.append({"view": view, "GT_Dice": metrics["dice"], **metrics})
+    dice = np.asarray([row["GT_Dice"] for row in rows], dtype=np.float64)
+    oracle_view = int(np.argmax(dice))
+    return {
+        "views": rows,
+        "oracle_best_view": oracle_view,
+        "oracle_GT_Dice": float(dice[oracle_view]),
+    }
+
+
 def evaluate(
     predictor,
     entries,
@@ -300,7 +349,18 @@ def parse_args():
     parser.add_argument("--selection_p", type=float, default=0.1,
                         help="Fraction of augmented views retained by quality+entropy ranking")
     parser.add_argument("--num_aug_views", type=int, default=9,
-                        help="Number of aligned views used for quality selection")
+                        help="Number of augmented views; total candidates are original + this value")
+    entropy_group = parser.add_mutually_exclusive_group()
+    entropy_group.add_argument(
+        "--use_entropy_rank", dest="use_entropy_rank", action="store_true",
+        help="Fuse quality rank with entropy rank for view selection",
+    )
+    entropy_group.add_argument(
+        "--no_entropy_rank", dest="use_entropy_rank", action="store_false",
+        help="Use only the primary CAC/TDC quality rank",
+    )
+    parser.set_defaults(use_entropy_rank=False)
+    parser.add_argument("--short_memory_length", type=int, default=16)
     parser.add_argument("--w_seg", type=float, default=1.0)
     parser.add_argument("--w_entropy", type=float, default=0.01)
     parser.add_argument("--w_cac", "--w_contrast", dest="w_cac", type=float, default=1.0,
@@ -399,15 +459,68 @@ def main():
         read_image_entries(args.data_dir, "test") if not args.no_eval else None
     )
     epoch_records = []
+    case_view_diagnostics = []
     epoch_metrics_path = output_dir / "epoch_metrics.json"
     last_path = output_dir / "last.pt"
     predictor.network = adapter.model
+    train_label_map = _training_label_map(args.data_dir)
+
+    def case_start_diagnostic(epoch, case_id, prompt, view_params):
+        image_path = Path(args.data_dir) / "images" / "P0" / str(case_id)
+        if not image_path.exists():
+            return None
+        image = load_ras_image(str(image_path))
+        data, _bbox, _original_shape = predictor.preprocess(image)
+        return evaluate_training_case_views(
+            predictor,
+            train_label_map.get(str(case_id)),
+            data,
+            _bbox,
+            _original_shape,
+            prompt,
+            view_params,
+        )
+
+    def case_end_diagnostic(epoch, case_id, before, selection, _values):
+        if before is None:
+            return
+        selected_views = selection.get("selected_views", [])
+        selected_view = int(selected_views[0])
+        selected_dice = float(before["views"][selected_view]["GT_Dice"])
+        record = {
+            "epoch": int(epoch),
+            "case": str(case_id),
+            "views": before["views"],
+            "oracle_best_view": before["oracle_best_view"],
+            "oracle_GT_Dice": before["oracle_GT_Dice"],
+            "selected_view": selected_view,
+            "selected_GT_Dice": selected_dice,
+            "regret": before["oracle_GT_Dice"] - selected_dice,
+            "selection_metric": selection["selection_metric"],
+            "use_entropy_rank": selection["use_entropy_rank"],
+            "quality": selection["quality_rank"],
+            "entropy": selection["entropy"],
+            "combined_rank": selection["combined_rank"],
+        }
+        case_view_diagnostics.append(record)
+        print(
+            f"epoch {epoch} case {case_id} selected_view={selected_view} "
+            f"selected_GT_Dice={selected_dice:.4f} "
+            f"oracle_view={record['oracle_best_view']} "
+            f"oracle_GT_Dice={record['oracle_GT_Dice']:.4f} "
+            f"regret={record['regret']:.4f}"
+        )
 
     def evaluate_epoch(epoch, _training_row, training_history):
-        if not should_evaluate_epoch(epoch, args.epochs, args.eval_interval):
+        if (
+            epoch not in (1, 100)
+            and not should_evaluate_epoch(epoch, args.epochs, args.eval_interval)
+        ):
             return
         # Preserve the completed epoch before potentially expensive evaluation.
-        save_sfda_checkpoint(str(last_path), adapter, args, training_history)
+        save_sfda_checkpoint(
+            str(last_path), adapter, args, training_history, case_view_diagnostics
+        )
         evaluation = evaluate(
             predictor,
             test_entries,
@@ -420,17 +533,45 @@ def main():
         _write_json(epoch_metrics_path, _epoch_metrics_payload(epoch_records))
 
     if not args.eval_only:
-        loader = make_target_loader(
+        loader = make_target_case_loader(
             args.data_dir,
             tuple(predictor.patch_size),
-            args.batch_size,
             args.num_workers,
         )
         history = adapter.fit(
             loader,
             epoch_end_callback=evaluate_epoch if not args.no_eval else None,
+            case_start_callback=case_start_diagnostic,
+            case_end_callback=case_end_diagnostic,
         )
-        save_sfda_checkpoint(str(last_path), adapter, args, history)
+        save_sfda_checkpoint(
+            str(last_path), adapter, args, history, case_view_diagnostics
+        )
+        (output_dir / "case_view_diagnostics.json").write_text(
+            json.dumps(case_view_diagnostics, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        boundary = {}
+        for record in epoch_records:
+            if record["epoch"] in (1, 100):
+                boundary[record["epoch"]] = record["cases"]
+        if 1 in boundary and 100 in boundary:
+            first = {row["basename"]: row for row in boundary[1]}
+            last = {row["basename"]: row for row in boundary[100]}
+            comparison = []
+            for case_name in sorted(set(first) & set(last)):
+                row = {"basename": case_name}
+                for metric in EVALUATION_METRICS:
+                    row[f"epoch1_{metric}"] = first[case_name][metric]
+                    row[f"epoch100_{metric}"] = last[case_name][metric]
+                    row[f"delta_{metric}"] = (
+                        last[case_name][metric] - first[case_name][metric]
+                    )
+                comparison.append(row)
+            (output_dir / "epoch1_epoch100_case_metrics.json").write_text(
+                json.dumps(comparison, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
     else:
         history = checkpoint.get("history", [])
         checkpoint_epoch = int(history[-1].get("epoch", 0)) if history else 0

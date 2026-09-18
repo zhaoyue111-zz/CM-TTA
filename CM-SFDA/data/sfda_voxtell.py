@@ -143,10 +143,46 @@ class VoxTellTargetDataset(Dataset):
         return crop.clone(), self._strong_augment(crop), image_path.name
 
 
+class VoxTellTargetCaseDataset(Dataset):
+    """Deterministic full-case samples for case-level SFDA/TDC."""
+
+    def __init__(self, entries, patch_size=(192, 192, 192)):
+        if _NNUNET_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                "nnunetv2 is required for VoxTellTargetCaseDataset image loading"
+            ) from _NNUNET_IMPORT_ERROR
+        self.entries = entries
+        self.patch_size = tuple(int(x) for x in patch_size)
+        self.reader = NibabelIOWithReorient()
+        self.normalization = ZScoreNormalization(intensityproperties={})
+
+    def __len__(self):
+        return len(self.entries)
+
+    def __getitem__(self, index):
+        image_path, _ = self.entries[index]
+        volume = load_preprocessed_image(image_path, self.reader, self.normalization)
+        padded, valid_mask, _original_shape = pad_to_patch_grid(volume, self.patch_size)
+        return padded, valid_mask, image_path.name
+
+
 def make_target_loader(data_dir, patch_size=(192, 192, 192), batch_size=1, num_workers=0):
     dataset = VoxTellTargetDataset(read_image_entries(data_dir, "train"), patch_size)
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
                       pin_memory=torch.cuda.is_available())
+
+
+def make_target_case_loader(data_dir, patch_size=(192, 192, 192), num_workers=0):
+    dataset = VoxTellTargetCaseDataset(
+        read_image_entries(data_dir, "train"), patch_size
+    )
+    return DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
 
 
 def load_preprocessed_image(path, reader=None, normalization=None):

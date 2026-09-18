@@ -26,11 +26,13 @@ if str(CM_SFDA / "method") not in sys.path:
     sys.path.insert(0, str(CM_SFDA / "method"))
 
 from sfda_voxtell import (  # noqa: E402
+    ShortPromptQualityMemory,
     VoxTellPromptSFDA,
     apply_recall_recovery,
     cac_loss,
     compute_cac_score,
     compute_tdc_consensus,
+    tdc_from_components,
     entropy_loss,
     load_sfda_checkpoint,
     masked_segmentation_loss,
@@ -803,6 +805,91 @@ class SoftPromptOnlyTests(unittest.TestCase):
             one_nonempty["pair_valid"].tolist(),
             [[True, True, True, False, False, False]],
         )
+
+    def test_tdc_valid_mask_excludes_padding_on_decoder_grid(self):
+        # Decoder order is (H,W,D), while the input mask is (D,H,W). Only one
+        # D plane is valid, so every all-positive pair must count 2*3*1 voxels.
+        decoder = [torch.full((1, 1, 2, 3, 4), 10.0) for _ in range(4)]
+        valid = torch.zeros(1, 2, 3, 4, dtype=torch.bool)
+        valid[:, 0, :, :] = True
+        result = compute_tdc_consensus(decoder, valid_mask=valid)
+        self.assertTrue(torch.all(result["count1"] == 12))
+        self.assertTrue(torch.all(result["count2"] == 12))
+        self.assertTrue(torch.all(result["intersection"] == 12))
+        self.assertAlmostEqual(float(result["tdc"].item()), 1.0)
+
+    def test_tdc_case_reduction_is_not_patch_average(self):
+        # One patch has pair Dice 1 and the other pair Dice 0. Global reduction
+        # must use global intersection/count, not average the two patch scores.
+        first_intersection = torch.full((1, 6), 2.0)
+        first_count = torch.full((1, 6), 2.0)
+        second_intersection = torch.zeros(1, 6)
+        second_count = torch.full((1, 6), 8.0)
+        global_tdc, *_ = tdc_from_components(
+            first_intersection + second_intersection,
+            first_count + second_count,
+            first_count + second_count,
+            torch.ones(1, dtype=torch.bool),
+        )
+        self.assertAlmostEqual(float(global_tdc.item()), 0.2)
+        self.assertNotAlmostEqual(float(global_tdc.item()), 0.5)
+
+    def test_tdc_quality_only_selection_and_tdc_entropy_selection(self):
+        scores = torch.tensor([[0.9, 0.8, 0.1]])
+        probabilities = torch.stack(
+            [torch.full((1, 2, 2, 2), 0.5),
+             torch.full((1, 2, 2, 2), 0.0),
+             torch.full((1, 2, 2, 2), 0.9)], dim=1
+        )
+        valid = torch.ones_like(scores, dtype=torch.bool)
+        quality_only, _ = select_tdc_views(
+            scores, probabilities, 1.0 / 3.0, valid, use_entropy_rank=False
+        )
+        fused, _ = select_tdc_views(
+            scores, probabilities, 1.0 / 3.0, valid, use_entropy_rank=True
+        )
+        self.assertEqual(quality_only.tolist(), [[0]])
+        self.assertEqual(fused.tolist(), [[1]])
+
+    def test_lspm_memory_and_case_quality_follow_tdc_metric(self):
+        memory = ShortPromptQualityMemory(2)
+        memory.append(torch.ones(1, 1, 4), 0.1)
+        memory.append(torch.full((1, 1, 4), 3.0), 0.9)
+        self.assertEqual(len(memory), 2)
+        adapter, _, _ = _make_adapter()
+        try:
+            adapter.quality_metric = "tdc"
+            adapter._case_tdc_quality = lambda prompt, patches, masks: float(prompt.mean())
+            adapter._case_cac_quality = lambda prompt, patches, masks: 99.0
+            self.assertEqual(adapter._case_quality(torch.ones(1, 1, 4), [], []), 1.0)
+            adapter.quality_metric = "cac"
+            self.assertEqual(adapter._case_quality(torch.ones(1, 1, 4), [], []), 99.0)
+        finally:
+            adapter.close()
+
+    def test_case_adapter_uses_ten_views_and_one_step_without_reset(self):
+        args = _args(
+            num_aug_views=9,
+            selection_p=0.1,
+            use_entropy_rank=False,
+            short_memory_length=2,
+        )
+        adapter = VoxTellPromptSFDA(
+            _TinyVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            patches = [torch.randn(1, 2, 2, 2), torch.randn(1, 2, 2, 2)]
+            masks = [torch.ones(2, 2, 2), torch.ones(2, 2, 2)]
+            result = adapter.adapt_case_patches(patches, masks, "case-a", epoch=1)
+            self.assertEqual(len(result["view_selection"]["view_params"]), 10)
+            self.assertEqual(result["optimizer_steps_for_case"], 1)
+            self.assertEqual(adapter.optimizer_step_count, 1)
+            self.assertEqual(len(adapter.short_memory), 1)
+            adapter.args.epochs = 0
+            adapter.fit([])
+            self.assertEqual(len(adapter.short_memory), 1)
+        finally:
+            adapter.close()
 
     def test_tdc_selection_uses_quality_plus_entropy_rank_fusion(self):
         scores = torch.tensor([[0.9, 0.8, 0.1]])

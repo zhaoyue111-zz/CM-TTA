@@ -1176,6 +1176,26 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(len(memory), 2)
         self.assertEqual([float(x) for x in memory.contexts], [3.0, 5.0])
 
+    def test_lspm_primary_quality_switches_between_case_cac_and_case_tdc(self):
+        for metric, expected in (("cac", 3.0), ("tdc", 7.0)):
+            adapter = VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(view_selection_metric=metric),
+            )
+            try:
+                adapter._case_cac = lambda *_args: 3.0
+                adapter._case_tdc = lambda *_args: 7.0
+                short, current, historical, _weight = adapter._dynamic_short_ctx(
+                    [torch.zeros(1, 2, 2, 2)], [torch.ones(2, 2, 2)]
+                )
+                self.assertEqual(current, expected)
+                self.assertEqual(historical, expected)
+                self.assertEqual(tuple(short.shape), (1, 2))
+            finally:
+                adapter.close()
+
     def test_checkpoint_contains_lspm_optimizer_and_scaler_state(self):
         adapter = VoxTellCMTTA(TinyVoxTell(), torch.zeros(1, 1, 2), "cpu", make_args())
         try:

@@ -134,7 +134,27 @@ def _binary_view_entropy(prob):
     return entropy.flatten(start_dim=1).mean(dim=1)
 
 
-def compute_cac_score(vision_features, text_features, logits, fg_threshold=0.5):
+def _sfda_valid_on_decoder_grid(valid_mask, batch, target_shape, device):
+    """Convert input (B,D,H,W) validity to VoxTell decoder (B,1,H,W,D)."""
+    if valid_mask is None:
+        return torch.ones((batch, 1, *target_shape), device=device, dtype=torch.bool)
+    valid = torch.as_tensor(valid_mask, device=device).bool()
+    if valid.ndim == 4:
+        valid = valid.unsqueeze(1)
+    if valid.ndim != 5 or valid.shape[0] != batch or valid.shape[1] != 1:
+        raise ValueError(
+            "valid_mask must have shape (B,D,H,W) or (B,1,D,H,W), got "
+            f"{tuple(valid.shape)}"
+        )
+    valid = valid.permute(0, 1, 3, 4, 2).contiguous()
+    if tuple(valid.shape[2:]) != tuple(target_shape):
+        valid = F.interpolate(valid.float(), size=target_shape, mode="nearest").bool()
+    return valid
+
+
+def cac_patch_components(
+    vision_features, text_features, logits, valid_mask=None, fg_threshold=0.5
+):
     """Compute CM-TTA foreground/background contrast for VoxTell 3-D tensors.
 
     The CM-TTA formula is unchanged: mean foreground cosine similarity minus
@@ -175,17 +195,39 @@ def compute_cac_score(vision_features, text_features, logits, fg_threshold=0.5):
             mode="trilinear",
             align_corners=False,
         ).squeeze(1)
-    fg_mask = (seg_prob > fg_threshold).float()
-    bg_mask = 1.0 - fg_mask
-    fg_count = fg_mask.flatten(start_dim=1).sum(dim=1).clamp_min(1.0)
-    bg_count = bg_mask.flatten(start_dim=1).sum(dim=1).clamp_min(1.0)
-    fg_sim = (similarity * fg_mask).flatten(start_dim=1).sum(dim=1) / fg_count
-    bg_sim = (similarity * bg_mask).flatten(start_dim=1).sum(dim=1) / bg_count
-    return fg_sim - bg_sim
+    valid = _sfda_valid_on_decoder_grid(
+        valid_mask, similarity.shape[0], tuple(similarity.shape[1:]), similarity.device
+    ).squeeze(1).float()
+    fg_mask = (seg_prob.detach() > fg_threshold).float() * valid
+    bg_mask = (seg_prob.detach() <= fg_threshold).float() * valid
+    return {
+        "foreground_sum": (similarity * fg_mask).flatten(start_dim=1).sum(dim=1),
+        "foreground_mass": fg_mask.flatten(start_dim=1).sum(dim=1),
+        "background_sum": (similarity * bg_mask).flatten(start_dim=1).sum(dim=1),
+        "background_mass": bg_mask.flatten(start_dim=1).sum(dim=1),
+    }
 
 
-def select_cac_views(cac_scores, probabilities, selection_p, valid_mask=None):
-    """Rank views using quality + entropy with average ranks for exact ties."""
+def cac_score_from_components(components):
+    foreground = components["foreground_sum"] / components["foreground_mass"].clamp_min(1.0)
+    background = components["background_sum"] / components["background_mass"].clamp_min(1.0)
+    return foreground - background
+
+
+def compute_cac_score(
+    vision_features, text_features, logits, fg_threshold=0.5, valid_mask=None
+):
+    return cac_score_from_components(
+        cac_patch_components(
+            vision_features, text_features, logits, valid_mask, fg_threshold
+        )
+    )
+
+
+def select_cac_views(
+    cac_scores, probabilities, selection_p, valid_mask=None, use_entropy_rank=True
+):
+    """Rank views using quality, optionally fused with entropy."""
     if cac_scores.ndim != 2:
         raise ValueError(f"Expected CAC scores (B,V), got {tuple(cac_scores.shape)}")
     if probabilities.ndim < 3:
@@ -219,7 +261,9 @@ def select_cac_views(cac_scores, probabilities, selection_p, valid_mask=None):
         entropy = entropy.masked_fill(~valid_mask, float("inf"))
     entropy_ranks = average_tie_ranks(entropy, descending=False)
     cac_ranks = average_tie_ranks(cac_scores, descending=True)
-    combined_ranks = entropy_ranks + cac_ranks
+    combined_ranks = (
+        entropy_ranks + cac_ranks if use_entropy_rank else cac_ranks
+    )
     if valid_mask is not None:
         combined_ranks = combined_ranks.masked_fill(~valid_mask, float("inf"))
     return torch.argsort(combined_ranks, dim=1, stable=True)[:, :keep]
@@ -232,7 +276,7 @@ TDC_PAIR_NAMES = tuple(
 
 
 @torch.no_grad()
-def compute_tdc_consensus(decoder_outputs, threshold=0.5):
+def compute_tdc_consensus(decoder_outputs, threshold=0.5, valid_mask=None):
     """Compute Text-conditioned Decoder Consensus for ``[D5,D4,D3,D2]`` logits.
 
     VoxTell returns decoder logits from highest to lowest resolution. D5 is the
@@ -263,6 +307,9 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5):
     spatial_shape = tuple(int(size) for size in reference.shape[2:])
     if any(size <= 0 for size in spatial_shape):
         raise ValueError(f"D5 must have non-empty spatial dimensions, got {spatial_shape}")
+    valid = _sfda_valid_on_decoder_grid(
+        valid_mask, batch, spatial_shape, reference.device
+    )
 
     finite = torch.ones(batch, dtype=torch.bool, device=reference.device)
     masks = []
@@ -282,10 +329,13 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5):
                 mode="trilinear",
                 align_corners=False,
             )
-        masks.append(torch.sigmoid(logits) >= float(threshold))
+        masks.append((torch.sigmoid(logits) >= float(threshold)) & valid)
 
     pair_dice = reference.new_zeros((batch, len(TDC_DECODER_PAIRS)), dtype=torch.float32)
     pair_valid = torch.zeros_like(pair_dice, dtype=torch.bool)
+    intersections = torch.zeros_like(pair_dice)
+    counts1 = torch.zeros_like(pair_dice)
+    counts2 = torch.zeros_like(pair_dice)
     for pair_index, (left, right) in enumerate(TDC_DECODER_PAIRS):
         mask_left = masks[left].flatten(start_dim=1)
         mask_right = masks[right].flatten(start_dim=1)
@@ -293,6 +343,9 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5):
         count_right = mask_right.sum(dim=1)
         nonempty_pair = (count_left + count_right) > 0
         intersection = (mask_left & mask_right).sum(dim=1).float()
+        intersections[:, pair_index] = intersection
+        counts1[:, pair_index] = count_left.float()
+        counts2[:, pair_index] = count_right.float()
         denominator = (count_left + count_right).float()
         score = torch.where(
             nonempty_pair,
@@ -321,14 +374,32 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5):
         "valid": valid,
         "valid_pair_count": pair_count,
         "invalid_reason": invalid_reason,
+        "finite": finite,
         "spatial_shape": spatial_shape,
         "decoder_output_count": decoder_output_count,
         "tdc_decoder_count": len(decoder_outputs),
+        "intersection": intersections,
+        "count1": counts1,
+        "count2": counts2,
     }
 
 
-def select_tdc_views(tdc_scores, probabilities, selection_p, valid_mask):
-    """Use TDC + entropy rank fusion, falling back per case to view zero."""
+def tdc_from_components(intersection, count1, count2, finite):
+    """Reduce globally accumulated D5--D2 pair statistics to case TDC."""
+    pair_nonempty = (count1 + count2) > 0
+    pair_dice = 2.0 * intersection / (count1 + count2).clamp_min(1.0)
+    pair_valid = pair_nonempty & finite.unsqueeze(1)
+    pair_count = pair_valid.sum(dim=1)
+    valid = (pair_count > 0) & finite
+    tdc = (pair_dice * pair_valid.float()).sum(dim=1) / pair_count.clamp_min(1)
+    tdc = torch.where(valid, tdc, torch.zeros_like(tdc))
+    return tdc, pair_dice, pair_valid, valid, pair_count
+
+
+def select_tdc_views(
+    tdc_scores, probabilities, selection_p, valid_mask, use_entropy_rank=True
+):
+    """Select TDC views, optionally fusing TDC with entropy ranks."""
     valid_mask = torch.as_tensor(valid_mask, device=tdc_scores.device).bool()
     if valid_mask.shape != tdc_scores.shape:
         raise ValueError("TDC valid_mask must have shape (B,V)")
@@ -339,7 +410,11 @@ def select_tdc_views(tdc_scores, probabilities, selection_p, valid_mask):
         # recorded semantic validity remains false; this is a selection fallback.
         rankable[fallback, 0] = True
     selected = select_cac_views(
-        tdc_scores, probabilities, selection_p, valid_mask=rankable
+        tdc_scores,
+        probabilities,
+        selection_p,
+        valid_mask=rankable,
+        use_entropy_rank=use_entropy_rank,
     )
     return selected, fallback
 
@@ -347,6 +422,55 @@ def select_tdc_views(tdc_scores, probabilities, selection_p, valid_mask):
 def cac_loss(cac_scores):
     """CM-TTA CAC loss: maximize foreground/background concept contrast."""
     return -cac_scores.mean()
+
+
+class ShortPromptQualityMemory:
+    """FIFO LSPM memory shared by CAC and TDC prompt-quality modes."""
+
+    def __init__(self, max_length):
+        self.max_length = int(max_length)
+        if self.max_length < 1:
+            raise ValueError("short memory length must be positive")
+        from collections import deque
+
+        self.prompts = deque(maxlen=self.max_length)
+        self.qualities = deque(maxlen=self.max_length)
+
+    def __len__(self):
+        return len(self.prompts)
+
+    def weighted_prompt(self, device, dtype):
+        if not self.prompts:
+            raise RuntimeError("Cannot fuse an empty LSPM memory")
+        weights = torch.softmax(
+            torch.tensor(list(self.qualities), device=device, dtype=torch.float32), dim=0
+        )
+        result = torch.zeros_like(self.prompts[0], device=device, dtype=dtype)
+        for weight, prompt in zip(weights, self.prompts):
+            result = result + weight.to(dtype) * prompt.to(device=device, dtype=dtype)
+        return result
+
+    def append(self, prompt, quality):
+        self.prompts.append(prompt.detach().cpu().clone())
+        self.qualities.append(float(quality))
+
+    def state_dict(self):
+        return {
+            "max_length": self.max_length,
+            "prompts": [prompt.clone() for prompt in self.prompts],
+            "qualities": list(self.qualities),
+        }
+
+    def load_state_dict(self, state):
+        self.max_length = int(state["max_length"])
+        self.prompts.clear()
+        self.qualities.clear()
+        qualities = state.get("qualities", state.get("cacs", []))
+        prompts = state.get("prompts", state.get("ctxs", []))
+        if len(prompts) != len(qualities):
+            raise ValueError("LSPM prompts and quality scores must have equal lengths")
+        for prompt, quality in zip(prompts, qualities):
+            self.append(prompt, quality)
 
 
 class VoxTellPromptSFDA:
@@ -394,6 +518,11 @@ class VoxTellPromptSFDA:
         self.soft_prompt_embedding = nn.Parameter(initial_soft_prompt.clone())
         self.initial_soft_prompt = initial_soft_prompt.clone()
         self.teacher_soft_prompt = initial_soft_prompt.clone()
+        self.short_prompt = initial_soft_prompt.clone()
+        self.long_prompt = initial_soft_prompt.clone()
+        self.short_memory = ShortPromptQualityMemory(
+            int(getattr(args, "short_memory_length", 16))
+        )
         self.device, self.args = device, args
         self.enable_recall_recovery = bool(
             getattr(args, "enable_recall_recovery", False)
@@ -415,6 +544,7 @@ class VoxTellPromptSFDA:
         self.quality_mode = str(getattr(args, "quality_mode", "cac")).lower()
         requested_metric = getattr(args, "quality_metric", None)
         self.quality_metric = str(requested_metric or "cac").lower()
+        self.use_entropy_rank = bool(getattr(args, "use_entropy_rank", True))
         if self.quality_metric not in ("cac", "saaf", "tdc"):
             raise ValueError("quality_metric must be 'cac', 'saaf' or 'tdc'")
         if self.quality_metric == "saaf" and float(getattr(args, "w_quality", 0.0)) != 0.0:
@@ -479,6 +609,7 @@ class VoxTellPromptSFDA:
                 enabled=device.type == "cuda", init_scale=amp_init_scale
             )
         self._consecutive_amp_skips = 0
+        self.optimizer_step_count = 0
         self.record_soft_prompt_grad_norm = bool(
             getattr(args, "record_soft_prompt_grad_norm", False)
         )
@@ -574,6 +705,93 @@ class VoxTellPromptSFDA:
     def _text(self, soft_prompt, batch_size):
         return soft_prompt.expand(batch_size, -1, -1).unsqueeze(2)
 
+    def _case_cac_quality(self, prompt, patches, valid_masks):
+        accumulator = None
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                patch = patch.unsqueeze(0).to(self.device, non_blocking=True)
+                valid_mask = valid_mask.unsqueeze(0).to(self.device, non_blocking=True)
+                self._cac_features.clear()
+                logits = self.model(patch, self._text(prompt, 1))
+                local = cac_patch_components(
+                    self._cac_features["vision"],
+                    self._cac_features["text"],
+                    logits,
+                    valid_mask=valid_mask,
+                )
+                if accumulator is None:
+                    accumulator = {key: value.clone() for key, value in local.items()}
+                else:
+                    for key, value in local.items():
+                        accumulator[key].add_(value)
+        if accumulator is None:
+            raise ValueError("A complete case must contain at least one patch")
+        return float(cac_score_from_components(accumulator)[0].cpu())
+
+    def _case_tdc_quality(self, prompt, patches, valid_masks):
+        intersection = count1 = count2 = finite = None
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                patch = patch.unsqueeze(0).to(self.device, non_blocking=True)
+                valid_mask = valid_mask.unsqueeze(0).to(self.device, non_blocking=True)
+                decoder_outputs = self.model(
+                    patch,
+                    self._text(prompt, 1),
+                    return_decoder_outputs=True,
+                )
+                local = compute_tdc_consensus(
+                    decoder_outputs, valid_mask=valid_mask
+                )
+                if intersection is None:
+                    intersection = local["intersection"].clone()
+                    count1 = local["count1"].clone()
+                    count2 = local["count2"].clone()
+                    finite = local["finite"].clone()
+                else:
+                    intersection.add_(local["intersection"])
+                    count1.add_(local["count1"])
+                    count2.add_(local["count2"])
+                    finite &= local["finite"]
+        if intersection is None:
+            raise ValueError("A complete case must contain at least one patch")
+        return float(tdc_from_components(intersection, count1, count2, finite)[0][0].cpu())
+
+    def _case_quality(self, prompt, patches, valid_masks):
+        if self.quality_metric == "tdc":
+            return self._case_tdc_quality(prompt, patches, valid_masks)
+        return self._case_cac_quality(prompt, patches, valid_masks)
+
+    def _prepare_lspm(self, patches, valid_masks):
+        current = self.soft_prompt_embedding.detach()
+        current_quality = self._case_quality(current, patches, valid_masks)
+        if len(self.short_memory) == 0:
+            short = current.clone()
+            historical_quality = current_quality
+            historical_weight = 0.0
+        else:
+            historical = self.short_memory.weighted_prompt(self.device, current.dtype)
+            historical_quality = self._case_quality(historical, patches, valid_masks)
+            weights = torch.softmax(
+                torch.tensor(
+                    [historical_quality, current_quality],
+                    device=self.device,
+                    dtype=torch.float32,
+                ),
+                dim=0,
+            )
+            historical_weight = float(weights[0].cpu())
+            short = historical_weight * historical + (1.0 - historical_weight) * current
+        long = self.args.ema_momentum * self.long_prompt + (
+            1.0 - self.args.ema_momentum
+        ) * short
+        return {
+            "short_prompt": short.detach(),
+            "long_prompt": long.detach(),
+            "current_quality": current_quality,
+            "historical_quality": historical_quality,
+            "historical_weight": historical_weight,
+        }
+
     @staticmethod
     def _make_extra_views(base, count):
         views = []
@@ -587,6 +805,39 @@ class VoxTellPromptSFDA:
                 result = result + torch.randn_like(result) * 0.05
             views.append(result.contiguous())
         return views
+
+    @staticmethod
+    def _make_case_views(base, valid_mask, num_aug_views=9, params=None):
+        """Return original + aligned intensity-only views with zeroed padding."""
+        if valid_mask.ndim == 4 and valid_mask.shape[0] == 1:
+            valid_mask = valid_mask[0]
+        valid_mask = valid_mask.to(device=base.device, dtype=base.dtype)
+        if params is None:
+            params = [{"scale": 1.0, "offset": 0.0}]
+            for _ in range(int(num_aug_views)):
+                params.append(
+                    {
+                        "scale": float(torch.empty(()).uniform_(0.85, 1.15)),
+                        "offset": float(torch.empty(()).uniform_(-0.15, 0.15)),
+                    }
+                )
+        views = []
+        for param in params:
+            view = base * param["scale"] + param["offset"]
+            views.append((view * valid_mask.unsqueeze(0)).contiguous())
+        return torch.stack(views, dim=0)
+
+    @staticmethod
+    def _sample_case_view_params(num_aug_views):
+        params = [{"scale": 1.0, "offset": 0.0}]
+        for _ in range(int(num_aug_views)):
+            params.append(
+                {
+                    "scale": float(torch.empty(()).uniform_(0.85, 1.15)),
+                    "offset": float(torch.empty(()).uniform_(-0.15, 0.15)),
+                }
+            )
+        return params
 
     @staticmethod
     def _normalize_case_ids(case_ids, batch_size):
@@ -1057,12 +1308,18 @@ class VoxTellPromptSFDA:
                 self._last_selected_semantic = None
             if self.quality_metric == "tdc":
                 valid_matrix = tdc_details["valid"].view(batch_size, num_views)
-                selected, fallback_mask = select_tdc_views(
-                    scores,
-                    probabilities,
-                    self.args.selection_p,
-                    valid_matrix,
-                )
+                if self.use_entropy_rank:
+                    selected, fallback_mask = select_tdc_views(
+                        scores, probabilities, self.args.selection_p, valid_matrix
+                    )
+                else:
+                    selected, fallback_mask = select_tdc_views(
+                        scores,
+                        probabilities,
+                        self.args.selection_p,
+                        valid_matrix,
+                        use_entropy_rank=False,
+                    )
                 details = {
                     "tdc": tdc_details["tdc"].detach().view(batch_size, num_views),
                     "valid": valid_matrix,
@@ -1115,11 +1372,17 @@ class VoxTellPromptSFDA:
                             )
                         self.quality_diagnostics.append(row)
             elif self.quality_metric != "saaf":
-                selected = select_cac_views(
-                    scores,
-                    probabilities,
-                    self.args.selection_p,
-                )
+                if self.use_entropy_rank:
+                    selected = select_cac_views(
+                        scores, probabilities, self.args.selection_p
+                    )
+                else:
+                    selected = select_cac_views(
+                        scores,
+                        probabilities,
+                        self.args.selection_p,
+                        use_entropy_rank=False,
+                    )
             entropy = _binary_view_entropy(
                 probabilities.reshape(batch_size * num_views, *probabilities.shape[2:])
             ).view(batch_size, num_views)
@@ -1163,6 +1426,254 @@ class VoxTellPromptSFDA:
                             }
                         )
             return selected
+
+    def _select_case_views(self, patches, valid_masks, prompt, case_id, params):
+        """Select aligned views after exact aggregation over all case patches."""
+        num_views = 1 + int(getattr(self.args, "num_aug_views", 9))
+        cac_accumulator = None
+        intersection = count1 = count2 = finite = None
+        entropy_sum = torch.zeros(num_views, device=self.device)
+        entropy_mass = torch.zeros_like(entropy_sum)
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                views = self._make_case_views(
+                    patch.to(self.device, non_blocking=True),
+                    valid_mask.to(self.device, non_blocking=True),
+                    num_views - 1,
+                    params=params,
+                )
+                view_valid = valid_mask.to(self.device, non_blocking=True).bool()
+                view_valid = view_valid.unsqueeze(0).expand(num_views, *view_valid.shape)
+                self._cac_features.clear()
+                text = self._text(prompt, num_views)
+                if self.quality_metric == "tdc":
+                    decoder_outputs = self.model(
+                        views, text, return_decoder_outputs=True
+                    )
+                    logits = decoder_outputs[0]
+                    local_tdc = compute_tdc_consensus(
+                        decoder_outputs, valid_mask=view_valid
+                    )
+                    if intersection is None:
+                        intersection = local_tdc["intersection"].clone()
+                        count1 = local_tdc["count1"].clone()
+                        count2 = local_tdc["count2"].clone()
+                        finite = local_tdc["finite"].clone()
+                    else:
+                        intersection.add_(local_tdc["intersection"])
+                        count1.add_(local_tdc["count1"])
+                        count2.add_(local_tdc["count2"])
+                        finite &= local_tdc["finite"]
+                else:
+                    logits = self.model(views, text)
+                local_cac = cac_patch_components(
+                    self._cac_features["vision"],
+                    self._cac_features["text"],
+                    logits,
+                    valid_mask=view_valid,
+                )
+                if cac_accumulator is None:
+                    cac_accumulator = {
+                        key: value.clone() for key, value in local_cac.items()
+                    }
+                else:
+                    for key, value in local_cac.items():
+                        cac_accumulator[key].add_(value)
+                probability = torch.sigmoid(logits[:, 0].float()).clamp(1e-6, 1 - 1e-6)
+                entropy = -(probability * probability.log())
+                entropy_sum += (entropy * view_valid.float()).flatten(1).sum(dim=1)
+                entropy_mass += view_valid.flatten(1).sum(dim=1)
+        if cac_accumulator is None:
+            raise ValueError("A complete case must contain at least one patch")
+        cac_scores = cac_score_from_components(cac_accumulator)
+        if self.quality_metric == "tdc":
+            tdc_scores, pair_dice, pair_valid, tdc_valid, pair_count = tdc_from_components(
+                intersection, count1, count2, finite
+            )
+            quality_scores = tdc_scores
+        else:
+            tdc_scores = pair_dice = pair_valid = tdc_valid = pair_count = None
+            quality_scores = cac_scores
+        entropy_scores = entropy_sum / entropy_mass.clamp_min(1.0)
+        quality_rank = average_tie_ranks(
+            quality_scores.unsqueeze(0), descending=True
+        )[0]
+        entropy_rank = average_tie_ranks(
+            entropy_scores.unsqueeze(0), descending=False
+        )[0]
+        combined_rank = (
+            quality_rank + entropy_rank
+            if self.use_entropy_rank
+            else quality_rank
+        )
+        keep = max(1, int(num_views * float(self.args.selection_p)))
+        selected = torch.argsort(combined_rank, stable=True)[:keep].unsqueeze(0)
+        details = {
+            "case_id": str(case_id),
+            "cac": cac_scores.detach().cpu().tolist(),
+            "tdc": None if tdc_scores is None else tdc_scores.detach().cpu().tolist(),
+            "entropy": entropy_scores.detach().cpu().tolist(),
+            "quality_rank": quality_rank.detach().cpu().tolist(),
+            "entropy_rank": entropy_rank.detach().cpu().tolist(),
+            "combined_rank": combined_rank.detach().cpu().tolist(),
+            "selected_views": selected[0].detach().cpu().tolist(),
+            "view_params": [dict(param) for param in params],
+            "selection_metric": self.quality_metric,
+            "use_entropy_rank": self.use_entropy_rank,
+        }
+        if pair_dice is not None:
+            details["tdc_pair_dice"] = pair_dice.detach().cpu().tolist()
+            details["tdc_pair_valid"] = pair_valid.detach().cpu().tolist()
+            details["tdc_valid"] = tdc_valid.detach().cpu().tolist()
+            details["tdc_valid_pair_count"] = pair_count.detach().cpu().tolist()
+        return selected, details
+
+    def adapt_case_patches(
+        self, patches, valid_masks, case_id, epoch=None, case_start_callback=None,
+        case_end_callback=None,
+    ):
+        """Adapt one complete non-overlap-patched case with one optimizer step."""
+        if len(patches) != len(valid_masks) or not patches:
+            raise ValueError("A case requires matching non-empty patches and valid masks")
+        lspm = self._prepare_lspm(patches, valid_masks)
+        params = self._sample_case_view_params(
+            int(getattr(self.args, "num_aug_views", 9))
+        )
+        start_diagnostic = None
+        if case_start_callback is not None:
+            start_diagnostic = case_start_callback(
+                epoch, str(case_id), lspm["short_prompt"].detach(), params
+            )
+        selected, selection = self._select_case_views(
+            patches, valid_masks, lspm["short_prompt"], case_id, params
+        )
+        selected_indices = selected[0].detach().cpu().tolist()
+        self.optimizer.zero_grad(set_to_none=True)
+        totals = {
+            "loss": 0.0,
+            "segmentation": 0.0,
+            "bce": 0.0,
+            "dice": 0.0,
+            "entropy": 0.0,
+            "cac_loss": 0.0,
+            "quality_loss": 0.0,
+        }
+        patch_count = float(len(patches))
+        for patch, valid_mask in zip(patches, valid_masks):
+            patch = patch.to(self.device, non_blocking=True)
+            valid_mask = valid_mask.to(self.device, non_blocking=True)
+            if valid_mask.ndim == 3:
+                valid_mask = valid_mask.unsqueeze(0)
+            selected_views = self._make_case_views(
+                patch,
+                valid_mask,
+                int(getattr(self.args, "num_aug_views", 9)),
+                params=params,
+            )[selected_indices]
+            with torch.no_grad(), torch.autocast(
+                device_type=self.device.type, enabled=self.device.type == "cuda"
+            ):
+                teacher_logits = self.model(
+                    patch.unsqueeze(0), self._text(lspm["long_prompt"], 1)
+                )
+                teacher_prob = torch.sigmoid(teacher_logits.float())
+                teacher_pseudo = (teacher_prob >= 0.5).float()
+                confidence = torch.maximum(teacher_prob, 1.0 - teacher_prob)
+                selected_valid = (
+                    (confidence >= self.args.confidence_threshold).float()
+                    * valid_mask.unsqueeze(0)
+                )
+            student_prompt = lspm["short_prompt"] + (
+                self.soft_prompt_embedding - self.soft_prompt_embedding.detach()
+            )
+            with torch.autocast(
+                device_type=self.device.type, enabled=self.device.type == "cuda"
+            ):
+                student_logits = self.model(
+                    selected_views,
+                    self._text(student_prompt, len(selected_indices)),
+                )
+                pseudo = teacher_pseudo.expand_as(student_logits)
+                pseudo = pseudo.expand(len(selected_indices), *pseudo.shape[1:])
+                valid = selected_valid.expand_as(student_logits)
+                segmentation, bce, dice = masked_segmentation_loss(
+                    student_logits, pseudo, valid
+                )
+                entropy = entropy_loss(student_logits, valid)
+                selected_cac = compute_cac_score(
+                    self._cac_features["vision"],
+                    self._cac_features["text"],
+                    student_logits,
+                    valid_mask=valid_mask.expand(len(selected_indices), *valid_mask.shape[1:]),
+                )
+                loss_cac = cac_loss(selected_cac)
+                quality_values = torch.tensor(
+                    [selection["tdc" if self.quality_metric == "tdc" else "cac"][index]
+                     for index in selected_indices],
+                    device=self.device,
+                )
+                loss_quality = -quality_values.mean()
+                quality_weight = (
+                    self.args.w_cac
+                    if self.quality_mode == "cac"
+                    else float(getattr(self.args, "w_quality", 0.0))
+                )
+                loss = (
+                    self.args.w_seg * segmentation
+                    + self.args.w_entropy * entropy
+                    + quality_weight * loss_quality
+                ) / patch_count
+            self.scaler.scale(loss).backward()
+            for key, value in {
+                "loss": loss,
+                "segmentation": segmentation,
+                "bce": bce,
+                "dice": dice,
+                "entropy": entropy,
+                "cac_loss": loss_cac,
+                "quality_loss": loss_quality,
+            }.items():
+                totals[key] += float(value.detach().cpu()) / patch_count
+        self._assert_no_forbidden_grads("case backward")
+        self.scaler.unscale_(self.optimizer)
+        torch.nn.utils.clip_grad_norm_([self.soft_prompt_embedding], self.args.grad_clip)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer_step_count += 1
+        with torch.no_grad():
+            self.short_prompt.copy_(lspm["short_prompt"])
+            self.long_prompt.copy_(lspm["long_prompt"])
+            self.teacher_soft_prompt.copy_(self.long_prompt)
+        selected_quality = float(
+            sum(selection["tdc" if self.quality_metric == "tdc" else "cac"][index]
+                for index in selected_indices)
+            / len(selected_indices)
+        )
+        self.short_memory.append(self.short_prompt, selected_quality)
+        totals.update(
+            {
+                "quality": selected_quality,
+                "selected_views": float(len(selected_indices)),
+                "selected_view": int(selected_indices[0]),
+                "view_selection": selection,
+                "current_quality": lspm["current_quality"],
+                "historical_quality": lspm["historical_quality"],
+                "historical_weight": lspm["historical_weight"],
+                "num_patches": len(patches),
+                "optimizer_steps_for_case": 1,
+                "coverage": float(
+                    sum(float(mask.sum()) for mask in valid_masks)
+                    / max(1.0, sum(float(mask.numel()) for mask in valid_masks))
+                ),
+                "update_skipped": 0.0,
+                "view_diagnostic": start_diagnostic,
+            }
+        )
+        if case_end_callback is not None:
+            case_end_callback(
+                epoch, str(case_id), start_diagnostic, selection, totals
+            )
+        return totals
 
     def _quality_invalid_result(self):
         values = {
@@ -1368,6 +1879,7 @@ class VoxTellPromptSFDA:
         scale_before = float(self.scaler.get_scale())
         self.scaler.step(self.optimizer)
         self.scaler.update()
+        self.optimizer_step_count += 1
         scale_after = float(self.scaler.get_scale())
         update_skipped = not grad_is_finite
         if update_skipped:
@@ -1436,7 +1948,13 @@ class VoxTellPromptSFDA:
             )
         return values
 
-    def fit(self, loader, epoch_end_callback=None):
+    def fit(
+        self,
+        loader,
+        epoch_end_callback=None,
+        case_start_callback=None,
+        case_end_callback=None,
+    ):
         history = []
         if self.quality_mode != "cac" and self.quality_metric != "saaf":
             self.build_prototype_memory(loader)
@@ -1456,15 +1974,57 @@ class VoxTellPromptSFDA:
         for epoch in range(1, self.args.epochs + 1):
             totals = {key: 0.0 for key in metric_names}
             for step, batch in enumerate(loader, start=1):
-                # The optional third item is only an image identifier; target
-                # labels are never consumed during train_cases adaptation.
-                weak, strong = batch[:2]
-                case_ids = batch[2] if len(batch) > 2 else None
-                values = self.adapt_batch(weak, strong, case_ids)
+                full_case_batch = (
+                    hasattr(loader, "dataset")
+                    and len(batch) >= 3
+                    and torch.is_tensor(batch[0])
+                    and torch.is_tensor(batch[1])
+                    and batch[0].ndim == 5
+                    and batch[1].ndim == 5
+                )
+                if full_case_batch:
+                    if batch[0].shape[0] != 1:
+                        raise ValueError(
+                            "Case-level CM-SFDA requires loader batch_size=1"
+                        )
+                    from data.sfda_voxtell import (
+                        extract_volume_patch,
+                        nonoverlapping_patch_locations,
+                    )
+
+                    volume = batch[0][0]
+                    full_valid = batch[1][0]
+                    patch_size = tuple(int(size) for size in loader.dataset.patch_size)
+                    locations = nonoverlapping_patch_locations(
+                        volume.shape[-3:], patch_size
+                    )
+                    patches = [
+                        extract_volume_patch(volume, location, patch_size)
+                        for location in locations
+                    ]
+                    valid_masks = [
+                        extract_volume_patch(full_valid, location, patch_size)[0]
+                        for location in locations
+                    ]
+                    raw_case_id = batch[2][0] if isinstance(batch[2], (list, tuple)) else batch[2]
+                    values = self.adapt_case_patches(
+                        patches,
+                        valid_masks,
+                        str(raw_case_id),
+                        epoch=epoch,
+                        case_start_callback=case_start_callback,
+                        case_end_callback=case_end_callback,
+                    )
+                else:
+                    # The optional third item is only an image identifier; target
+                    # labels are never consumed during train_cases adaptation.
+                    weak, strong = batch[:2]
+                    case_ids = batch[2] if len(batch) > 2 else None
+                    values = self.adapt_batch(weak, strong, case_ids)
                 for key in totals:
                     totals[key] += values[key]
                 if step % self.args.print_freq == 0 or step == len(loader):
-                    quality_label = "cac" if self.quality_metric == "tdc" else self.quality_metric
+                    quality_label = self.quality_metric
                     recovery_log = ""
                     if self.enable_recall_recovery:
                         recovery_log = (
@@ -1502,7 +2062,9 @@ class VoxTellPromptSFDA:
         return history
 
 
-def save_sfda_checkpoint(path, adapter: VoxTellPromptSFDA, args, history):
+def save_sfda_checkpoint(
+    path, adapter: VoxTellPromptSFDA, args, history, case_view_diagnostics=None
+):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -1510,15 +2072,20 @@ def save_sfda_checkpoint(path, adapter: VoxTellPromptSFDA, args, history):
             "soft_prompt_embedding": adapter.soft_prompt_embedding.detach().cpu(),
             "initial_soft_prompt": adapter.initial_soft_prompt.detach().cpu(),
             "teacher_soft_prompt": adapter.teacher_soft_prompt.detach().cpu(),
+            "short_prompt": adapter.short_prompt.detach().cpu(),
+            "long_prompt": adapter.long_prompt.detach().cpu(),
+            "short_prompt_memory": adapter.short_memory.state_dict(),
             # Legacy aliases preserve loading compatibility for v1/v2 tools.
             "prompt_embedding": adapter.soft_prompt_embedding.detach().cpu(),
             "teacher_prompt": adapter.teacher_soft_prompt.detach().cpu(),
             "optimizer": adapter.optimizer.state_dict(),
             "scaler": adapter.scaler.state_dict(),
+            "optimizer_step_count": adapter.optimizer_step_count,
             "prototype_memory": adapter.prototype_memory.state_dict(),
             "prototype_diagnostics": adapter.prototype_diagnostics,
             "quality_config": adapter.quality_config,
             "history": history,
+            "case_view_diagnostics": case_view_diagnostics or [],
             "args": vars(args),
         },
         path,
@@ -1545,6 +2112,16 @@ def load_sfda_checkpoint(path, adapter: VoxTellPromptSFDA):
     if "initial_soft_prompt" in checkpoint:
         adapter.initial_soft_prompt.copy_(checkpoint["initial_soft_prompt"].to(adapter.device))
     adapter.teacher_soft_prompt.copy_(teacher_soft_prompt.to(adapter.device))
+    if "short_prompt" in checkpoint:
+        adapter.short_prompt.copy_(checkpoint["short_prompt"].to(adapter.device))
+    else:
+        adapter.short_prompt.copy_(adapter.soft_prompt_embedding.detach())
+    if "long_prompt" in checkpoint:
+        adapter.long_prompt.copy_(checkpoint["long_prompt"].to(adapter.device))
+    else:
+        adapter.long_prompt.copy_(adapter.teacher_soft_prompt.detach())
+    if "short_prompt_memory" in checkpoint:
+        adapter.short_memory.load_state_dict(checkpoint["short_prompt_memory"])
     if "prototype_memory" in checkpoint:
         adapter.prototype_memory.load_state_dict(checkpoint["prototype_memory"])
     if "prototype_diagnostics" in checkpoint:
@@ -1564,5 +2141,6 @@ def load_sfda_checkpoint(path, adapter: VoxTellPromptSFDA):
                     )
     if "scaler" in checkpoint:
         adapter.scaler.load_state_dict(checkpoint["scaler"])
+    adapter.optimizer_step_count = int(checkpoint.get("optimizer_step_count", 0))
     adapter._assert_no_forbidden_grads("after checkpoint load")
     return checkpoint

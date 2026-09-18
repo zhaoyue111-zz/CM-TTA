@@ -25,5 +25,6 @@ exec python "$SCRIPT_DIR/run_sfda_voxtell.py" \
   --output_dir "$OUTPUT_DIR" \
   --quality_mode cac \
   --quality_config "$SCRIPT_DIR/configs/tse.json" \
+  --use_entropy_rank \
   --w_quality 0 \
   --w_cac 1

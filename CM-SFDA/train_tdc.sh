@@ -15,7 +15,8 @@ EPOCHS=100
 PROMPT=${4:-liver}
 OUTPUT_DIR=${5:-results_/voxtell_sfda_tdc}
 
-# Keep this aligned with train_cac.sh: TDC is a no-grad view selector only.
+# Default SFDA TDC experiment: quality-only rank. Add --use_entropy_rank
+# explicitly when running the TDC+entropy ablation.
 exec python "$SCRIPT_DIR/run_sfda_voxtell.py" \
   --data_dir "$DATA_DIR" \
   --voxtell_root "$VOXTELL_ROOT" \
@@ -26,5 +27,6 @@ exec python "$SCRIPT_DIR/run_sfda_voxtell.py" \
   --quality_metric tdc \
   --quality_mode cac \
   --quality_config "$SCRIPT_DIR/configs/tse.json" \
+  --no_entropy_rank \
   --w_quality 0 \
   --w_cac 0
