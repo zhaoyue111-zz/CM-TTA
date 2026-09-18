@@ -106,11 +106,13 @@ class _TinyVoxTell(nn.Module):
         self.project_text_embed = _TextProjection()
         self.forward_calls = []
         self.prompt_calls = []
+        self.image_calls = []
         self.outputs = []
 
     def forward(self, image, prompt):
         self.forward_calls.append((image.shape[0], torch.is_grad_enabled()))
         self.prompt_calls.append(prompt.detach().clone())
+        self.image_calls.append(image.detach().clone())
         features = self.image_encoder(image)
         self.project_bottleneck_embed(features)
         text = self.project_text_embed(prompt)
@@ -885,9 +887,211 @@ class SoftPromptOnlyTests(unittest.TestCase):
             self.assertEqual(result["optimizer_steps_for_case"], 1)
             self.assertEqual(adapter.optimizer_step_count, 1)
             self.assertEqual(len(adapter.short_memory), 1)
+            expected_loss = (
+                args.w_seg * result["segmentation"]
+                + args.w_entropy * result["entropy"]
+                + args.w_cac * result["quality_loss"]
+            )
+            self.assertAlmostEqual(result["loss"], expected_loss, places=5)
             adapter.args.epochs = 0
             adapter.fit([])
             self.assertEqual(len(adapter.short_memory), 1)
+        finally:
+            adapter.close()
+
+    def test_case_teacher_uses_selected_view_and_prompt_bridge_uses_current_weight(self):
+        args = _args(
+            num_aug_views=1,
+            selection_p=0.5,
+            w_cac=0.0,
+            w_entropy=0.0,
+            confidence_threshold=0.5,
+        )
+        model = _TinyVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            short_prompt = torch.full((1, 1, 4), 2.0)
+            with torch.no_grad():
+                adapter.soft_prompt_embedding.fill_(1.0)
+            adapter._prepare_lspm = lambda _patches, _masks: {
+                "short_prompt": short_prompt,
+                "long_prompt": torch.full((1, 1, 4), 3.0),
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "historical_weight": 0.25,
+            }
+            adapter._sample_case_view_params = lambda _count: [
+                {"scale": 1.0, "offset": 0.0},
+                {"scale": 1.0, "offset": 5.0},
+            ]
+            adapter._select_case_views = lambda *_args: (
+                torch.tensor([[1]], dtype=torch.long),
+                {
+                    "selected_views": [1],
+                    "selection_metric": "cac",
+                    "use_entropy_rank": False,
+                    "cac": [0.0, 1.0],
+                    "tdc": None,
+                    "entropy": [0.0, 0.0],
+                    "quality_rank": [1.0, 0.0],
+                    "combined_rank": [1.0, 0.0],
+                },
+            )
+            patch = torch.zeros(1, 2, 2, 2)
+            mask = torch.ones(2, 2, 2)
+            adapter.adapt_case_patches([patch], [mask], "selected-teacher")
+
+            # Selection forwards happen first. The final two forwards are the
+            # long-prompt teacher and the gradient-carrying student on view 1.
+            self.assertTrue(torch.equal(model.image_calls[-2], model.image_calls[-1]))
+            self.assertTrue(torch.allclose(model.image_calls[-1], torch.full_like(model.image_calls[-1], 5.0)))
+            self.assertTrue(torch.allclose(model.prompt_calls[-2], torch.full_like(model.prompt_calls[-2], 3.0)))
+            # The value is the short prompt, while its gradient bridge is
+            # exactly (1 - historical_weight) = 0.75.
+            expected_student = torch.full_like(model.prompt_calls[-1], 2.0)
+            self.assertTrue(torch.allclose(model.prompt_calls[-1], expected_student))
+        finally:
+            adapter.close()
+
+    def test_case_lspm_bridge_scales_soft_prompt_gradient(self):
+        args = _args(
+            num_aug_views=1,
+            selection_p=0.5,
+            w_cac=0.0,
+            w_entropy=0.0,
+            confidence_threshold=0.5,
+        )
+        torch.manual_seed(123)
+        reference = _TinyVoxTell()
+        reference_state = reference.state_dict()
+
+        def run(historical_weight):
+            model = _TinyVoxTell()
+            model.load_state_dict(reference_state)
+            adapter = VoxTellPromptSFDA(
+                model, torch.ones(1, 1, 4), torch.device("cpu"), args
+            )
+            captured = []
+            handle = adapter.soft_prompt_embedding.register_hook(
+                lambda gradient: captured.append(gradient.detach().clone())
+            )
+            adapter._prepare_lspm = lambda _patches, _masks: {
+                "short_prompt": torch.full((1, 1, 4), 2.0),
+                "long_prompt": torch.full((1, 1, 4), 3.0),
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "historical_weight": historical_weight,
+            }
+            adapter._sample_case_view_params = lambda _count: [
+                {"scale": 1.0, "offset": 0.0},
+                {"scale": 1.0, "offset": 5.0},
+            ]
+            adapter._select_case_views = lambda *_args: (
+                torch.tensor([[1]], dtype=torch.long),
+                {
+                    "selected_views": [1],
+                    "selection_metric": "cac",
+                    "use_entropy_rank": False,
+                    "cac": [0.0, 1.0],
+                    "tdc": None,
+                    "entropy": [0.0, 0.0],
+                    "quality_rank": [1.0, 0.0],
+                    "combined_rank": [1.0, 0.0],
+                },
+            )
+            try:
+                adapter.adapt_case_patches(
+                    [torch.zeros(1, 2, 2, 2)],
+                    [torch.ones(2, 2, 2)],
+                    "bridge-gradient",
+                )
+                self.assertEqual(len(captured), 1)
+                return captured[0]
+            finally:
+                handle.remove()
+                adapter.close()
+
+        full_bridge = run(0.0)
+        weighted_bridge = run(0.25)
+        self.assertTrue(torch.allclose(weighted_bridge, full_bridge * 0.75, atol=1e-6))
+
+    def test_case_tdc_invalid_views_are_excluded_and_all_invalid_falls_back(self):
+        args = _args(
+            quality_metric="tdc",
+            num_aug_views=2,
+            selection_p=1.0 / 3.0,
+            use_entropy_rank=False,
+        )
+        adapter = VoxTellPromptSFDA(
+            _TinyTDCVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            patch = torch.zeros(1, 2, 2, 2)
+            masks = [torch.zeros(2, 2, 2)]
+            params = [
+                {"scale": 1.0, "offset": 0.0},
+                {"scale": 1.0, "offset": 1.0},
+                {"scale": 1.0, "offset": 2.0},
+            ]
+            adapter._case_tdc_quality = lambda *_args: 0.0
+            selected, details = adapter._select_case_views(
+                [patch], masks, adapter.soft_prompt_embedding.detach(), "invalid", params
+            )
+            self.assertEqual(selected.tolist(), [[0]])
+            self.assertEqual(details["tdc_valid"], [False, False, False])
+            self.assertEqual(details["combined_rank"], [float("inf")] * 3)
+        finally:
+            adapter.close()
+
+    def test_case_tdc_ranking_drops_invalid_views_from_top_k(self):
+        import sfda_voxtell
+
+        args = _args(
+            quality_metric="tdc",
+            num_aug_views=2,
+            selection_p=1.0,
+            use_entropy_rank=False,
+        )
+        adapter = VoxTellPromptSFDA(
+            _TinyTDCVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        try:
+            def fake_tdc(_decoder_outputs, valid_mask=None):
+                del valid_mask
+                intersection = torch.zeros(3, 6)
+                count1 = torch.zeros(3, 6)
+                count2 = torch.zeros(3, 6)
+                intersection[0].fill_(2.0)
+                count1[0].fill_(2.0)
+                count2[0].fill_(2.0)
+                intersection[2].fill_(1.0)
+                count1[2].fill_(5.0)
+                count2[2].fill_(5.0)
+                return {
+                    "intersection": intersection,
+                    "count1": count1,
+                    "count2": count2,
+                    "finite": torch.ones(3, dtype=torch.bool),
+                }
+
+            with mock.patch.object(
+                sfda_voxtell, "compute_tdc_consensus", side_effect=fake_tdc
+            ):
+                selected, details = adapter._select_case_views(
+                    [torch.zeros(1, 2, 2, 2)],
+                    [torch.ones(2, 2, 2)],
+                    adapter.soft_prompt_embedding.detach(),
+                    "partial-invalid",
+                    [
+                        {"scale": 1.0, "offset": 0.0},
+                        {"scale": 1.0, "offset": 1.0},
+                        {"scale": 1.0, "offset": 2.0},
+                    ],
+                )
+            self.assertEqual(details["tdc_valid"], [True, False, True])
+            self.assertEqual(selected.tolist(), [[0, 2]])
         finally:
             adapter.close()
 

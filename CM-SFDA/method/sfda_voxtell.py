@@ -1495,19 +1495,43 @@ class VoxTellPromptSFDA:
             tdc_scores = pair_dice = pair_valid = tdc_valid = pair_count = None
             quality_scores = cac_scores
         entropy_scores = entropy_sum / entropy_mass.clamp_min(1.0)
-        quality_rank = average_tie_ranks(
-            quality_scores.unsqueeze(0), descending=True
-        )[0]
+        if self.quality_metric == "tdc":
+            # A view with no valid D5--D2 pair is not a low-quality view: it
+            # is unrankable and must not win because its fallback TDC value is
+            # numerically zero.  Preserve a deterministic view-0 fallback
+            # when every candidate is invalid.
+            has_valid_tdc = bool(tdc_valid.any())
+            rankable_quality = quality_scores.masked_fill(~tdc_valid, float("-inf"))
+            quality_rank = average_tie_ranks(
+                rankable_quality.unsqueeze(0), descending=True
+            )[0]
+            quality_rank = quality_rank.masked_fill(~tdc_valid, float("inf"))
+        else:
+            has_valid_tdc = True
+            quality_rank = average_tie_ranks(
+                quality_scores.unsqueeze(0), descending=True
+            )[0]
         entropy_rank = average_tie_ranks(
             entropy_scores.unsqueeze(0), descending=False
         )[0]
+        if self.quality_metric == "tdc":
+            entropy_rank = entropy_rank.masked_fill(~tdc_valid, float("inf"))
         combined_rank = (
             quality_rank + entropy_rank
             if self.use_entropy_rank
             else quality_rank
         )
         keep = max(1, int(num_views * float(self.args.selection_p)))
-        selected = torch.argsort(combined_rank, stable=True)[:keep].unsqueeze(0)
+        if self.quality_metric == "tdc":
+            if not has_valid_tdc:
+                selected = torch.zeros((1, 1), dtype=torch.long, device=self.device)
+            else:
+                # Never fill a rectangular top-k result with invalid TDC
+                # candidates when fewer valid views remain.
+                keep = min(keep, int(tdc_valid.sum().item()))
+                selected = torch.argsort(combined_rank, stable=True)[:keep].unsqueeze(0)
+        else:
+            selected = torch.argsort(combined_rank, stable=True)[:keep].unsqueeze(0)
         details = {
             "case_id": str(case_id),
             "cac": cac_scores.detach().cpu().tolist(),
@@ -1574,16 +1598,17 @@ class VoxTellPromptSFDA:
                 device_type=self.device.type, enabled=self.device.type == "cuda"
             ):
                 teacher_logits = self.model(
-                    patch.unsqueeze(0), self._text(lspm["long_prompt"], 1)
+                    selected_views,
+                    self._text(lspm["long_prompt"], len(selected_indices)),
                 )
                 teacher_prob = torch.sigmoid(teacher_logits.float())
                 teacher_pseudo = (teacher_prob >= 0.5).float()
                 confidence = torch.maximum(teacher_prob, 1.0 - teacher_prob)
                 selected_valid = (
                     (confidence >= self.args.confidence_threshold).float()
-                    * valid_mask.unsqueeze(0)
+                    * valid_mask.unsqueeze(0).expand_as(teacher_prob)
                 )
-            student_prompt = lspm["short_prompt"] + (
+            student_prompt = lspm["short_prompt"] + (1.0 - lspm["historical_weight"]) * (
                 self.soft_prompt_embedding - self.soft_prompt_embedding.detach()
             )
             with torch.autocast(
@@ -1593,9 +1618,8 @@ class VoxTellPromptSFDA:
                     selected_views,
                     self._text(student_prompt, len(selected_indices)),
                 )
-                pseudo = teacher_pseudo.expand_as(student_logits)
-                pseudo = pseudo.expand(len(selected_indices), *pseudo.shape[1:])
-                valid = selected_valid.expand_as(student_logits)
+                pseudo = teacher_pseudo
+                valid = selected_valid
                 segmentation, bce, dice = masked_segmentation_loss(
                     student_logits, pseudo, valid
                 )
@@ -1633,7 +1657,11 @@ class VoxTellPromptSFDA:
                 "cac_loss": loss_cac,
                 "quality_loss": loss_quality,
             }.items():
-                totals[key] += float(value.detach().cpu()) / patch_count
+                # ``loss`` already contains the case-level 1/P factor used for
+                # gradient accumulation.  Applying it again here made the
+                # reported loss smaller by another factor of P.
+                divisor = 1.0 if key == "loss" else patch_count
+                totals[key] += float(value.detach().cpu()) / divisor
         self._assert_no_forbidden_grads("case backward")
         self.scaler.unscale_(self.optimizer)
         torch.nn.utils.clip_grad_norm_([self.soft_prompt_embedding], self.args.grad_clip)
