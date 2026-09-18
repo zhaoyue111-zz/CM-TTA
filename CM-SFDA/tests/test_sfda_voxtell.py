@@ -1045,6 +1045,42 @@ class SoftPromptOnlyTests(unittest.TestCase):
         finally:
             adapter.close()
 
+    def test_case_tdc_mode_uses_differentiable_cac_for_prompt_update(self):
+        args = _args(
+            quality_metric="tdc",
+            num_aug_views=1,
+            selection_p=0.5,
+            use_entropy_rank=False,
+            w_seg=0.0,
+            w_entropy=0.0,
+            w_cac=0.7,
+        )
+        model = _TinyTDCVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        captured = []
+        hook = adapter.soft_prompt_embedding.register_hook(
+            lambda gradient: captured.append(gradient.detach().clone())
+        )
+        try:
+            result = adapter.adapt_case_patches(
+                [torch.randn(1, 2, 2, 2)],
+                [torch.ones(2, 2, 2)],
+                "tdc-cac-gradient",
+            )
+            self.assertTrue(np.isfinite(result["cac"]))
+            self.assertAlmostEqual(result["cac_loss"], -result["cac"], places=5)
+            selected = result["selected_view"]
+            self.assertAlmostEqual(
+                result["quality"], result["view_selection"]["tdc"][selected], places=5
+            )
+            self.assertEqual(len(captured), 1)
+            self.assertGreater(float(captured[0].norm()), 0.0)
+        finally:
+            hook.remove()
+            adapter.close()
+
     def test_case_tdc_ranking_drops_invalid_views_from_top_k(self):
         import sfda_voxtell
 

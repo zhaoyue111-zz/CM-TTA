@@ -1579,6 +1579,7 @@ class VoxTellPromptSFDA:
             "bce": 0.0,
             "dice": 0.0,
             "entropy": 0.0,
+            "cac": 0.0,
             "cac_loss": 0.0,
             "quality_loss": 0.0,
         }
@@ -1631,21 +1632,10 @@ class VoxTellPromptSFDA:
                     valid_mask=valid_mask.expand(len(selected_indices), *valid_mask.shape[1:]),
                 )
                 loss_cac = cac_loss(selected_cac)
-                quality_values = torch.tensor(
-                    [selection["tdc" if self.quality_metric == "tdc" else "cac"][index]
-                     for index in selected_indices],
-                    device=self.device,
-                )
-                loss_quality = -quality_values.mean()
-                quality_weight = (
-                    self.args.w_cac
-                    if self.quality_mode == "cac"
-                    else float(getattr(self.args, "w_quality", 0.0))
-                )
                 loss = (
                     self.args.w_seg * segmentation
                     + self.args.w_entropy * entropy
-                    + quality_weight * loss_quality
+                    + self.args.w_cac * loss_cac
                 ) / patch_count
             self.scaler.scale(loss).backward()
             for key, value in {
@@ -1654,8 +1644,12 @@ class VoxTellPromptSFDA:
                 "bce": bce,
                 "dice": dice,
                 "entropy": entropy,
+                "cac": selected_cac.mean(),
                 "cac_loss": loss_cac,
-                "quality_loss": loss_quality,
+                # Keep the historical field for log/checkpoint consumers;
+                # case-level training is now driven by the differentiable CAC
+                # loss, never by detached selection quality.
+                "quality_loss": loss_cac,
             }.items():
                 # ``loss`` already contains the case-level 1/P factor used for
                 # gradient accumulation.  Applying it again here made the
