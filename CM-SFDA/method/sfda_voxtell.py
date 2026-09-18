@@ -545,6 +545,7 @@ class VoxTellPromptSFDA:
         requested_metric = getattr(args, "quality_metric", None)
         self.quality_metric = str(requested_metric or "cac").lower()
         self.use_entropy_rank = bool(getattr(args, "use_entropy_rank", True))
+        self.view_batch_size = max(1, int(getattr(args, "view_batch_size", 1)))
         if self.quality_metric not in ("cac", "saaf", "tdc"):
             raise ValueError("quality_metric must be 'cac', 'saaf' or 'tdc'")
         if self.quality_metric == "saaf" and float(getattr(args, "w_quality", 0.0)) != 0.0:
@@ -807,7 +808,15 @@ class VoxTellPromptSFDA:
         return views
 
     @staticmethod
-    def _make_case_views(base, valid_mask, num_aug_views=9, params=None):
+    def _make_case_views(
+        base,
+        valid_mask,
+        num_aug_views=9,
+        params=None,
+        start=0,
+        end=None,
+        view_indices=None,
+    ):
         """Return original + aligned intensity-only views with zeroed padding."""
         if valid_mask.ndim == 4 and valid_mask.shape[0] == 1:
             valid_mask = valid_mask[0]
@@ -821,9 +830,17 @@ class VoxTellPromptSFDA:
                         "offset": float(torch.empty(()).uniform_(-0.15, 0.15)),
                     }
                 )
+        if view_indices is not None:
+            indices = [int(index) for index in view_indices]
+        else:
+            end = len(params) if end is None else int(end)
+            indices = list(range(int(start), end))
+        if not indices or any(index < 0 or index >= len(params) for index in indices):
+            raise ValueError("view indices must select at least one valid case view")
         views = []
-        for param in params:
-            view = base * param["scale"] + param["offset"]
+        for view_index in indices:
+            param = params[view_index]
+            view = base if view_index == 0 else base * param["scale"] + param["offset"]
             views.append((view * valid_mask.unsqueeze(0)).contiguous())
         return torch.stack(views, dim=0)
 
@@ -1429,60 +1446,80 @@ class VoxTellPromptSFDA:
 
     def _select_case_views(self, patches, valid_masks, prompt, case_id, params):
         """Select aligned views after exact aggregation over all case patches."""
-        num_views = 1 + int(getattr(self.args, "num_aug_views", 9))
+        num_views = len(params)
         cac_accumulator = None
         intersection = count1 = count2 = finite = None
         entropy_sum = torch.zeros(num_views, device=self.device)
         entropy_mass = torch.zeros_like(entropy_sum)
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
-                views = self._make_case_views(
-                    patch.to(self.device, non_blocking=True),
-                    valid_mask.to(self.device, non_blocking=True),
-                    num_views - 1,
-                    params=params,
-                )
-                view_valid = valid_mask.to(self.device, non_blocking=True).bool()
-                view_valid = view_valid.unsqueeze(0).expand(num_views, *view_valid.shape)
-                self._cac_features.clear()
-                text = self._text(prompt, num_views)
-                if self.quality_metric == "tdc":
-                    decoder_outputs = self.model(
-                        views, text, return_decoder_outputs=True
+                patch = patch.to(self.device, non_blocking=True)
+                patch_valid = valid_mask.to(self.device, non_blocking=True).bool()
+                if patch_valid.ndim == 4 and patch_valid.shape[0] == 1:
+                    patch_valid = patch_valid[0]
+                for start in range(0, num_views, self.view_batch_size):
+                    end = min(num_views, start + self.view_batch_size)
+                    views = self._make_case_views(
+                        patch,
+                        patch_valid,
+                        num_views - 1,
+                        params=params,
+                        start=start,
+                        end=end,
                     )
-                    logits = decoder_outputs[0]
-                    local_tdc = compute_tdc_consensus(
-                        decoder_outputs, valid_mask=view_valid
-                    )
-                    if intersection is None:
-                        intersection = local_tdc["intersection"].clone()
-                        count1 = local_tdc["count1"].clone()
-                        count2 = local_tdc["count2"].clone()
-                        finite = local_tdc["finite"].clone()
+                    view_valid = patch_valid.unsqueeze(0).expand(end - start, *patch_valid.shape)
+                    self._cac_features.clear()
+                    text = self._text(prompt, end - start)
+                    if self.quality_metric == "tdc":
+                        decoder_outputs = self.model(
+                            views, text, return_decoder_outputs=True
+                        )
+                        logits = decoder_outputs[0]
+                        local_tdc = compute_tdc_consensus(
+                            decoder_outputs, valid_mask=view_valid
+                        )
+                        if intersection is None:
+                            intersection = torch.zeros(
+                                (num_views, *local_tdc["intersection"].shape[1:]),
+                                device=local_tdc["intersection"].device,
+                                dtype=local_tdc["intersection"].dtype,
+                            )
+                            count1 = torch.zeros_like(intersection)
+                            count2 = torch.zeros_like(intersection)
+                            finite = torch.ones(
+                                num_views,
+                                device=local_tdc["finite"].device,
+                                dtype=torch.bool,
+                            )
+                        intersection[start:end].add_(local_tdc["intersection"])
+                        count1[start:end].add_(local_tdc["count1"])
+                        count2[start:end].add_(local_tdc["count2"])
+                        finite[start:end] &= local_tdc["finite"]
                     else:
-                        intersection.add_(local_tdc["intersection"])
-                        count1.add_(local_tdc["count1"])
-                        count2.add_(local_tdc["count2"])
-                        finite &= local_tdc["finite"]
-                else:
-                    logits = self.model(views, text)
-                local_cac = cac_patch_components(
-                    self._cac_features["vision"],
-                    self._cac_features["text"],
-                    logits,
-                    valid_mask=view_valid,
-                )
-                if cac_accumulator is None:
-                    cac_accumulator = {
-                        key: value.clone() for key, value in local_cac.items()
-                    }
-                else:
+                        logits = self.model(views, text)
+                    local_cac = cac_patch_components(
+                        self._cac_features["vision"],
+                        self._cac_features["text"],
+                        logits,
+                        valid_mask=view_valid,
+                    )
+                    if cac_accumulator is None:
+                        cac_accumulator = {
+                            key: torch.zeros(
+                                (num_views, *value.shape[1:]),
+                                device=value.device,
+                                dtype=value.dtype,
+                            )
+                            for key, value in local_cac.items()
+                        }
                     for key, value in local_cac.items():
-                        cac_accumulator[key].add_(value)
-                probability = torch.sigmoid(logits[:, 0].float()).clamp(1e-6, 1 - 1e-6)
-                entropy = -(probability * probability.log())
-                entropy_sum += (entropy * view_valid.float()).flatten(1).sum(dim=1)
-                entropy_mass += view_valid.flatten(1).sum(dim=1)
+                        cac_accumulator[key][start:end].add_(value)
+                    probability = torch.sigmoid(logits[:, 0].float()).clamp(1e-6, 1 - 1e-6)
+                    entropy = -(probability * probability.log())
+                    entropy_sum[start:end].add_(
+                        (entropy * view_valid.float()).flatten(1).sum(dim=1)
+                    )
+                    entropy_mass[start:end].add_(view_valid.flatten(1).sum(dim=1))
         if cac_accumulator is None:
             raise ValueError("A complete case must contain at least one patch")
         cac_scores = cac_score_from_components(cac_accumulator)
@@ -1594,7 +1631,8 @@ class VoxTellPromptSFDA:
                 valid_mask,
                 int(getattr(self.args, "num_aug_views", 9)),
                 params=params,
-            )[selected_indices]
+                view_indices=selected_indices,
+            )
             with torch.no_grad(), torch.autocast(
                 device_type=self.device.type, enabled=self.device.type == "cuda"
             ):

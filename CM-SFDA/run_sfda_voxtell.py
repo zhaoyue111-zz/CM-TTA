@@ -350,6 +350,10 @@ def parse_args():
                         help="Fraction of augmented views retained by quality+entropy ranking")
     parser.add_argument("--num_aug_views", type=int, default=9,
                         help="Number of augmented views; total candidates are original + this value")
+    parser.add_argument(
+        "--view_batch_size", type=int, default=1,
+        help="Number of case views forwarded together during TDC/CAC selection",
+    )
     entropy_group = parser.add_mutually_exclusive_group()
     entropy_group.add_argument(
         "--use_entropy_rank", dest="use_entropy_rank", action="store_true",

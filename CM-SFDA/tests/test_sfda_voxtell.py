@@ -899,6 +899,55 @@ class SoftPromptOnlyTests(unittest.TestCase):
         finally:
             adapter.close()
 
+    def test_case_tdc_view_chunking_matches_full_view_forward(self):
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            *[
+                {"scale": 1.0 + 0.01 * index, "offset": 0.01 * index}
+                for index in range(1, 10)
+            ],
+        ]
+        patches = [torch.randn(1, 2, 2, 2), torch.randn(1, 2, 2, 2)]
+        valid_masks = [torch.ones(2, 2, 2), torch.ones(2, 2, 2)]
+        torch.manual_seed(321)
+        reference = _TinyTDCVoxTell()
+        reference_state = reference.state_dict()
+        baseline_tdc = None
+        baseline_selected = None
+        for view_batch_size in (1, 3, 10):
+            model = _TinyTDCVoxTell()
+            model.load_state_dict(reference_state)
+            adapter = VoxTellPromptSFDA(
+                model,
+                torch.ones(1, 1, 4),
+                torch.device("cpu"),
+                _args(
+                    quality_metric="tdc",
+                    num_aug_views=9,
+                    selection_p=0.1,
+                    use_entropy_rank=False,
+                    view_batch_size=view_batch_size,
+                ),
+            )
+            try:
+                selected, details = adapter._select_case_views(
+                    patches,
+                    valid_masks,
+                    adapter.soft_prompt_embedding.detach(),
+                    "chunked-case",
+                    params,
+                )
+                tdc = torch.tensor(details["tdc"])
+                if baseline_tdc is None:
+                    baseline_tdc = tdc
+                    baseline_selected = selected
+                else:
+                    self.assertTrue(torch.equal(selected, baseline_selected))
+                    self.assertTrue(torch.equal(tdc, baseline_tdc))
+                self.assertLessEqual(max(batch_size for batch_size, _ in model.forward_calls), view_batch_size)
+            finally:
+                adapter.close()
+
     def test_case_teacher_uses_selected_view_and_prompt_bridge_uses_current_weight(self):
         args = _args(
             num_aug_views=1,
@@ -1089,6 +1138,7 @@ class SoftPromptOnlyTests(unittest.TestCase):
             num_aug_views=2,
             selection_p=1.0,
             use_entropy_rank=False,
+            view_batch_size=10,
         )
         adapter = VoxTellPromptSFDA(
             _TinyTDCVoxTell(), torch.ones(1, 1, 4), torch.device("cpu"), args
