@@ -546,6 +546,11 @@ class VoxTellPromptSFDA:
         self.quality_metric = str(requested_metric or "cac").lower()
         self.use_entropy_rank = bool(getattr(args, "use_entropy_rank", True))
         self.view_batch_size = max(1, int(getattr(args, "view_batch_size", 1)))
+        self.pseudo_label_refresh_steps = int(
+            getattr(args, "pseudo_label_refresh_steps", 1)
+        )
+        if self.pseudo_label_refresh_steps < 1:
+            raise ValueError("pseudo_label_refresh_steps must be at least 1")
         if self.quality_metric not in ("cac", "saaf", "tdc"):
             raise ValueError("quality_metric must be 'cac', 'saaf' or 'tdc'")
         if self.quality_metric == "saaf" and float(getattr(args, "w_quality", 0.0)) != 0.0:
@@ -1593,7 +1598,7 @@ class VoxTellPromptSFDA:
         self, patches, valid_masks, case_id, epoch=None, case_start_callback=None,
         case_end_callback=None,
     ):
-        """Adapt one complete non-overlap-patched case with one optimizer step."""
+        """Adapt one complete case with periodic teacher pseudo-label refreshes."""
         if len(patches) != len(valid_masks) or not patches:
             raise ValueError("A case requires matching non-empty patches and valid masks")
         lspm = self._prepare_lspm(patches, valid_masks)
@@ -1609,7 +1614,6 @@ class VoxTellPromptSFDA:
             patches, valid_masks, lspm["short_prompt"], case_id, params
         )
         selected_indices = selected[0].detach().cpu().tolist()
-        self.optimizer.zero_grad(set_to_none=True)
         totals = {
             "loss": 0.0,
             "segmentation": 0.0,
@@ -1621,85 +1625,120 @@ class VoxTellPromptSFDA:
             "quality_loss": 0.0,
         }
         patch_count = float(len(patches))
-        for patch, valid_mask in zip(patches, valid_masks):
-            patch = patch.to(self.device, non_blocking=True)
-            valid_mask = valid_mask.to(self.device, non_blocking=True)
-            if valid_mask.ndim == 3:
-                valid_mask = valid_mask.unsqueeze(0)
-            selected_views = self._make_case_views(
-                patch,
-                valid_mask,
-                int(getattr(self.args, "num_aug_views", 9)),
-                params=params,
-                view_indices=selected_indices,
-            )
-            with torch.no_grad(), torch.autocast(
-                device_type=self.device.type, enabled=self.device.type == "cuda"
+        num_steps = self.pseudo_label_refresh_steps
+        pseudo_label_refreshes = 0
+        pseudo_cache = None
+        for step_index in range(num_steps):
+            # The cache is intentionally detached and reused for the next K
+            # student updates.  It is rebuilt only at a refresh boundary.
+            if step_index % self.pseudo_label_refresh_steps == 0:
+                pseudo_cache = []
+                for patch, valid_mask in zip(patches, valid_masks):
+                    patch_device = patch.to(self.device, non_blocking=True)
+                    valid_device = valid_mask.to(self.device, non_blocking=True)
+                    if valid_device.ndim == 3:
+                        valid_device = valid_device.unsqueeze(0)
+                    selected_views = self._make_case_views(
+                        patch_device,
+                        valid_device,
+                        int(getattr(self.args, "num_aug_views", 9)),
+                        params=params,
+                        view_indices=selected_indices,
+                    )
+                    with torch.no_grad(), torch.autocast(
+                        device_type=self.device.type, enabled=self.device.type == "cuda"
+                    ):
+                        teacher_logits = self.model(
+                            selected_views,
+                            self._text(lspm["long_prompt"], len(selected_indices)),
+                        )
+                        teacher_prob = torch.sigmoid(teacher_logits.float())
+                        teacher_pseudo = (teacher_prob >= 0.5).float()
+                        confidence = torch.maximum(teacher_prob, 1.0 - teacher_prob)
+                        selected_valid = (
+                            (confidence >= self.args.confidence_threshold).float()
+                            * valid_device.unsqueeze(0).expand_as(teacher_prob)
+                        )
+                    pseudo_cache.append(
+                        (teacher_pseudo.cpu(), selected_valid.cpu())
+                    )
+                pseudo_label_refreshes += 1
+
+            self.optimizer.zero_grad(set_to_none=True)
+            for patch, valid_mask, cached in zip(
+                patches, valid_masks, pseudo_cache
             ):
-                teacher_logits = self.model(
-                    selected_views,
-                    self._text(lspm["long_prompt"], len(selected_indices)),
+                patch = patch.to(self.device, non_blocking=True)
+                valid_mask = valid_mask.to(self.device, non_blocking=True)
+                if valid_mask.ndim == 3:
+                    valid_mask = valid_mask.unsqueeze(0)
+                selected_views = self._make_case_views(
+                    patch,
+                    valid_mask,
+                    int(getattr(self.args, "num_aug_views", 9)),
+                    params=params,
+                    view_indices=selected_indices,
                 )
-                teacher_prob = torch.sigmoid(teacher_logits.float())
-                teacher_pseudo = (teacher_prob >= 0.5).float()
-                confidence = torch.maximum(teacher_prob, 1.0 - teacher_prob)
-                selected_valid = (
-                    (confidence >= self.args.confidence_threshold).float()
-                    * valid_mask.unsqueeze(0).expand_as(teacher_prob)
+                teacher_pseudo = cached[0].to(self.device, non_blocking=True)
+                selected_valid = cached[1].to(self.device, non_blocking=True)
+                student_prompt = lspm["short_prompt"] + (
+                    1.0 - lspm["historical_weight"]
+                ) * (
+                    self.soft_prompt_embedding - self.soft_prompt_embedding.detach()
                 )
-            student_prompt = lspm["short_prompt"] + (1.0 - lspm["historical_weight"]) * (
-                self.soft_prompt_embedding - self.soft_prompt_embedding.detach()
+                with torch.autocast(
+                    device_type=self.device.type, enabled=self.device.type == "cuda"
+                ):
+                    student_logits = self.model(
+                        selected_views,
+                        self._text(student_prompt, len(selected_indices)),
+                    )
+                    segmentation, bce, dice = masked_segmentation_loss(
+                        student_logits, teacher_pseudo, selected_valid
+                    )
+                    entropy = entropy_loss(student_logits, selected_valid)
+                    selected_cac = compute_cac_score(
+                        self._cac_features["vision"],
+                        self._cac_features["text"],
+                        student_logits,
+                        valid_mask=valid_mask.expand(
+                            len(selected_indices), *valid_mask.shape[1:]
+                        ),
+                    )
+                    loss_cac = cac_loss(selected_cac)
+                    loss = (
+                        self.args.w_seg * segmentation
+                        + self.args.w_entropy * entropy
+                        + self.args.w_cac * loss_cac
+                    ) / patch_count
+                self.scaler.scale(loss).backward()
+                for key, value in {
+                    "loss": loss,
+                    "segmentation": segmentation,
+                    "bce": bce,
+                    "dice": dice,
+                    "entropy": entropy,
+                    "cac": selected_cac.mean(),
+                    "cac_loss": loss_cac,
+                    # Compatibility field; it is the live CAC loss, not
+                    # detached TDC/CAC selection quality.
+                    "quality_loss": loss_cac,
+                }.items():
+                    divisor = 1.0 if key == "loss" else patch_count
+                    totals[key] += float(value.detach().cpu()) / divisor
+            self._assert_no_forbidden_grads("case backward")
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                [self.soft_prompt_embedding], self.args.grad_clip
             )
-            with torch.autocast(
-                device_type=self.device.type, enabled=self.device.type == "cuda"
-            ):
-                student_logits = self.model(
-                    selected_views,
-                    self._text(student_prompt, len(selected_indices)),
-                )
-                pseudo = teacher_pseudo
-                valid = selected_valid
-                segmentation, bce, dice = masked_segmentation_loss(
-                    student_logits, pseudo, valid
-                )
-                entropy = entropy_loss(student_logits, valid)
-                selected_cac = compute_cac_score(
-                    self._cac_features["vision"],
-                    self._cac_features["text"],
-                    student_logits,
-                    valid_mask=valid_mask.expand(len(selected_indices), *valid_mask.shape[1:]),
-                )
-                loss_cac = cac_loss(selected_cac)
-                loss = (
-                    self.args.w_seg * segmentation
-                    + self.args.w_entropy * entropy
-                    + self.args.w_cac * loss_cac
-                ) / patch_count
-            self.scaler.scale(loss).backward()
-            for key, value in {
-                "loss": loss,
-                "segmentation": segmentation,
-                "bce": bce,
-                "dice": dice,
-                "entropy": entropy,
-                "cac": selected_cac.mean(),
-                "cac_loss": loss_cac,
-                # Keep the historical field for log/checkpoint consumers;
-                # case-level training is now driven by the differentiable CAC
-                # loss, never by detached selection quality.
-                "quality_loss": loss_cac,
-            }.items():
-                # ``loss`` already contains the case-level 1/P factor used for
-                # gradient accumulation.  Applying it again here made the
-                # reported loss smaller by another factor of P.
-                divisor = 1.0 if key == "loss" else patch_count
-                totals[key] += float(value.detach().cpu()) / divisor
-        self._assert_no_forbidden_grads("case backward")
-        self.scaler.unscale_(self.optimizer)
-        torch.nn.utils.clip_grad_norm_([self.soft_prompt_embedding], self.args.grad_clip)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        self.optimizer_step_count += 1
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer_step_count += 1
+        for key in (
+            "loss", "segmentation", "bce", "dice", "entropy", "cac",
+            "cac_loss", "quality_loss",
+        ):
+            totals[key] /= num_steps
         with torch.no_grad():
             self.short_prompt.copy_(lspm["short_prompt"])
             self.long_prompt.copy_(lspm["long_prompt"])
@@ -1720,7 +1759,8 @@ class VoxTellPromptSFDA:
                 "historical_quality": lspm["historical_quality"],
                 "historical_weight": lspm["historical_weight"],
                 "num_patches": len(patches),
-                "optimizer_steps_for_case": 1,
+                "optimizer_steps_for_case": num_steps,
+                "pseudo_label_refreshes": pseudo_label_refreshes,
                 "coverage": float(
                     sum(float(mask.sum()) for mask in valid_masks)
                     / max(1.0, sum(float(mask.numel()) for mask in valid_masks))

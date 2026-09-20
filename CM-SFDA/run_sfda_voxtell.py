@@ -354,6 +354,13 @@ def parse_args():
         "--view_batch_size", type=int, default=1,
         help="Number of case views forwarded together during TDC/CAC selection",
     )
+    parser.add_argument(
+        "--pseudo_label_refresh_steps", type=int, default=1,
+        help=(
+            "Student optimizer steps that reuse one teacher pseudo-label before "
+            "refreshing it"
+        ),
+    )
     entropy_group = parser.add_mutually_exclusive_group()
     entropy_group.add_argument(
         "--use_entropy_rank", dest="use_entropy_rank", action="store_true",
@@ -505,6 +512,10 @@ def main():
             "quality": selection["quality_rank"],
             "entropy": selection["entropy"],
             "combined_rank": selection["combined_rank"],
+            "pseudo_label_refreshes": int(_values.get("pseudo_label_refreshes", 0)),
+            "optimizer_steps_for_case": int(
+                _values.get("optimizer_steps_for_case", 0)
+            ),
         }
         case_view_diagnostics.append(record)
         print(

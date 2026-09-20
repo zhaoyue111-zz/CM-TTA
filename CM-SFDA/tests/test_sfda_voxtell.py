@@ -885,6 +885,7 @@ class SoftPromptOnlyTests(unittest.TestCase):
             result = adapter.adapt_case_patches(patches, masks, "case-a", epoch=1)
             self.assertEqual(len(result["view_selection"]["view_params"]), 10)
             self.assertEqual(result["optimizer_steps_for_case"], 1)
+            self.assertEqual(result["pseudo_label_refreshes"], 1)
             self.assertEqual(adapter.optimizer_step_count, 1)
             self.assertEqual(len(adapter.short_memory), 1)
             expected_loss = (
@@ -896,6 +897,59 @@ class SoftPromptOnlyTests(unittest.TestCase):
             adapter.args.epochs = 0
             adapter.fit([])
             self.assertEqual(len(adapter.short_memory), 1)
+        finally:
+            adapter.close()
+
+    def test_case_reuses_pseudo_label_for_k_steps_and_updates_soft_prompt_each_time(self):
+        import sfda_voxtell
+
+        args = _args(
+            num_aug_views=1,
+            selection_p=0.5,
+            pseudo_label_refresh_steps=3,
+            w_cac=1.0,
+        )
+        model = _TinyVoxTell()
+        adapter = VoxTellPromptSFDA(
+            model, torch.ones(1, 1, 4), torch.device("cpu"), args
+        )
+        snapshots = []
+        original_step = adapter.optimizer.step
+
+        def capture_step(*step_args, **step_kwargs):
+            result = original_step(*step_args, **step_kwargs)
+            snapshots.append(adapter.soft_prompt_embedding.detach().clone())
+            return result
+
+        adapter.optimizer.step = capture_step
+        try:
+            with mock.patch.object(
+                sfda_voxtell,
+                "masked_segmentation_loss",
+                wraps=masked_segmentation_loss,
+            ) as segmentation_spy:
+                result = adapter.adapt_case_patches(
+                    [torch.randn(1, 2, 2, 2)],
+                    [torch.ones(2, 2, 2)],
+                    "refresh-case",
+                )
+            self.assertEqual(result["pseudo_label_refreshes"], 1)
+            self.assertEqual(result["optimizer_steps_for_case"], 3)
+            self.assertEqual(adapter.optimizer_step_count, 3)
+            self.assertEqual(len(segmentation_spy.call_args_list), 3)
+            pseudo_labels = [
+                call.args[1].detach().clone()
+                for call in segmentation_spy.call_args_list
+            ]
+            valid_masks = [
+                call.args[2].detach().clone()
+                for call in segmentation_spy.call_args_list
+            ]
+            self.assertTrue(all(torch.equal(pseudo_labels[0], value) for value in pseudo_labels[1:]))
+            self.assertTrue(all(torch.equal(valid_masks[0], value) for value in valid_masks[1:]))
+            self.assertEqual(len(snapshots), 3)
+            self.assertFalse(torch.equal(snapshots[0], snapshots[1]))
+            self.assertFalse(torch.equal(snapshots[1], snapshots[2]))
         finally:
             adapter.close()
 
