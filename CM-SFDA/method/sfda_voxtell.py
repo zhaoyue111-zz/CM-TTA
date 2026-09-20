@@ -1626,6 +1626,10 @@ class VoxTellPromptSFDA:
         }
         patch_count = float(len(patches))
         num_steps = self.pseudo_label_refresh_steps
+        # Keep the pre-case current prompt as the value anchor.  The detached
+        # anchor preserves the CM-TTA gradient bridge while allowing the
+        # forward value to reflect optimizer updates made by earlier steps.
+        base_current = self.soft_prompt_embedding.detach().clone()
         pseudo_label_refreshes = 0
         pseudo_cache = None
         for step_index in range(num_steps):
@@ -1684,7 +1688,7 @@ class VoxTellPromptSFDA:
                 student_prompt = lspm["short_prompt"] + (
                     1.0 - lspm["historical_weight"]
                 ) * (
-                    self.soft_prompt_embedding - self.soft_prompt_embedding.detach()
+                    self.soft_prompt_embedding - base_current
                 )
                 with torch.autocast(
                     device_type=self.device.type, enabled=self.device.type == "cuda"

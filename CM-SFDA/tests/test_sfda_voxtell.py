@@ -950,6 +950,10 @@ class SoftPromptOnlyTests(unittest.TestCase):
             self.assertEqual(len(snapshots), 3)
             self.assertFalse(torch.equal(snapshots[0], snapshots[1]))
             self.assertFalse(torch.equal(snapshots[1], snapshots[2]))
+            student_prompts = model.prompt_calls[-3:]
+            self.assertEqual(len(student_prompts), 3)
+            self.assertFalse(torch.equal(student_prompts[0], student_prompts[1]))
+            self.assertFalse(torch.equal(student_prompts[1], student_prompts[2]))
         finally:
             adapter.close()
 
