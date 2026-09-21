@@ -27,6 +27,7 @@
   "tversky_alpha": 0.3,
   "tversky_beta": 0.7,
   "tversky_weight": 1.0,
+  "decoder_alignment_check": false,
   "print_freq": 1,
   "tta_steps": 1
 }
