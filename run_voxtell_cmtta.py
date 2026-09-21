@@ -575,6 +575,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tversky_beta", type=float, default=0.7)
     parser.add_argument("--tversky_weight", type=float, default=1.0)
     parser.add_argument(
+        "--amb_weight",
+        type=float,
+        default=0.05,
+        help="Weight for weak BCE anchoring on M_amb & ~M_miss in decoder-masked mode.",
+    )
+    parser.add_argument(
         "--decoder_alignment_check",
         action="store_true",
         help=(

@@ -132,6 +132,7 @@ def make_args(**overrides):
         amp_init_scale=32.0,
         grad_clip=1.0,
         short_memory_length=2,
+        amb_weight=0.05,
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
@@ -349,6 +350,193 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(int(bg["bg"].sum()), 12)
         self.assertEqual(int(ambiguous["amb"].sum()), 12)
 
+    def test_amb_anchor_is_ambiguous_without_miss_and_disjoint_from_miss(self):
+        d5 = torch.full((1, 1, 1, 1, 3), -4.0)
+        d4 = torch.full_like(d5, -4.0)
+        d3 = torch.full_like(d5, -4.0)
+        d2 = torch.full_like(d5, -4.0)
+        # Voxel 0 is an ambiguous miss (one lower decoder votes foreground).
+        d4[..., 0] = 4.0
+        # Voxel 1 is ambiguous but has no lower-decoder foreground vote.
+        d4[..., 1] = 0.0
+        d3[..., 1] = 0.0
+        d2[..., 1] = 0.0
+        masks = decoder_consistency_probabilities(
+            [d5, d4, d3, d2], torch.ones(1, 1, 1, 1, 3)
+        )
+        amb_anchor = masks["amb"] & ~masks["miss"]
+        self.assertEqual(int((amb_anchor & masks["miss"]).sum()), 0)
+        self.assertTrue(bool(amb_anchor[0, 0, 0, 0, 1]))
+        self.assertTrue(bool(masks["miss"][0, 0, 0, 0, 0]))
+        self.assertFalse(bool(amb_anchor[0, 0, 0, 0, 0]))
+
+    def test_amb_bce_manual_gradient_excludes_miss_and_handles_empty_mask(self):
+        logits = torch.tensor([[[[[0.0, 1.0, -1.0]]]]], requires_grad=True)
+        target = torch.tensor([[[[[0.2, 0.8, 0.4]]]]])
+        amb_anchor = torch.tensor([[[[[1.0, 1.0, 0.0]]]]])
+        miss = torch.tensor([[[[[0.0, 0.0, 1.0]]]]])
+        self.assertEqual(int((amb_anchor.bool() & miss.bool()).sum()), 0)
+        expected = (
+            F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+            * amb_anchor
+        ).sum() / amb_anchor.sum().clamp_min(1.0)
+        loss = expected
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertEqual(float(logits.grad[0, 0, 0, 0, 2]), 0.0)
+        self.assertGreater(float(logits.grad[0, 0, 0, 0, 0].abs()), 0.0)
+        self.assertGreater(float(logits.grad[0, 0, 0, 0, 1].abs()), 0.0)
+
+        empty_logits = torch.zeros(1, 1, 1, 1, 2, requires_grad=True)
+        empty_mask = torch.zeros_like(empty_logits)
+        empty_loss = (
+            F.binary_cross_entropy_with_logits(
+                empty_logits, torch.zeros_like(empty_logits), reduction="none"
+            )
+            * empty_mask
+        ).sum() / empty_mask.sum().clamp_min(1.0)
+        empty_loss.backward()
+        self.assertEqual(float(empty_loss.detach()), 0.0)
+        self.assertTrue(torch.isfinite(empty_loss))
+        self.assertTrue(torch.equal(empty_logits.grad, torch.zeros_like(empty_logits)))
+
+    def test_decoder_masked_amb_weight_zero_is_baseline_and_positive_adds_ctx_gradient(self):
+        params = [
+            {"scale": 1.0, "offset": 1.0},
+            {"scale": 1.0, "offset": -1.0},
+        ]
+        patch = torch.zeros(1, 1, 1, 2)
+        valid = torch.ones(1, 1, 2)
+
+        def run(amb_weight):
+            model = TinyVoxTell()
+            with torch.no_grad():
+                model.project_text_embed.weight.fill_(1.0)
+            adapter = VoxTellCMTTA(
+                model,
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    pseudo_update_mode="decoder_masked",
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                    amb_weight=amb_weight,
+                ),
+            )
+            try:
+                adapter.optimizer.zero_grad(set_to_none=True)
+                ctx = adapter.ctx.detach().clone()
+                pseudo_loss, _ = adapter._backward_case_supervision(
+                    [patch], [valid], params, 1, ctx, 1.0, ctx, False, ctx
+                )
+                return (
+                    pseudo_loss,
+                    adapter.ctx.grad.detach().clone(),
+                    dict(adapter._last_pseudo_diagnostics),
+                )
+            finally:
+                adapter.close()
+
+        baseline_loss, baseline_grad, baseline_diag = run(0.0)
+        anchored_loss, anchored_grad, anchored_diag = run(0.05)
+        self.assertAlmostEqual(baseline_diag["weighted_amb_loss"], 0.0, places=7)
+        self.assertAlmostEqual(
+            baseline_loss,
+            baseline_diag["bce_loss"] + baseline_diag["tversky_loss"],
+            places=6,
+        )
+        self.assertEqual(float(baseline_grad.norm()), 0.0)
+        self.assertGreater(anchored_diag["M_amb_anchor_count"], 0)
+        self.assertGreater(anchored_diag["weighted_amb_loss"], 0.0)
+        self.assertGreater(float(anchored_grad.norm()), 0.0)
+        self.assertTrue(torch.isfinite(anchored_grad).all())
+        for key in (
+            "M_amb_anchor_count",
+            "M_amb_anchor_fraction",
+            "teacher_amb_anchor_mean_probability",
+            "student_before_amb_anchor_mean_probability",
+            "amb_loss",
+            "weighted_amb_loss",
+            "amb_weight",
+        ):
+            self.assertIn(key, anchored_diag)
+
+    def test_decoder_masked_amb_replay_is_invariant_to_view_chunk_size(self):
+        params = [
+            {"scale": 1.0, "offset": 1.0},
+            {"scale": 1.0, "offset": -1.0},
+        ]
+        patch = torch.zeros(1, 1, 1, 2)
+        valid = torch.ones(1, 1, 2)
+        template = TinyVoxTell()
+        with torch.no_grad():
+            template.project_text_embed.weight.fill_(1.0)
+        state = copy.deepcopy(template.state_dict())
+
+        def run(view_batch_size):
+            model = TinyVoxTell()
+            model.load_state_dict(state)
+            adapter = VoxTellCMTTA(
+                model,
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    pseudo_update_mode="decoder_masked",
+                    num_aug_views=1,
+                    view_batch_size=view_batch_size,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                    amb_weight=0.05,
+                ),
+            )
+            try:
+                ctx = adapter.ctx.detach().clone()
+                pseudo_loss, _ = adapter._backward_case_supervision(
+                    [patch], [valid], params, 1, ctx, 1.0, ctx, False, ctx
+                )
+                return (
+                    pseudo_loss,
+                    adapter.ctx.grad.detach().clone(),
+                    dict(adapter._last_pseudo_diagnostics),
+                )
+            finally:
+                adapter.close()
+
+        loss_one, grad_one, diag_one = run(1)
+        loss_two, grad_two, diag_two = run(2)
+        self.assertAlmostEqual(loss_one, loss_two, places=6)
+        self.assertTrue(torch.allclose(grad_one, grad_two, atol=1e-6, rtol=1e-6))
+        for key in ("amb_loss", "weighted_amb_loss", "pseudo_loss"):
+            if key in diag_one:
+                self.assertAlmostEqual(diag_one[key], diag_two[key], places=6)
+
+    def test_original_pseudo_update_mode_does_not_use_amb_loss(self):
+        model = TinyVoxTell()
+        adapter = VoxTellCMTTA(
+            model,
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_update_mode="original",
+                amb_weight=0.05,
+                num_aug_views=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        try:
+            trace = adapter.adapt_case(
+                [torch.zeros(1, 1, 1, 2)], [torch.ones(1, 1, 2)]
+            )
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertNotIn("amb_loss", trace)
+            self.assertNotIn("weighted_amb_loss", trace)
+        finally:
+            adapter.close()
+
     def test_masked_balanced_bce_gives_equal_fg_bg_weight(self):
         fg_sum = torch.tensor(4.0, requires_grad=True)
         bg_sum = torch.tensor(12.0, requires_grad=True)
@@ -471,7 +659,15 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertTrue(torch.isfinite(adapter.ctx_delta).all())
             self.assertFalse(torch.equal(before, adapter.ctx_delta.detach()))
             self.assertEqual(trace["pseudo_loss_type"], "masked_balanced_bce_tversky")
-            self.assertAlmostEqual(trace["pseudo_loss"], trace["bce_loss"] + trace["tversky_loss"], places=6)
+            self.assertAlmostEqual(
+                trace["pseudo_loss"],
+                trace["bce_loss"]
+                + trace["tversky_loss"]
+                + trace["weighted_amb_loss"],
+                places=6,
+            )
+            self.assertEqual(trace["amb_weight"], 0.05)
+            self.assertEqual(trace["M_amb_anchor_count"], 0)
             self.assertIn("entropy_loss", trace)
             self.assertIn("cac_loss", trace)
             self.assertIn("total_loss", trace)

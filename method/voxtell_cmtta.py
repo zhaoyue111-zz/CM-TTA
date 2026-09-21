@@ -790,6 +790,7 @@ class VoxTellCMTTA:
         self.tversky_alpha = float(getattr(args, "tversky_alpha", 0.3))
         self.tversky_beta = float(getattr(args, "tversky_beta", 0.7))
         self.tversky_weight = float(getattr(args, "tversky_weight", 1.0))
+        self.amb_weight = float(getattr(args, "amb_weight", 0.05))
         # Optional validation only.  It performs one additional ordinary
         # forward beside the decoder-output forward and is therefore off by
         # default for the normal low-memory adaptation path.
@@ -802,6 +803,8 @@ class VoxTellCMTTA:
             raise ValueError("tversky_alpha and tversky_beta must be non-negative")
         if self.tversky_weight < 0.0:
             raise ValueError("tversky_weight must be non-negative")
+        if self.amb_weight < 0.0:
+            raise ValueError("amb_weight must be non-negative")
         self.num_aug_views = int(args.num_aug_views)  # K; total views are K+1.
         self.selection_p = float(args.selection_p)
         self.view_selection_metric = str(getattr(args, "view_selection_metric", "cac"))
@@ -1631,7 +1634,10 @@ class VoxTellCMTTA:
         prefix: str,
     ) -> dict[str, Optional[float]]:
         """Measure one selected view against a fixed teacher mask set."""
-        region_sums = {name: 0.0 for name in ("fg", "bg", "amb", "miss")}
+        region_sums = {
+            name: 0.0
+            for name in ("fg", "bg", "amb", "amb_anchor", "miss")
+        }
         region_counts = {name: 0.0 for name in region_sums}
         foreground_volume = 0.0
         with torch.no_grad():
@@ -1694,6 +1700,7 @@ class VoxTellCMTTA:
         total_views = len(params)
         scalar_keys = (
             "bce_fg_sum", "bce_bg_sum", "bce_fg_count", "bce_bg_count",
+            "amb_bce_sum", "amb_bce_count",
             "tversky_tp", "tversky_fp", "tversky_fn", "tversky_mass",
             "entropy_sum", "entropy_mass",
         )
@@ -1706,12 +1713,21 @@ class VoxTellCMTTA:
             for key in scalar_keys
         }
         pseudo_cache = []
-        region_counts = {name: 0.0 for name in ("fg", "bg", "amb", "miss", "valid")}
-        teacher_sums = {name: 0.0 for name in ("fg", "bg", "amb", "miss")}
+        region_counts = {
+            name: 0.0
+            for name in ("fg", "bg", "amb", "amb_anchor", "miss", "valid")
+        }
+        teacher_sums = {
+            name: 0.0
+            for name in ("fg", "bg", "amb", "amb_anchor", "miss")
+        }
         decoder_alignment_max = 0.0
         decoder_alignment_sum = 0.0
         decoder_alignment_mass = 0.0
-        aligned_student_sums = {name: 0.0 for name in ("fg", "bg", "amb", "miss")}
+        aligned_student_sums = {
+            name: 0.0
+            for name in ("fg", "bg", "amb", "amb_anchor", "miss")
+        }
         if ctx_delta_before is None:
             ctx_delta_before = self.ctx_delta.detach().clone()
         else:
@@ -1768,16 +1784,21 @@ class VoxTellCMTTA:
                 bg_d5 = decoder_masks["bg"]
                 amb_d5 = decoder_masks["amb"]
                 miss_d5 = decoder_masks["miss"]
+                amb_anchor_d5 = amb_d5 & ~miss_d5
+                if bool((amb_anchor_d5 & miss_d5).any()):
+                    raise RuntimeError("M_amb_anchor must be disjoint from M_miss")
                 valid_d5 = decoder_masks["valid"]
                 for name, mask in (
                     ("fg", fg_d5), ("bg", bg_d5), ("amb", amb_d5),
-                    ("miss", miss_d5), ("valid", valid_d5),
+                    ("amb_anchor", amb_anchor_d5), ("miss", miss_d5),
+                    ("valid", valid_d5),
                 ):
                     region_counts[name] += float(mask.sum().cpu())
                 for name, mask in (
                     ("fg", fg_d5),
                     ("bg", bg_d5),
                     ("amb", amb_d5),
+                    ("amb_anchor", amb_anchor_d5),
                     ("miss", miss_d5),
                 ):
                     teacher_sums[name] += float((p5_d5 * mask.float()).sum().cpu())
@@ -1797,6 +1818,7 @@ class VoxTellCMTTA:
                             "fg": fg_d5,
                             "bg": bg_d5,
                             "amb": amb_d5,
+                            "amb_anchor": amb_anchor_d5,
                             "miss": miss_d5,
                             "valid": valid_d5,
                         }.items()
@@ -1843,6 +1865,21 @@ class VoxTellCMTTA:
                         stats["bce_bg_sum"].add_((bce_map * bg_batch.float()).sum())
                         stats["bce_fg_count"].add_(fg_batch.float().sum())
                         stats["bce_bg_count"].add_(bg_batch.float().sum())
+                        amb_anchor_input = decoder_grid_to_input_order(
+                            amb_anchor_d5.float(), spatial_shape, mode="nearest"
+                        ).bool() & valid_input
+                        amb_anchor_batch = amb_anchor_input.expand(
+                            end - start, -1, -1, -1, -1
+                        )
+                        amb_bce_map = F.binary_cross_entropy_with_logits(
+                            student_logits[:, :1].float(),
+                            target_batch.float(),
+                            reduction="none",
+                        )
+                        stats["amb_bce_sum"].add_(
+                            (amb_bce_map * amb_anchor_batch.float()).sum()
+                        )
+                        stats["amb_bce_count"].add_(amb_anchor_batch.float().sum())
                         probabilities = student_probabilities.float()
                         target_float = target_batch.float()
                         stats["tversky_tp"][start:end].add_(
@@ -1910,6 +1947,15 @@ class VoxTellCMTTA:
             global_bce = torch.zeros((), device=self.device)
             bce_derivatives = {}
 
+        amb_bce_input = None
+        if float(stats["amb_bce_count"]) > 0.0:
+            amb_bce_input = stats["amb_bce_sum"].detach().requires_grad_(True)
+            global_amb_loss = amb_bce_input / stats["amb_bce_count"].detach().clamp_min(1.0)
+            amb_derivative = torch.autograd.grad(global_amb_loss, amb_bce_input)[0]
+        else:
+            global_amb_loss = torch.zeros((), device=self.device)
+            amb_derivative = None
+
         tv_inputs = tuple(
             stats[key].detach().requires_grad_(True)
             for key in ("tversky_tp", "tversky_fp", "tversky_fn")
@@ -1962,6 +2008,11 @@ class VoxTellCMTTA:
                     bg_input = decoder_grid_to_input_order(
                         cached["bg"].to(self.device).float(), spatial_shape, mode="nearest"
                     ).bool() & input_mask
+                    amb_anchor_input = decoder_grid_to_input_order(
+                        cached["amb_anchor"].to(self.device).float(),
+                        spatial_shape,
+                        mode="nearest",
+                    ).bool() & input_mask
                     known_input = fg_input | bg_input
                     target_batch = target_input.expand(end - start, -1, -1, -1, -1)
                     fg_batch = fg_input.expand(end - start, -1, -1, -1, -1)
@@ -1978,6 +2029,21 @@ class VoxTellCMTTA:
                     if "bce_bg_sum" in bce_derivatives:
                         differentiable.append(
                             ((bce_map * bg_batch.float()).sum(), bce_derivatives["bce_bg_sum"])
+                        )
+                    if amb_derivative is not None:
+                        amb_anchor_batch = amb_anchor_input.expand(
+                            end - start, -1, -1, -1, -1
+                        )
+                        amb_bce_map = F.binary_cross_entropy_with_logits(
+                            student_logits.float(),
+                            target_batch.float(),
+                            reduction="none",
+                        )
+                        differentiable.append(
+                            (
+                                (amb_bce_map * amb_anchor_batch.float()).sum(),
+                                amb_derivative * self.amb_weight,
+                            )
                         )
                     if bool(tversky_valid[start:end].any()):
                         probabilities = torch.sigmoid(student_logits.float())
@@ -2024,10 +2090,12 @@ class VoxTellCMTTA:
             "M_fg_count": int(region_counts["fg"]),
             "M_bg_count": int(region_counts["bg"]),
             "M_amb_count": int(region_counts["amb"]),
+            "M_amb_anchor_count": int(region_counts["amb_anchor"]),
             "M_miss_count": int(region_counts["miss"]),
             "M_fg_fraction": region_counts["fg"] / valid_count,
             "M_bg_fraction": region_counts["bg"] / valid_count,
             "M_amb_fraction": region_counts["amb"] / valid_count,
+            "M_amb_anchor_fraction": region_counts["amb_anchor"] / valid_count,
             "M_miss_fraction": region_counts["miss"] / valid_count,
             "teacher_fg_mean_probability": _mean_or_none(
                 teacher_sums["fg"], region_counts["fg"]
@@ -2038,6 +2106,9 @@ class VoxTellCMTTA:
             "teacher_amb_mean_probability": _mean_or_none(
                 teacher_sums["amb"], region_counts["amb"]
             ),
+            "teacher_amb_anchor_mean_probability": _mean_or_none(
+                teacher_sums["amb_anchor"], region_counts["amb_anchor"]
+            ),
             "teacher_miss_mean_probability": _mean_or_none(
                 teacher_sums["miss"], region_counts["miss"]
             ),
@@ -2045,6 +2116,11 @@ class VoxTellCMTTA:
             "bce_loss": float(global_bce.detach().cpu()),
             "pseudo_tversky": float(global_tversky.detach().cpu()),
             "tversky_loss": float((self.tversky_weight * global_tversky).detach().cpu()),
+            "amb_loss": float(global_amb_loss.detach().cpu()),
+            "weighted_amb_loss": float(
+                (self.amb_weight * global_amb_loss).detach().cpu()
+            ),
+            "amb_weight": self.amb_weight,
             **before_student_diagnostics,
         }
         if self.decoder_alignment_check:
@@ -2092,6 +2168,9 @@ class VoxTellCMTTA:
                 "teacher_mean_fg_probability": diagnostics["teacher_fg_mean_probability"],
                 "teacher_mean_bg_probability": diagnostics["teacher_bg_mean_probability"],
                 "teacher_mean_amb_probability": diagnostics["teacher_amb_mean_probability"],
+                "teacher_mean_amb_anchor_probability": diagnostics[
+                    "teacher_amb_anchor_mean_probability"
+                ],
                 "teacher_mean_miss_probability": diagnostics["teacher_miss_mean_probability"],
                 # Compatibility aliases now explicitly refer to the raw
                 # pre-update ctx-delta diagnostic, not the short bridge.
@@ -2113,7 +2192,11 @@ class VoxTellCMTTA:
             }
         )
         self._last_pseudo_diagnostics = diagnostics
-        pseudo_loss = global_bce + self.tversky_weight * global_tversky
+        pseudo_loss = (
+            global_bce
+            + self.tversky_weight * global_tversky
+            + self.amb_weight * global_amb_loss
+        )
         return float(pseudo_loss.detach().cpu()), float(global_entropy.detach().cpu())
 
     def _backward_case_supervision(
