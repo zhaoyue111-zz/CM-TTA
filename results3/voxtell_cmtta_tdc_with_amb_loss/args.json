@@ -22,7 +22,7 @@
   "view_batch_size": 1,
   "w_cac": 1.0,
   "w_entropy": 0.1,
-  "pseudo_update_mode": "original",
+  "pseudo_update_mode": "decoder_masked",
   "bg_threshold": 0.1,
   "tversky_alpha": 0.3,
   "tversky_beta": 0.7,
