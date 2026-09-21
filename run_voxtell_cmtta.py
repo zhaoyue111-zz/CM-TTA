@@ -437,6 +437,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--view_batch_size", type=int, default=1)
     parser.add_argument("--w_cac", type=float, default=1.0)
     parser.add_argument("--w_entropy", type=float, default=0.1)
+    parser.add_argument(
+        "--pseudo_update_mode",
+        choices=("original", "decoder_masked"),
+        default="original",
+        help="Pseudo-label supervision; original preserves CM-TTA soft Dice.",
+    )
+    parser.add_argument("--bg_threshold", type=float, default=0.1)
+    parser.add_argument("--tversky_alpha", type=float, default=0.3)
+    parser.add_argument("--tversky_beta", type=float, default=0.7)
+    parser.add_argument("--tversky_weight", type=float, default=1.0)
     parser.add_argument("--print_freq", type=int, default=1)
     parser.add_argument(
         "--tta_steps",
@@ -673,6 +683,10 @@ def main() -> None:
             row["zero_shot_sliding_dice"] = zero_shot_sliding_dice
             row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
             row["zero_shot_patch_gap"] = zero_shot_patch_gap
+            # Keep the per-case pseudo-update diagnostics in results.json as
+            # well as in the checkpoint history, including mask statistics and
+            # the replacement BCE/Tversky terms when enabled.
+            row["adaptation_trace"] = trace
             case_rows.append(row)
             for view_metric in view_metrics:
                 print(

@@ -249,6 +249,97 @@ def tdc_from_components(
     return tdc, pair_dice, pair_valid
 
 
+def decoder_consistency_probabilities(
+    decoder_outputs: list[torch.Tensor] | tuple[torch.Tensor, ...],
+    valid_mask: Optional[torch.Tensor],
+    bg_threshold: float = 0.1,
+) -> dict[str, torch.Tensor]:
+    """Build the detached D2--D5 consistency masks on the D5 grid.
+
+    The VoxTell decoder API is fixed to ``(B,1,H,W,D)``.  Input patches and
+    ordinary segmentation logits use ``(B,1,D,H,W)``.  Keeping the decoder
+    grid in its native order here, and converting it explicitly at the loss
+    boundary, prevents cubic patches from hiding an axis error.
+    """
+    if not isinstance(decoder_outputs, (list, tuple)) or len(decoder_outputs) < 4:
+        raise ValueError("Decoder consistency requires [D5,D4,D3,D2,D1] outputs")
+    if not 0.0 <= float(bg_threshold) <= 1.0:
+        raise ValueError(f"bg_threshold must be in [0, 1], got {bg_threshold}")
+    reference = decoder_outputs[0]
+    if reference.ndim != 5 or reference.shape[1] != 1:
+        raise ValueError(
+            "Decoder consistency expects D5 logits with shape (B,1,H,W,D), "
+            f"got {tuple(reference.shape)}"
+        )
+    batch = reference.shape[0]
+    d5_shape = tuple(int(size) for size in reference.shape[2:])
+    if valid_mask is None:
+        valid_d5 = torch.ones(
+            (batch, 1, *d5_shape), device=reference.device, dtype=torch.bool
+        )
+    else:
+        valid = valid_mask
+        if valid.ndim == 4:
+            valid = valid.unsqueeze(1)
+        if valid.ndim != 5 or valid.shape[0] != batch or valid.shape[1] != 1:
+            raise ValueError(
+                "Decoder consistency valid_mask must have shape (B,D,H,W) or "
+                f"(B,1,D,H,W), got {tuple(valid.shape)}"
+            )
+        # Exact conversion from input (D,H,W) to decoder (H,W,D) order.
+        valid_d5 = valid.to(device=reference.device, dtype=torch.float32)
+        valid_d5 = valid_d5.permute(0, 1, 3, 4, 2).contiguous()
+        if tuple(valid_d5.shape[2:]) != d5_shape:
+            valid_d5 = F.interpolate(valid_d5, size=d5_shape, mode="nearest")
+        valid_d5 = valid_d5.bool()
+
+    probabilities = []
+    for level, logits in enumerate(decoder_outputs[:4]):
+        if not torch.is_tensor(logits) or logits.ndim != 5:
+            raise ValueError(f"D{5 - level} decoder output must be 5-D")
+        if logits.shape[:2] != reference.shape[:2]:
+            raise ValueError("D2--D5 decoder outputs disagree in batch/channel shape")
+        logits = torch.nan_to_num(logits.float(), nan=0.0, posinf=20.0, neginf=-20.0)
+        if level and tuple(logits.shape[2:]) != d5_shape:
+            logits = F.interpolate(logits, size=d5_shape, mode="trilinear", align_corners=False)
+        probabilities.append(torch.sigmoid(logits))
+    stacked = torch.cat(probabilities, dim=1)  # (B,4,H,W,D), D5,D4,D3,D2
+    p5 = stacked[:, :1]
+    lower = stacked[:, 1:]
+    votes = (lower > 0.5).sum(dim=1, keepdim=True)
+    fg = (p5 > 0.5) & (votes >= 2) & valid_d5
+    bg = (p5 < 0.5) & (lower.amax(dim=1, keepdim=True) < float(bg_threshold)) & valid_d5
+    known = fg | bg
+    ambiguous = valid_d5 & ~known
+    missing = valid_d5 & (p5 < 0.5) & (votes >= 1)
+    return {
+        "p5": p5.detach(),
+        "probabilities": stacked.detach(),
+        "valid": valid_d5.detach(),
+        "fg": fg.detach(),
+        "bg": bg.detach(),
+        "amb": ambiguous.detach(),
+        "miss": missing.detach(),
+    }
+
+
+def decoder_grid_to_input_order(
+    tensor: torch.Tensor,
+    target_spatial_shape: tuple[int, int, int],
+    mode: str = "nearest",
+) -> torch.Tensor:
+    """Convert a D5-grid tensor from (H,W,D) to input/logit (D,H,W)."""
+    if tensor.ndim != 5:
+        raise ValueError(f"Expected (B,1,H,W,D) D5 tensor, got {tuple(tensor.shape)}")
+    converted = tensor.permute(0, 1, 4, 2, 3).contiguous()
+    if tuple(converted.shape[2:]) != tuple(target_spatial_shape):
+        if mode in ("linear", "bilinear", "bicubic", "trilinear"):
+            converted = F.interpolate(converted, size=target_spatial_shape, mode=mode, align_corners=False)
+        else:
+            converted = F.interpolate(converted, size=target_spatial_shape, mode=mode)
+    return converted
+
+
 def _average_tie_rank_1d(values: torch.Tensor, descending: bool) -> torch.Tensor:
     """Match CM-SFDA's zero-based average rank for tied view scores."""
     ranked = -values if descending else values
@@ -600,6 +691,21 @@ class VoxTellCMTTA:
         self.ema_momentum = float(args.ema_momentum)
         self.w_cac = float(args.w_cac)
         self.w_entropy = float(args.w_entropy)
+        self.pseudo_update_mode = str(getattr(args, "pseudo_update_mode", "original"))
+        if self.pseudo_update_mode not in ("original", "decoder_masked"):
+            raise ValueError(
+                "pseudo_update_mode must be 'original' or 'decoder_masked'"
+            )
+        self.bg_threshold = float(getattr(args, "bg_threshold", 0.1))
+        self.tversky_alpha = float(getattr(args, "tversky_alpha", 0.3))
+        self.tversky_beta = float(getattr(args, "tversky_beta", 0.7))
+        self.tversky_weight = float(getattr(args, "tversky_weight", 1.0))
+        if not 0.0 <= self.bg_threshold <= 1.0:
+            raise ValueError("bg_threshold must be in [0, 1]")
+        if self.tversky_alpha < 0.0 or self.tversky_beta < 0.0:
+            raise ValueError("tversky_alpha and tversky_beta must be non-negative")
+        if self.tversky_weight < 0.0:
+            raise ValueError("tversky_weight must be non-negative")
         self.num_aug_views = int(args.num_aug_views)  # K; total views are K+1.
         self.selection_p = float(args.selection_p)
         self.view_selection_metric = str(getattr(args, "view_selection_metric", "cac"))
@@ -650,6 +756,7 @@ class VoxTellCMTTA:
         ]
         self.last_trace = {}
         self.last_view_selection = {}
+        self._last_pseudo_diagnostics = {}
         self._print_trainable_parameters()
 
     def reset_case_adaptation_state(self) -> None:
@@ -1405,6 +1512,295 @@ class VoxTellCMTTA:
             "entropy_mass": entropy_mass,
         }
 
+    def _backward_case_decoder_masked_supervision(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        params: list[dict[str, float]],
+        selected_view: int,
+        short_ctx_value: torch.Tensor,
+        short_current_weight: float,
+        long_ctx: torch.Tensor,
+        autocast_enabled: bool,
+    ) -> tuple[float, float]:
+        """Backpropagate D2--D5 masked BCE/Tversky and entropy case-wise.
+
+        The first pass keeps only detached decoder masks/targets and additive
+        scalar statistics.  The second pass replays student chunks and
+        backpropagates the exact derivatives of the case-level reductions,
+        so no patch graph is retained and the result is not a patch average.
+        """
+        total_views = len(params)
+        scalar_keys = (
+            "bce_fg_sum", "bce_bg_sum", "tversky_tp", "tversky_fp", "tversky_fn",
+            "bce_fg_count", "bce_bg_count", "entropy_sum", "entropy_mass",
+        )
+        stats = {
+            key: torch.zeros((), device=self.device, dtype=torch.float32)
+            for key in scalar_keys
+        }
+        pseudo_cache = []
+        region_counts = {name: 0.0 for name in ("fg", "bg", "amb", "miss", "valid")}
+        teacher_sums = {name: 0.0 for name in ("fg", "bg")}
+        student_sums = {name: 0.0 for name in ("fg", "bg")}
+        student_counts = {name: 0.0 for name in ("fg", "bg")}
+        foreground_volume_before = 0.0
+
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                decoder_input_mask = valid_mask.unsqueeze(0).to(
+                    self.device, non_blocking=True
+                )
+                with torch.autocast(
+                    device_type=self.device.type, enabled=autocast_enabled
+                ):
+                    decoder_outputs = self._forward_decoder_outputs(selected, long_ctx)
+                    decoder_masks = decoder_consistency_probabilities(
+                        decoder_outputs,
+                        decoder_input_mask,
+                        bg_threshold=self.bg_threshold,
+                    )
+                p5_d5 = decoder_masks["p5"]
+                fg_d5 = decoder_masks["fg"]
+                bg_d5 = decoder_masks["bg"]
+                amb_d5 = decoder_masks["amb"]
+                miss_d5 = decoder_masks["miss"]
+                valid_d5 = decoder_masks["valid"]
+                for name, mask in (
+                    ("fg", fg_d5), ("bg", bg_d5), ("amb", amb_d5),
+                    ("miss", miss_d5), ("valid", valid_d5),
+                ):
+                    region_counts[name] += float(mask.sum().cpu())
+                for name, mask in (("fg", fg_d5), ("bg", bg_d5)):
+                    teacher_sums[name] += float((p5_d5 * mask.float()).sum().cpu())
+
+                # Save only detached CPU tensors.  The teacher decoder output
+                # is reused through these masks/targets; no second teacher
+                # forward is needed in the differentiable replay.
+                pseudo_cache.append(
+                    {
+                        key: value.cpu()
+                        for key, value in {
+                            "target": p5_d5,
+                            "fg": fg_d5,
+                            "bg": bg_d5,
+                        }.items()
+                    }
+                )
+                target_input = decoder_grid_to_input_order(
+                    p5_d5, tuple(int(size) for size in patch.shape[1:]), mode="trilinear"
+                )
+                fg_input = decoder_grid_to_input_order(
+                    fg_d5.float(), tuple(int(size) for size in patch.shape[1:]), mode="nearest"
+                ).bool()
+                bg_input = decoder_grid_to_input_order(
+                    bg_d5.float(), tuple(int(size) for size in patch.shape[1:]), mode="nearest"
+                ).bool()
+                valid_input = valid_mask.unsqueeze(0).unsqueeze(1).to(self.device).bool()
+                fg_input = fg_input & valid_input
+                bg_input = bg_input & valid_input
+                region_mask = fg_input | bg_input
+
+                for start in range(0, total_views, self.view_batch_size):
+                    end = min(total_views, start + self.view_batch_size)
+                    view_batch = self._make_view_batch(
+                        patch, params, valid_mask, start, end
+                    ).to(self.device, non_blocking=True)
+                    with torch.autocast(
+                        device_type=self.device.type, enabled=autocast_enabled
+                    ):
+                        student_ctx = short_ctx_value + short_current_weight * (
+                            self.ctx_delta - self.ctx_delta.detach()
+                        )
+                        student_logits = self._forward(view_batch, student_ctx)
+                        student_probabilities = torch.sigmoid(student_logits[:, :1])
+                        target_batch = target_input.expand(end - start, -1, -1, -1, -1)
+                        fg_batch = fg_input.expand(end - start, -1, -1, -1, -1)
+                        bg_batch = bg_input.expand(end - start, -1, -1, -1, -1)
+                        known_batch = region_mask.expand(end - start, -1, -1, -1, -1)
+                        bce_map = F.binary_cross_entropy_with_logits(
+                            student_logits[:, :1].float(), target_batch.float(), reduction="none"
+                        )
+                        stats["bce_fg_sum"].add_((bce_map * fg_batch.float()).sum())
+                        stats["bce_bg_sum"].add_((bce_map * bg_batch.float()).sum())
+                        stats["bce_fg_count"].add_(fg_batch.float().sum())
+                        stats["bce_bg_count"].add_(bg_batch.float().sum())
+                        probabilities = student_probabilities.float()
+                        target_float = target_batch.float()
+                        stats["tversky_tp"].add_((probabilities * target_float * known_batch).sum())
+                        stats["tversky_fp"].add_(
+                            (probabilities * (1.0 - target_float) * known_batch).sum()
+                        )
+                        stats["tversky_fn"].add_(
+                            ((1.0 - probabilities) * target_float * known_batch).sum()
+                        )
+                        if start <= selected_view < end:
+                            selected_index = selected_view - start
+                            selected_probability = probabilities[selected_index:selected_index + 1]
+                            entropy_sum, entropy_mass = masked_entropy_components(
+                                selected_probability,
+                                valid_mask.unsqueeze(0).unsqueeze(1),
+                            )
+                            stats["entropy_sum"].add_(entropy_sum[0])
+                            stats["entropy_mass"].add_(entropy_mass[0])
+                            selected_region = {
+                                "fg": fg_input,
+                                "bg": bg_input,
+                            }
+                            foreground_volume_before += float(
+                                ((selected_probability > 0.5) & valid_input).sum().cpu()
+                            )
+                            for name, mask in selected_region.items():
+                                mask_float = mask.float()
+                                student_sums[name] += float(
+                                    (selected_probability * mask_float).sum().cpu()
+                                )
+                                student_counts[name] += float(mask.sum().cpu())
+
+        # Build the exact scalar case reductions from detached statistics and
+        # obtain coefficients for the graph replay below.
+        bce_inputs = {}
+        bce_terms = []
+        if float(stats["bce_fg_count"]) > 0.0:
+            bce_inputs["bce_fg_sum"] = stats["bce_fg_sum"].detach().requires_grad_(True)
+        if float(stats["bce_bg_count"]) > 0.0:
+            bce_inputs["bce_bg_sum"] = stats["bce_bg_sum"].detach().requires_grad_(True)
+        if bce_inputs:
+            equal_weight = 1.0 / len(bce_inputs)
+            bce_terms = [
+                equal_weight * value / stats[name.replace("_sum", "_count")].detach().clamp_min(1.0)
+                         for name, value in bce_inputs.items()]
+            global_bce = sum(bce_terms)
+            bce_derivatives = dict(zip(
+                bce_inputs,
+                torch.autograd.grad(global_bce, tuple(bce_inputs.values())),
+            ))
+        else:
+            global_bce = torch.zeros((), device=self.device)
+            bce_derivatives = {}
+
+        tv_inputs = tuple(
+            stats[key].detach().requires_grad_(True)
+            for key in ("tversky_tp", "tversky_fp", "tversky_fn")
+        )
+        known_mass = region_counts["fg"] + region_counts["bg"]
+        if known_mass > 0.0:
+            denominator = tv_inputs[0] + self.tversky_alpha * tv_inputs[1] + self.tversky_beta * tv_inputs[2] + EPS
+            global_tversky = 1.0 - tv_inputs[0] / denominator
+            tv_derivatives = torch.autograd.grad(global_tversky, tv_inputs)
+        else:
+            global_tversky = torch.zeros((), device=self.device)
+            tv_derivatives = (None, None, None)
+
+        entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
+        entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
+        global_entropy = entropy_sum / entropy_mass.clamp_min(1.0)
+        entropy_derivatives = torch.autograd.grad(global_entropy, (entropy_sum, entropy_mass))
+
+        for patch, valid_mask, cached in zip(patches, valid_masks, pseudo_cache):
+            target_input = decoder_grid_to_input_order(
+                cached["target"].to(self.device), tuple(int(size) for size in patch.shape[1:]), mode="trilinear"
+            )
+            fg_input = decoder_grid_to_input_order(
+                cached["fg"].to(self.device).float(), tuple(int(size) for size in patch.shape[1:]), mode="nearest"
+            ).bool()
+            bg_input = decoder_grid_to_input_order(
+                cached["bg"].to(self.device).float(), tuple(int(size) for size in patch.shape[1:]), mode="nearest"
+            ).bool()
+            input_mask = valid_mask.unsqueeze(0).unsqueeze(1).to(self.device, non_blocking=True).bool()
+            fg_input = fg_input & input_mask
+            bg_input = bg_input & input_mask
+            known_input = fg_input | bg_input
+            for start in range(0, total_views, self.view_batch_size):
+                end = min(total_views, start + self.view_batch_size)
+                view_batch = self._make_view_batch(
+                    patch, params, valid_mask, start, end
+                ).to(self.device, non_blocking=True)
+                with torch.autocast(
+                    device_type=self.device.type, enabled=autocast_enabled
+                ):
+                    student_ctx = short_ctx_value + short_current_weight * (
+                        self.ctx_delta - self.ctx_delta.detach()
+                    )
+                    student_logits = self._forward(view_batch, student_ctx)[:, :1]
+                    target_batch = target_input.expand(end - start, -1, -1, -1, -1)
+                    fg_batch = fg_input.expand(end - start, -1, -1, -1, -1)
+                    bg_batch = bg_input.expand(end - start, -1, -1, -1, -1)
+                    known_batch = known_input.expand(end - start, -1, -1, -1, -1)
+                    differentiable = []
+                    bce_map = F.binary_cross_entropy_with_logits(
+                        student_logits.float(), target_batch.float(), reduction="none"
+                    )
+                    if "bce_fg_sum" in bce_derivatives:
+                        differentiable.append(
+                            ((bce_map * fg_batch.float()).sum(), bce_derivatives["bce_fg_sum"])
+                        )
+                    if "bce_bg_sum" in bce_derivatives:
+                        differentiable.append(
+                            ((bce_map * bg_batch.float()).sum(), bce_derivatives["bce_bg_sum"])
+                        )
+                    if known_mass > 0.0:
+                        probabilities = torch.sigmoid(student_logits.float())
+                        target_float = target_batch.float()
+                        local_tv = (
+                            (probabilities * target_float * known_batch).sum(),
+                            (probabilities * (1.0 - target_float) * known_batch).sum(),
+                            ((1.0 - probabilities) * target_float * known_batch).sum(),
+                        )
+                        differentiable.extend(
+                            (tensor, self.tversky_weight * derivative)
+                            for tensor, derivative in zip(local_tv, tv_derivatives)
+                        )
+                    if start <= selected_view < end:
+                        selected_index = selected_view - start
+                        probabilities = torch.sigmoid(student_logits.float())
+                        local_entropy_sum, _ = masked_entropy_components(
+                            probabilities[selected_index:selected_index + 1],
+                            input_mask,
+                        )
+                        differentiable.append(
+                            (local_entropy_sum[0], entropy_derivatives[0] * self.w_entropy)
+                        )
+                if differentiable:
+                    local_objective = sum(tensor * derivative for tensor, derivative in differentiable)
+                    self.scaler.scale(local_objective).backward()
+
+        valid_count = max(region_counts["valid"], 1.0)
+        diagnostics = {
+            "pseudo_update_mode": self.pseudo_update_mode,
+            "M_fg_count": int(region_counts["fg"]),
+            "M_bg_count": int(region_counts["bg"]),
+            "M_amb_count": int(region_counts["amb"]),
+            "M_miss_count": int(region_counts["miss"]),
+            "M_fg_fraction": region_counts["fg"] / valid_count,
+            "M_bg_fraction": region_counts["bg"] / valid_count,
+            "M_amb_fraction": region_counts["amb"] / valid_count,
+            "M_miss_fraction": region_counts["miss"] / valid_count,
+            "teacher_fg_mean_probability": teacher_sums["fg"] / max(region_counts["fg"], 1.0),
+            "teacher_bg_mean_probability": teacher_sums["bg"] / max(region_counts["bg"], 1.0),
+            "student_fg_mean_probability": student_sums["fg"] / max(student_counts["fg"], 1.0),
+            "student_bg_mean_probability": student_sums["bg"] / max(student_counts["bg"], 1.0),
+            "pseudo_bce": float(global_bce.detach().cpu()),
+            "bce_loss": float(global_bce.detach().cpu()),
+            "pseudo_tversky": float(global_tversky.detach().cpu()),
+            "tversky_loss": float((self.tversky_weight * global_tversky).detach().cpu()),
+            "prediction_foreground_volume_before": foreground_volume_before,
+        }
+        diagnostics.update(
+            {
+                "teacher_mean_fg_probability": diagnostics["teacher_fg_mean_probability"],
+                "teacher_mean_bg_probability": diagnostics["teacher_bg_mean_probability"],
+                "student_mean_fg_probability": diagnostics["student_fg_mean_probability"],
+                "student_mean_bg_probability": diagnostics["student_bg_mean_probability"],
+            }
+        )
+        self._last_pseudo_diagnostics = diagnostics
+        pseudo_loss = global_bce + self.tversky_weight * global_tversky
+        return float(pseudo_loss.detach().cpu()), float(global_entropy.detach().cpu())
+
     def _backward_case_supervision(
         self,
         patches: list[torch.Tensor],
@@ -1417,6 +1813,18 @@ class VoxTellCMTTA:
         autocast_enabled: bool,
     ) -> tuple[float, float]:
         """Backpropagate case-level Dice and entropy with one patch graph."""
+        if self.pseudo_update_mode == "decoder_masked":
+            return self._backward_case_decoder_masked_supervision(
+                patches,
+                valid_masks,
+                params,
+                selected_view,
+                short_ctx_value,
+                short_current_weight,
+                long_ctx,
+                autocast_enabled,
+            )
+        self._last_pseudo_diagnostics = {"pseudo_update_mode": "original"}
         stats = self._forward_case_supervision_stats(
             patches,
             valid_masks,
@@ -1681,6 +2089,11 @@ class VoxTellCMTTA:
             autocast_enabled,
         )
         sums["soft_dice"] = soft_dice
+        if self.pseudo_update_mode == "decoder_masked":
+            # Keep the legacy key for result consumers, while explicitly
+            # exposing that this value is the replacement pseudo loss.
+            sums["pseudo_loss"] = soft_dice
+            sums.update(self._last_pseudo_diagnostics)
         sums["entropy_loss"] = entropy_loss
         sums["loss"] = soft_dice + self.w_entropy * entropy_loss
 
@@ -1695,6 +2108,7 @@ class VoxTellCMTTA:
         )
         sums["cac_loss"] = float(cac_loss)
         sums["loss"] += self.w_cac * sums["cac_loss"]
+        sums["total_loss"] = sums["loss"]
 
         # Check that backward produced a real ctx gradient before handing it
         # to GradScaler.  Non-finite values are allowed to reach the scaler:
@@ -1723,6 +2137,25 @@ class VoxTellCMTTA:
                 stacklevel=2,
             )
         self.optimizer_step_count += 1
+
+        if self.pseudo_update_mode == "decoder_masked":
+            post_volume = 0.0
+            with torch.no_grad(), torch.autocast(
+                device_type=self.device.type, enabled=autocast_enabled
+            ):
+                for patch, valid_mask in zip(patches, valid_masks):
+                    selected = self._make_view_batch(
+                        patch, params, valid_mask, selected_view, selected_view + 1
+                    ).to(self.device, non_blocking=True)
+                    post_logits = self._forward(selected, self.ctx_delta.detach())
+                    post_probability = torch.sigmoid(post_logits[:, :1])
+                    post_valid = valid_mask.unsqueeze(0).unsqueeze(1).to(
+                        self.device, non_blocking=True
+                    )
+                    post_volume += float(
+                        ((post_probability > 0.5) & post_valid.bool()).sum().cpu()
+                    )
+            sums["prediction_foreground_volume_after"] = post_volume
 
         self.short_delta = short_snapshot
         self.long_delta = long_ctx

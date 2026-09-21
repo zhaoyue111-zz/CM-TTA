@@ -18,6 +18,8 @@ from method.voxtell_cmtta import (
     cac_from_features,
     cac_from_components,
     cac_components_from_features,
+    decoder_consistency_probabilities,
+    decoder_grid_to_input_order,
     masked_dice_components,
     masked_entropy_components,
     select_cac_view,
@@ -125,6 +127,83 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
+    def test_decoder_consistency_masks_use_explicit_hwd_to_dhw_conversion(self):
+        # D5 is (H,W,D)=(2,3,4), while the input valid mask is (D,H,W).
+        d5 = torch.full((1, 1, 2, 3, 4), 4.0)
+        d4 = torch.full((1, 1, 1, 2, 2), 4.0)
+        d3 = torch.full((1, 1, 1, 2, 2), 4.0)
+        d2 = torch.full((1, 1, 1, 2, 2), 4.0)
+        valid = torch.ones(1, 4, 2, 3)
+        valid[0, 1, 0, 2] = 0.0  # one known (d,h,w) voxel is padding
+        masks = decoder_consistency_probabilities([d5, d4, d3, d2], valid)
+        self.assertEqual(tuple(masks["fg"].shape), (1, 1, 2, 3, 4))
+        self.assertEqual(int(masks["fg"].sum()), 23)
+        # The excluded voxel is exactly (h=0,w=2,d=1), not a guessed axis.
+        self.assertFalse(bool(masks["fg"][0, 0, 0, 2, 1]))
+        self.assertEqual(int(masks["bg"].sum()), 0)
+        self.assertEqual(int(masks["amb"].sum()), 0)
+        converted = decoder_grid_to_input_order(
+            masks["fg"].float(), (4, 2, 3), mode="nearest"
+        )
+        self.assertFalse(bool(converted[0, 0, 1, 0, 2]))
+        self.assertEqual(int(converted.sum()), 23)
+
+    def test_decoder_masked_pseudo_update_has_safe_empty_regions_and_one_step(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_update_mode="decoder_masked",
+                num_aug_views=1,
+                view_batch_size=1,
+            ),
+        )
+        try:
+            patch = torch.zeros(1, 2, 2, 2)
+            trace = adapter.adapt_case([patch], [torch.ones(2, 2, 2)])
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertEqual(trace["pseudo_update_mode"], "decoder_masked")
+            self.assertEqual(trace["M_fg_count"], 0)
+            self.assertEqual(trace["M_bg_count"], 0)
+            self.assertEqual(trace["M_amb_count"], 8)
+            self.assertTrue(np.isfinite(trace["pseudo_bce"]))
+            self.assertTrue(np.isfinite(trace["pseudo_tversky"]))
+            self.assertTrue(np.isfinite(trace["loss"]))
+        finally:
+            adapter.close()
+
+    def test_decoder_masked_loss_uses_soft_d5_target_on_known_region(self):
+        model = TinyVoxTell()
+        with torch.no_grad():
+            model.project_text_embed.weight.fill_(1.0)
+        adapter = VoxTellCMTTA(
+            model,
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_update_mode="decoder_masked",
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        try:
+            before = adapter.ctx_delta.detach().clone()
+            trace = adapter.adapt_case(
+                [torch.zeros(1, 2, 2, 2)], [torch.ones(2, 2, 2)]
+            )
+            self.assertEqual(trace["M_fg_count"], 8)
+            self.assertEqual(trace["M_bg_count"], 0)
+            self.assertEqual(trace["M_amb_count"], 0)
+            self.assertGreater(trace["bce_loss"], 0.0)
+            self.assertGreater(trace["tversky_loss"], 0.0)
+            self.assertTrue(torch.isfinite(adapter.ctx_delta).all())
+            self.assertFalse(torch.equal(before, adapter.ctx_delta.detach()))
+        finally:
+            adapter.close()
+
     def test_prediction_roundtrips_with_voxtell_reader_writer_geometry(self):
         import nibabel as nib
         from nnunetv2.imageio.nibabel_reader_writer import NibabelIOWithReorient
