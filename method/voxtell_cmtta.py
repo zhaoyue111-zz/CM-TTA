@@ -174,15 +174,13 @@ def tdc_patch_components(
         raise ValueError("TDC requires decoder outputs [D5,D4,D3,D2,D1]")
     if not 0.0 <= float(threshold) <= 1.0:
         raise ValueError(f"TDC threshold must be in [0, 1], got {threshold}")
-    # VoxTell's decoder emits logits in (B,N,H,W,D) order: its final
-    # einsum consumes decoder features laid out as b,c,h,w,d.  In contrast,
-    # make_case_patches() and its valid masks use the model input order
-    # (C,D,H,W)/(D,H,W).  Convert this semantic order explicitly; do not infer
-    # it from shapes because a cubic 192^3 patch makes both orders identical.
+    # VoxTell decoder logits and input/valid masks are both in (D,H,W) order.
+    # Do not infer or permute axes from shapes: non-cubic dimensions are part
+    # of the interface contract, not evidence for a different layout.
     reference = decoder_outputs[0]
     if reference.ndim != 5 or reference.shape[1] != 1:
         raise ValueError(
-            "TDC expects VoxTell decoder logits with shape (B,1,H,W,D), "
+            "TDC expects VoxTell decoder logits with shape (B,1,D,H,W), "
             f"got {tuple(reference.shape)}"
         )
     batch = reference.shape[0]
@@ -196,7 +194,6 @@ def tdc_patch_components(
             f"got {tuple(valid.shape)}"
         )
     valid = valid.to(device=reference.device, dtype=torch.bool)
-    valid = valid.permute(0, 1, 3, 4, 2).contiguous()
     if tuple(valid.shape[2:]) != spatial_shape:
         valid = F.interpolate(valid.float(), size=spatial_shape, mode="nearest").bool()
 
@@ -256,10 +253,9 @@ def decoder_consistency_probabilities(
 ) -> dict[str, torch.Tensor]:
     """Build the detached D2--D5 consistency masks on the D5 grid.
 
-    The VoxTell decoder API is fixed to ``(B,1,H,W,D)``.  Input patches and
-    ordinary segmentation logits use ``(B,1,D,H,W)``.  Keeping the decoder
-    grid in its native order here, and converting it explicitly at the loss
-    boundary, prevents cubic patches from hiding an axis error.
+    The VoxTell decoder API and ordinary segmentation logits both use
+    ``(B,1,D,H,W)``.  The decoder grid is therefore kept in that same order;
+    only spatial resizing is allowed.
     """
     if not isinstance(decoder_outputs, (list, tuple)) or len(decoder_outputs) < 4:
         raise ValueError("Decoder consistency requires [D5,D4,D3,D2,D1] outputs")
@@ -268,7 +264,7 @@ def decoder_consistency_probabilities(
     reference = decoder_outputs[0]
     if reference.ndim != 5 or reference.shape[1] != 1:
         raise ValueError(
-            "Decoder consistency expects D5 logits with shape (B,1,H,W,D), "
+            "Decoder consistency expects D5 logits with shape (B,1,D,H,W), "
             f"got {tuple(reference.shape)}"
         )
     batch = reference.shape[0]
@@ -286,9 +282,7 @@ def decoder_consistency_probabilities(
                 "Decoder consistency valid_mask must have shape (B,D,H,W) or "
                 f"(B,1,D,H,W), got {tuple(valid.shape)}"
             )
-        # Exact conversion from input (D,H,W) to decoder (H,W,D) order.
         valid_d5 = valid.to(device=reference.device, dtype=torch.float32)
-        valid_d5 = valid_d5.permute(0, 1, 3, 4, 2).contiguous()
         if tuple(valid_d5.shape[2:]) != d5_shape:
             valid_d5 = F.interpolate(valid_d5, size=d5_shape, mode="nearest")
         valid_d5 = valid_d5.bool()
@@ -303,7 +297,7 @@ def decoder_consistency_probabilities(
         if level and tuple(logits.shape[2:]) != d5_shape:
             logits = F.interpolate(logits, size=d5_shape, mode="trilinear", align_corners=False)
         probabilities.append(torch.sigmoid(logits))
-    stacked = torch.cat(probabilities, dim=1)  # (B,4,H,W,D), D5,D4,D3,D2
+    stacked = torch.cat(probabilities, dim=1)  # (B,4,D,H,W), D5,D4,D3,D2
     p5 = stacked[:, :1]
     lower = stacked[:, 1:]
     votes = (lower > 0.5).sum(dim=1, keepdim=True)
@@ -328,10 +322,10 @@ def decoder_grid_to_input_order(
     target_spatial_shape: tuple[int, int, int],
     mode: str = "nearest",
 ) -> torch.Tensor:
-    """Convert a D5-grid tensor from (H,W,D) to input/logit (D,H,W)."""
+    """Resize a D5-grid tensor already in input/logit (D,H,W) order."""
     if tensor.ndim != 5:
-        raise ValueError(f"Expected (B,1,H,W,D) D5 tensor, got {tuple(tensor.shape)}")
-    converted = tensor.permute(0, 1, 4, 2, 3).contiguous()
+        raise ValueError(f"Expected (B,1,D,H,W) D5 tensor, got {tuple(tensor.shape)}")
+    converted = tensor
     if tuple(converted.shape[2:]) != tuple(target_spatial_shape):
         if mode in ("linear", "bilinear", "bicubic", "trilinear"):
             converted = F.interpolate(converted, size=target_spatial_shape, mode=mode, align_corners=False)
@@ -384,6 +378,56 @@ def masked_balanced_bce_from_components(
     if not terms:
         return foreground_sum.new_zeros(())
     return sum(terms) / len(terms)
+
+
+def check_voxtell_decoder_d5_alignment(
+    model: nn.Module,
+    images: torch.Tensor,
+    text_embedding: torch.Tensor,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+) -> dict[str, float | tuple[int, ...]]:
+    """Validate the real VoxTell normal/D5 decoder interface.
+
+    This is an opt-in diagnostic because it performs the normal forward in
+    addition to ``return_decoder_outputs=True``.  The decoder return type and
+    tensor ranks are checked before selecting D5 at index zero.
+    """
+    with torch.no_grad():
+        normal = model(images, text_embedding, return_decoder_outputs=False)
+        decoder_outputs = model(
+            images, text_embedding, return_decoder_outputs=True
+        )
+    if isinstance(normal, (list, tuple)):
+        if not normal or not torch.is_tensor(normal[0]):
+            raise RuntimeError("VoxTell normal forward returned no logits tensor")
+        normal = normal[0]
+    if not isinstance(decoder_outputs, (list, tuple)) or len(decoder_outputs) < 4:
+        raise RuntimeError(
+            "VoxTell decoder diagnostic expected [D5,D4,D3,D2,D1] or a compatible sequence"
+        )
+    if not all(torch.is_tensor(output) and output.ndim == 5 for output in decoder_outputs[:4]):
+        raise RuntimeError("VoxTell D2--D5 decoder outputs must all be 5-D tensors")
+    d5 = decoder_outputs[0]
+    if tuple(normal.shape) != tuple(d5.shape):
+        raise RuntimeError(
+            "VoxTell normal logits and D5 logits have different shapes: "
+            f"normal={tuple(normal.shape)} d5={tuple(d5.shape)}"
+        )
+    difference = (normal.float() - d5.float()).abs()
+    max_abs = float(difference.max().cpu())
+    mean_abs = float(difference.mean().cpu())
+    if not torch.allclose(normal, d5, atol=atol, rtol=rtol):
+        raise RuntimeError(
+            "VoxTell normal logits and D5 logits are not numerically aligned: "
+            f"max_abs={max_abs:.6g} mean_abs={mean_abs:.6g}"
+        )
+    return {
+        "normal_shape": tuple(int(size) for size in normal.shape),
+        "d5_shape": tuple(int(size) for size in d5.shape),
+        "max_abs_error": max_abs,
+        "mean_abs_error": mean_abs,
+    }
 
 
 def _average_tie_rank_1d(values: torch.Tensor, descending: bool) -> torch.Tensor:
@@ -746,6 +790,12 @@ class VoxTellCMTTA:
         self.tversky_alpha = float(getattr(args, "tversky_alpha", 0.3))
         self.tversky_beta = float(getattr(args, "tversky_beta", 0.7))
         self.tversky_weight = float(getattr(args, "tversky_weight", 1.0))
+        # Optional validation only.  It performs one additional ordinary
+        # forward beside the decoder-output forward and is therefore off by
+        # default for the normal low-memory adaptation path.
+        self.decoder_alignment_check = bool(
+            getattr(args, "decoder_alignment_check", False)
+        )
         if not 0.0 <= self.bg_threshold <= 1.0:
             raise ValueError("bg_threshold must be in [0, 1]")
         if self.tversky_alpha < 0.0 or self.tversky_beta < 0.0:
@@ -1076,6 +1126,16 @@ class VoxTellCMTTA:
         if not isinstance(outputs, (list, tuple)) or len(outputs) < 4:
             raise RuntimeError(
                 "VoxTell return_decoder_outputs=True must return [D5,D4,D3,D2,D1]"
+            )
+        if not all(
+            torch.is_tensor(output)
+            and output.ndim == 5
+            and output.shape[0] == images.shape[0]
+            and output.shape[1] == images.shape[1]
+            for output in outputs[:4]
+        ):
+            raise RuntimeError(
+                "VoxTell D2--D5 decoder outputs must be 5-D (B,N,D,H,W) tensors"
             )
         return list(outputs)
 
@@ -1648,6 +1708,10 @@ class VoxTellCMTTA:
         pseudo_cache = []
         region_counts = {name: 0.0 for name in ("fg", "bg", "amb", "miss", "valid")}
         teacher_sums = {name: 0.0 for name in ("fg", "bg", "amb", "miss")}
+        decoder_alignment_max = 0.0
+        decoder_alignment_sum = 0.0
+        decoder_alignment_mass = 0.0
+        aligned_student_sums = {name: 0.0 for name in ("fg", "bg", "amb", "miss")}
         if ctx_delta_before is None:
             ctx_delta_before = self.ctx_delta.detach().clone()
         else:
@@ -1670,6 +1734,35 @@ class VoxTellCMTTA:
                         decoder_input_mask,
                         bg_threshold=self.bg_threshold,
                     )
+                    if self.decoder_alignment_check:
+                        # This diagnostic intentionally uses the same selected
+                        # image and the same long context for both interfaces.
+                        # It validates the real VoxTell contract without
+                        # changing the training graph or loss.
+                        normal_logits = self._forward(selected, long_ctx)[:, :1]
+                        d5_logits = decoder_outputs[0][:, :1]
+                        if tuple(normal_logits.shape) != tuple(d5_logits.shape):
+                            raise RuntimeError(
+                                "VoxTell normal logits and D5 logits have different "
+                                f"shapes: normal={tuple(normal_logits.shape)} "
+                                f"d5={tuple(d5_logits.shape)}"
+                            )
+                        difference = (normal_logits.float() - d5_logits.float()).abs()
+                        decoder_alignment_max = max(
+                            decoder_alignment_max, float(difference.max().cpu())
+                        )
+                        decoder_alignment_sum += float(difference.sum().cpu())
+                        decoder_alignment_mass += float(difference.numel())
+                        if not torch.allclose(
+                            normal_logits, d5_logits, atol=1e-5, rtol=1e-5
+                        ):
+                            raise RuntimeError(
+                                "VoxTell normal logits and D5 logits are not aligned: "
+                                f"max_abs={decoder_alignment_max:.6g}"
+                            )
+                        aligned_student_probabilities = torch.sigmoid(
+                            normal_logits.float()
+                        )
                 p5_d5 = decoder_masks["p5"]
                 fg_d5 = decoder_masks["fg"]
                 bg_d5 = decoder_masks["bg"]
@@ -1688,6 +1781,10 @@ class VoxTellCMTTA:
                     ("miss", miss_d5),
                 ):
                     teacher_sums[name] += float((p5_d5 * mask.float()).sum().cpu())
+                    if self.decoder_alignment_check:
+                        aligned_student_sums[name] += float(
+                            (aligned_student_probabilities * mask.float()).sum().cpu()
+                        )
 
                 # Save only detached CPU tensors.  The teacher decoder output
                 # is reused through these masks/targets; no second teacher
@@ -1950,6 +2047,46 @@ class VoxTellCMTTA:
             "tversky_loss": float((self.tversky_weight * global_tversky).detach().cpu()),
             **before_student_diagnostics,
         }
+        if self.decoder_alignment_check:
+            same_context = torch.allclose(long_ctx, ctx_delta_before, atol=1e-7, rtol=1e-7)
+            diagnostics.update(
+                {
+                    "decoder_alignment_max_abs_error": decoder_alignment_max,
+                    "decoder_alignment_mean_abs_error": (
+                        decoder_alignment_sum / decoder_alignment_mass
+                        if decoder_alignment_mass > 0.0
+                        else 0.0
+                    ),
+                    "decoder_alignment_same_context": bool(same_context),
+                }
+            )
+            for name in ("fg", "bg", "amb", "miss"):
+                count = region_counts[name]
+                teacher_mean = _mean_or_none(teacher_sums[name], count)
+                aligned_mean = _mean_or_none(aligned_student_sums[name], count)
+                diagnostics[f"aligned_student_{name}_mean_probability"] = aligned_mean
+                if teacher_mean is not None and aligned_mean is not None and not np.isclose(
+                    teacher_mean, aligned_mean, atol=1e-5, rtol=1e-5
+                ):
+                    raise RuntimeError(
+                        "VoxTell teacher/student region probabilities are not aligned "
+                        f"for {name}: teacher={teacher_mean:.6g} "
+                        f"student={aligned_mean:.6g}"
+                    )
+                before_mean = diagnostics.get(
+                    f"student_before_{name}_mean_probability"
+                )
+                if (
+                    same_context
+                    and teacher_mean is not None
+                    and before_mean is not None
+                    and not np.isclose(teacher_mean, before_mean, atol=1e-5, rtol=1e-5)
+                ):
+                    raise RuntimeError(
+                        "VoxTell same-context teacher/student region probabilities "
+                        f"are not aligned for {name}: teacher={teacher_mean:.6g} "
+                        f"student_before={before_mean:.6g}"
+                    )
         diagnostics.update(
             {
                 "teacher_mean_fg_probability": diagnostics["teacher_fg_mean_probability"],

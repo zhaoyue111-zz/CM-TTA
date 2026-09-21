@@ -53,6 +53,25 @@ def binary_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, floa
     }
 
 
+def binary_diagnostic_metrics(
+    prediction: np.ndarray, target: np.ndarray
+) -> dict[str, float]:
+    """Optional smoke-test metrics; never used for training or selection."""
+    prediction = np.asarray(prediction, dtype=bool)
+    target = np.asarray(target, dtype=bool)
+    if prediction.shape != target.shape:
+        raise ValueError(f"Prediction/label shape mismatch: {prediction.shape} vs {target.shape}")
+    prediction_mass = int(prediction.sum())
+    target_mass = int(target.sum())
+    true_positive = int(np.logical_and(prediction, target).sum())
+    return {
+        "Dice": binary_metrics(prediction, target)["Dice"],
+        "Precision": float(true_positive / prediction_mass) if prediction_mass else 1.0,
+        "Recall": float(true_positive / target_mass) if target_mass else (1.0 if prediction_mass == 0 else 0.0),
+        "prediction_foreground_volume": float(prediction_mass),
+    }
+
+
 def save_prediction_nifti(prediction: np.ndarray, image_path: Path, output_path: Path) -> None:
     """Save prediction using the same reader/writer orientation as VoxTell.
 
@@ -145,6 +164,7 @@ def evaluate_case(
     original_shape,
     text_feature: torch.Tensor,
     output_dir: Path,
+    include_diagnostic_metrics: bool = False,
 ) -> dict[str, float | str]:
     prediction = predict_case(
         predictor, data, bbox, original_shape, text_feature
@@ -155,7 +175,10 @@ def evaluate_case(
     prediction_path = output_dir / f"{stem}.nii.gz"
     save_prediction_nifti(prediction, image_path, prediction_path)
     check_prediction_nifti_geometry(prediction_path, image_path, label_path)
-    return {"basename": image_path.name, **metrics}
+    row = {"basename": image_path.name, **metrics}
+    if include_diagnostic_metrics:
+        row.update(binary_diagnostic_metrics(prediction, target))
+    return row
 
 
 def predict_case(
@@ -447,6 +470,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tversky_alpha", type=float, default=0.3)
     parser.add_argument("--tversky_beta", type=float, default=0.7)
     parser.add_argument("--tversky_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--decoder_alignment_check",
+        action="store_true",
+        help=(
+            "Validate ordinary logits against decoder D5 and teacher/student "
+            "region probabilities during decoder-masked adaptation."
+        ),
+    )
     parser.add_argument("--print_freq", type=int, default=1)
     parser.add_argument(
         "--tta_steps",
@@ -672,6 +703,7 @@ def main() -> None:
                 original_shape,
                 text_feature,
                 predictions_dir,
+                include_diagnostic_metrics=args.decoder_alignment_check,
             )
             row["adaptation_quality"] = trace["selected_cac"]
             row["selected_view"] = trace["selected_view"]
@@ -733,6 +765,47 @@ def main() -> None:
                 f"selected_view={trace['selected_view']} "
                 f"selected_view_GT_Dice={selected_view_dice:.4f}"
             )
+            if args.decoder_alignment_check:
+                before_diag = binary_diagnostic_metrics(
+                    zero_shot_sliding_prediction, zero_shot_target
+                )
+                region_diag = {
+                    region: {
+                        "teacher": trace.get(f"teacher_{region}_mean_probability"),
+                        "student_before": trace.get(
+                            f"student_before_{region}_mean_probability"
+                        ),
+                    }
+                    for region in ("fg", "bg", "amb", "miss")
+                }
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    "decoder_alignment="
+                    f"max={trace['decoder_alignment_max_abs_error']:.6e} "
+                    f"mean={trace['decoder_alignment_mean_abs_error']:.6e}"
+                )
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    f"teacher_student_regions={json.dumps(region_diag, sort_keys=True)}"
+                )
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    f"pseudo_loss={trace.get('pseudo_loss')} "
+                    f"bce={trace.get('bce_loss')} "
+                    f"tversky={trace.get('tversky_loss')} "
+                    f"total={trace.get('total_loss')}"
+                )
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    f"before_Dice={before_diag['Dice']:.6f} "
+                    f"before_Precision={before_diag['Precision']:.6f} "
+                    f"before_Recall={before_diag['Recall']:.6f} "
+                    f"before_volume={before_diag['prediction_foreground_volume']:.0f} "
+                    f"after_Dice={row['Dice']:.6f} "
+                    f"after_Precision={row['Precision']:.6f} "
+                    f"after_Recall={row['Recall']:.6f} "
+                    f"after_volume={row['prediction_foreground_volume']:.0f}"
+                )
             if case_index % args.print_freq == 0 or case_index == len(entries):
                 print(
                     f"case {case_index}/{len(entries)} {image_path.name} "

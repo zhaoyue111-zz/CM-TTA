@@ -22,6 +22,7 @@ from method.voxtell_cmtta import (
     cac_components_from_features,
     decoder_consistency_probabilities,
     decoder_grid_to_input_order,
+    check_voxtell_decoder_d5_alignment,
     masked_balanced_bce_from_components,
     masked_tversky_loss_from_components,
     masked_dice_components,
@@ -131,32 +132,87 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
-    def test_decoder_consistency_masks_use_explicit_hwd_to_dhw_conversion(self):
-        # D5 is (H,W,D)=(2,3,4), while the input valid mask is (D,H,W).
-        d5 = torch.full((1, 1, 2, 3, 4), 4.0)
-        d4 = torch.full((1, 1, 1, 2, 2), 4.0)
-        d3 = torch.full((1, 1, 1, 2, 2), 4.0)
-        d2 = torch.full((1, 1, 1, 2, 2), 4.0)
-        valid = torch.ones(1, 4, 2, 3)
-        valid[0, 1, 0, 2] = 0.0  # one known (d,h,w) voxel is padding
+    def test_decoder_alignment_diagnostic_uses_d5_index_zero_and_dhw(self):
+        model = TinyVoxTell()
+        result = check_voxtell_decoder_d5_alignment(
+            model,
+            torch.zeros(1, 1, 3, 5, 7),
+            torch.ones(1, 1, 1, 2),
+        )
+        self.assertEqual(result["normal_shape"], (1, 1, 3, 5, 7))
+        self.assertEqual(result["d5_shape"], (1, 1, 3, 5, 7))
+        self.assertAlmostEqual(result["max_abs_error"], 0.0, places=7)
+        self.assertAlmostEqual(result["mean_abs_error"], 0.0, places=7)
+
+    def test_decoder_consistency_keeps_non_cubic_dhw_coordinates(self):
+        # Real VoxTell decoder order is (D,H,W)=(3,5,7); all axes differ.
+        # Keep every voxel strictly above the 0.5 sigmoid threshold while
+        # retaining a distinct value at every (d,h,w) coordinate.
+        d5 = (torch.arange(3 * 5 * 7, dtype=torch.float32) + 1.0).reshape(
+            1, 1, 3, 5, 7
+        )
+        d4 = torch.full((1, 1, 2, 3, 4), 4.0)
+        d3 = torch.full((1, 1, 2, 3, 4), 4.0)
+        d2 = torch.full((1, 1, 2, 3, 4), 4.0)
+        valid = torch.ones(1, 1, 3, 5, 7)
+        valid[0, 0, 2, 4, 6] = 0.0  # one known (d,h,w) voxel is padding
+        coordinate_copy = decoder_grid_to_input_order(d5, (3, 5, 7))
+        self.assertTrue(torch.equal(coordinate_copy, d5))
+        self.assertEqual(float(coordinate_copy[0, 0, 2, 4, 6]), float(d5[0, 0, 2, 4, 6]))
         masks = decoder_consistency_probabilities([d5, d4, d3, d2], valid)
-        self.assertEqual(tuple(masks["fg"].shape), (1, 1, 2, 3, 4))
-        self.assertEqual(int(masks["fg"].sum()), 23)
-        # The excluded voxel is exactly (h=0,w=2,d=1), not a guessed axis.
-        self.assertFalse(bool(masks["fg"][0, 0, 0, 2, 1]))
+        self.assertEqual(tuple(masks["fg"].shape), (1, 1, 3, 5, 7))
+        self.assertEqual(tuple(masks["probabilities"].shape), (1, 4, 3, 5, 7))
+        self.assertEqual(int(masks["fg"].sum()), 104)
+        self.assertFalse(bool(masks["fg"][0, 0, 2, 4, 6]))
         self.assertEqual(int(masks["bg"].sum()), 0)
         self.assertEqual(int(masks["amb"].sum()), 0)
-        converted = decoder_grid_to_input_order(
-            masks["fg"].float(), (4, 2, 3), mode="nearest"
+        converted = decoder_grid_to_input_order(masks["fg"].float(), (3, 5, 7))
+        self.assertFalse(bool(converted[0, 0, 2, 4, 6]))
+        self.assertEqual(int(converted.sum()), 104)
+
+    def test_decoder_masked_same_context_path_aligns_teacher_d5_and_student(self):
+        model = TinyVoxTell()
+        with torch.no_grad():
+            model.project_text_embed.weight.fill_(1.0)
+        adapter = VoxTellCMTTA(
+            model,
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_update_mode="decoder_masked",
+                decoder_alignment_check=True,
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
         )
-        self.assertFalse(bool(converted[0, 0, 1, 0, 2]))
-        self.assertEqual(int(converted.sum()), 23)
+        try:
+            trace = adapter.adapt_case(
+                [torch.zeros(1, 3, 5, 7)],
+                [torch.ones(3, 5, 7)],
+            )
+            self.assertAlmostEqual(
+                trace["decoder_alignment_max_abs_error"], 0.0, places=7
+            )
+            self.assertAlmostEqual(
+                trace["decoder_alignment_mean_abs_error"], 0.0, places=7
+            )
+            self.assertTrue(trace["decoder_alignment_same_context"])
+            self.assertAlmostEqual(
+                trace["teacher_fg_mean_probability"],
+                trace["aligned_student_fg_mean_probability"],
+                places=6,
+            )
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+        finally:
+            adapter.close()
 
     def test_decoder_masks_handle_fg_only_bg_only_and_ambiguous_regions(self):
         fg_outputs = [torch.full((1, 1, 2, 2, 3), 4.0) for _ in range(4)]
         bg_outputs = [torch.full((1, 1, 2, 2, 3), -4.0) for _ in range(4)]
         ambiguous_outputs = [torch.zeros(1, 1, 2, 2, 3) for _ in range(4)]
-        valid = torch.ones(1, 3, 2, 2)
+        valid = torch.ones(1, 1, 2, 2, 3)
         fg = decoder_consistency_probabilities(fg_outputs, valid)
         bg = decoder_consistency_probabilities(bg_outputs, valid)
         ambiguous = decoder_consistency_probabilities(ambiguous_outputs, valid)
@@ -614,8 +670,8 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertFalse(pair_valid[0, 2:].any())
 
     def test_tdc_fixed_hwd_conversion_excludes_single_axis_padding(self):
-        # Input/valid-mask order is (D,H,W)=(3,3,4), with only the last D
-        # plane padded. VoxTell decoder logits use (H,W,D)=(3,4,3).
+        # Input/valid-mask and decoder order are both (D,H,W)=(3,3,4),
+        # with only the last D plane padded.
         volume = torch.zeros(1, 2, 3, 4)
         patches, valid_masks, locations, data_shape = make_case_patches(
             volume, (3, 3, 4)
@@ -624,8 +680,8 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(tuple(data_shape), (2, 3, 4))
         self.assertEqual(locations, [(0, 0, 0)])
 
-        decoder_mask = torch.full((1, 1, 3, 4, 3), -20.0)
-        decoder_mask[..., -1] = 20.0  # only the padded D5 D-plane is foreground
+        decoder_mask = torch.full((1, 1, 3, 3, 4), -20.0)
+        decoder_mask[:, :, -1] = 20.0  # only the padded D5 D-plane is foreground
         result = tdc_patch_components(
             [decoder_mask, decoder_mask, decoder_mask, decoder_mask],
             valid_masks[0].unsqueeze(0),
