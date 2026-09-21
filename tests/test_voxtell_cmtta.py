@@ -1357,8 +1357,66 @@ class VoxTellCMTTATest(unittest.TestCase):
                     cac_components["background_mass"],
                 )[0]
                 objective = dice + adapter.w_entropy * entropy - adapter.w_cac * case_cac
+                direct_components = torch.autograd.grad(
+                    (dice, adapter.w_entropy * entropy, -adapter.w_cac * case_cac),
+                    adapter.ctx,
+                    retain_graph=True,
+                )
             adapter.scaler.scale(objective).backward()
-            return adapter.ctx.grad.detach().clone()
+            scale = float(adapter.scaler.get_scale())
+            scaled_gradient = adapter.ctx.grad.detach().float().clone()
+            return {
+                "scaled": scaled_gradient,
+                "unscaled": scaled_gradient / scale,
+                "scale": scale,
+                "components": {
+                    name: gradient.detach().float().clone()
+                    for name, gradient in zip(
+                        ("dice", "entropy", "cac"), direct_components
+                    )
+                },
+            }
+
+        def two_stage_component_gradients():
+            """Split replay gradients only when the aggregate check fails."""
+            adapter = make_adapter()
+            try:
+                short_value = adapter.ctx.detach().clone()
+                original_entropy_weight = adapter.w_entropy
+                component_gradients = {}
+
+                def replay_gradient():
+                    scale = float(adapter.scaler.get_scale())
+                    gradient = adapter.ctx.grad.detach().float().clone()
+                    return gradient / scale
+
+                adapter.optimizer.zero_grad(set_to_none=True)
+                adapter.w_entropy = 0.0
+                adapter._backward_case_supervision(
+                    patches, valid_masks, params, 1, short_value, 1.0,
+                    short_value, True
+                )
+                component_gradients["dice"] = replay_gradient()
+
+                adapter.optimizer.zero_grad(set_to_none=True)
+                adapter.w_entropy = original_entropy_weight
+                adapter._backward_case_supervision(
+                    patches, valid_masks, params, 1, short_value, 1.0,
+                    short_value, True
+                )
+                supervision_gradient = replay_gradient()
+                component_gradients["entropy"] = (
+                    supervision_gradient - component_gradients["dice"]
+                )
+
+                adapter.optimizer.zero_grad(set_to_none=True)
+                adapter._backward_case_cac(
+                    patches, valid_masks, params, 1, short_value, 1.0, True
+                )
+                component_gradients["cac"] = replay_gradient()
+                return component_gradients
+            finally:
+                adapter.close()
 
         direct_adapter = make_adapter()
         two_stage_adapter = make_adapter()
@@ -1385,19 +1443,67 @@ class VoxTellCMTTATest(unittest.TestCase):
                 1.0,
                 True,
             )
-            two_stage_gradient_value = two_stage_adapter.ctx.grad.detach().clone()
+            two_stage_scale = float(two_stage_adapter.scaler.get_scale())
+            two_stage_scaled_gradient = (
+                two_stage_adapter.ctx.grad.detach().float().clone()
+            )
+            two_stage_gradient_value = two_stage_scaled_gradient / two_stage_scale
         finally:
             direct_adapter.close()
             two_stage_adapter.close()
 
-        self.assertTrue(
-            torch.allclose(
-                two_stage_gradient_value,
-                direct_gradient_value,
-                atol=2e-3,
-                rtol=2e-3,
-            )
+        self.assertAlmostEqual(
+            direct_gradient_value["scale"],
+            two_stage_scale,
+            places=6,
+            msg=(
+                "direct and two-stage GradScaler scales differ: "
+                f"direct_scale={direct_gradient_value['scale']} "
+                f"two_stage_scale={two_stage_scale}"
+            ),
         )
+
+        scaled_difference = (
+            two_stage_scaled_gradient - direct_gradient_value["scaled"]
+        ).abs()
+        unscaled_difference = (
+            two_stage_gradient_value - direct_gradient_value["unscaled"]
+        ).abs()
+        max_abs_diff = float(unscaled_difference.max().cpu())
+        max_relative_diff = float(
+            (
+                unscaled_difference
+                / direct_gradient_value["unscaled"].abs().clamp_min(1e-12)
+            ).max().cpu()
+        )
+
+        if not torch.allclose(
+            two_stage_gradient_value,
+            direct_gradient_value["unscaled"],
+            atol=2e-3,
+            rtol=2e-3,
+        ):
+            replay_components = two_stage_component_gradients()
+            component_differences = {
+                name: float(
+                    (replay_components[name] - direct_gradient_value["components"][name])
+                    .abs()
+                    .max()
+                    .cpu()
+                )
+                for name in ("dice", "entropy", "cac")
+            }
+            self.fail(
+                "Unscaled direct/two-stage AMP gradients differ. "
+                f"direct_gradient={direct_gradient_value['unscaled']} "
+                f"two_stage_gradient={two_stage_gradient_value} "
+                f"max_abs_diff={max_abs_diff} "
+                f"max_relative_diff={max_relative_diff} "
+                f"direct_scale={direct_gradient_value['scale']} "
+                f"two_stage_scale={two_stage_scale} "
+                f"scaled_max_abs_diff={float(scaled_difference.max().cpu())} "
+                f"component_max_abs_diff={component_differences}"
+            )
 
         adapter = make_adapter()
         try:
