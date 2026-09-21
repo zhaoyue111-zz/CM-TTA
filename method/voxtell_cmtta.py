@@ -1911,7 +1911,10 @@ class VoxTellCMTTA:
                             (local_entropy_sum[0], entropy_derivatives[0] * self.w_entropy)
                         )
                 if differentiable:
-                    local_objective = sum(tensor * derivative for tensor, derivative in differentiable)
+                    local_objective = sum(
+                        (tensor * derivative).sum()
+                        for tensor, derivative in differentiable
+                    )
                     self.scaler.scale(local_objective).backward()
 
         valid_count = max(region_counts["valid"], 1.0)

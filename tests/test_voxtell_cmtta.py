@@ -1,3 +1,4 @@
+import copy
 import os
 import sys
 import types
@@ -301,6 +302,72 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertIn("student_after_foreground_volume", trace)
         finally:
             adapter.close()
+
+    def test_decoder_masked_multiview_replay_matches_view_batch_size_one(self):
+        template = TinyVoxTell()
+        with torch.no_grad():
+            template.project_text_embed.weight.fill_(1.0)
+        template_state = copy.deepcopy(template.state_dict())
+
+        def make_adapter(view_batch_size):
+            model = TinyVoxTell()
+            model.load_state_dict(template_state)
+            return VoxTellCMTTA(
+                model,
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    pseudo_update_mode="decoder_masked",
+                    num_aug_views=2,
+                    view_batch_size=view_batch_size,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                ),
+            )
+
+        patches = [torch.zeros(1, 2, 2, 2)]
+        valid_masks = [torch.ones(2, 2, 2)]
+        batch_one = make_adapter(1)
+        batch_two = make_adapter(2)
+        try:
+            # Prepare once so both runs use identical sampled intensity views,
+            # selected-view inputs, short/long contexts, and quality values.
+            prepared = batch_one.prepare_case(patches, valid_masks)
+            prepared_one = copy.deepcopy(prepared)
+            prepared_two = copy.deepcopy(prepared)
+            ctx_before_one = batch_one.ctx_delta.detach().clone()
+            ctx_before_two = batch_two.ctx_delta.detach().clone()
+            trace_one = batch_one.adapt_case(
+                patches, valid_masks, prepared_case=prepared_one
+            )
+            trace_two = batch_two.adapt_case(
+                patches, valid_masks, prepared_case=prepared_two
+            )
+            self.assertEqual(trace_one["optimizer_steps_for_case"], 1)
+            self.assertEqual(trace_two["optimizer_steps_for_case"], 1)
+            for adapter, ctx_before in (
+                (batch_one, ctx_before_one),
+                (batch_two, ctx_before_two),
+            ):
+                self.assertIsNotNone(adapter.ctx_delta.grad)
+                self.assertTrue(torch.isfinite(adapter.ctx_delta.grad).all())
+                self.assertGreater(float(adapter.ctx_delta.grad.norm()), 0.0)
+                self.assertFalse(torch.equal(ctx_before, adapter.ctx_delta.detach()))
+            for key in ("pseudo_loss", "bce_loss", "tversky_loss"):
+                self.assertTrue(np.isfinite(trace_one[key]))
+                self.assertTrue(np.isfinite(trace_two[key]))
+                self.assertAlmostEqual(trace_one[key], trace_two[key], places=6)
+            self.assertTrue(
+                torch.allclose(
+                    batch_one.ctx_delta.detach(),
+                    batch_two.ctx_delta.detach(),
+                    atol=1e-6,
+                    rtol=1e-6,
+                )
+            )
+        finally:
+            batch_one.close()
+            batch_two.close()
 
     def test_prediction_roundtrips_with_voxtell_reader_writer_geometry(self):
         import nibabel as nib
