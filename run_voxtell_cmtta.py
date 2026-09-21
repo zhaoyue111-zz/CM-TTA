@@ -55,21 +55,124 @@ def binary_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, floa
 
 def binary_diagnostic_metrics(
     prediction: np.ndarray, target: np.ndarray
-) -> dict[str, float]:
-    """Optional smoke-test metrics; never used for training or selection."""
+) -> dict[str, float | int]:
+    """Return complete-case binary metrics and confusion counts.
+
+    This function is evaluation-only.  All counts are computed on the final
+    full-volume binary arrays, never on patches or selected views.
+    """
     prediction = np.asarray(prediction, dtype=bool)
     target = np.asarray(target, dtype=bool)
     if prediction.shape != target.shape:
         raise ValueError(f"Prediction/label shape mismatch: {prediction.shape} vs {target.shape}")
-    prediction_mass = int(prediction.sum())
-    target_mass = int(target.sum())
     true_positive = int(np.logical_and(prediction, target).sum())
+    false_positive = int(np.logical_and(prediction, np.logical_not(target)).sum())
+    false_negative = int(np.logical_and(np.logical_not(prediction), target).sum())
+    true_negative = int(
+        np.logical_and(np.logical_not(prediction), np.logical_not(target)).sum()
+    )
+    prediction_mass = true_positive + false_positive
+    target_mass = true_positive + false_negative
+    dice_denominator = 2 * true_positive + false_positive + false_negative
+    iou_denominator = true_positive + false_positive + false_negative
+    precision_denominator = true_positive + false_positive
+    recall_denominator = true_positive + false_negative
     return {
-        "Dice": binary_metrics(prediction, target)["Dice"],
-        "Precision": float(true_positive / prediction_mass) if prediction_mass else 1.0,
-        "Recall": float(true_positive / target_mass) if target_mass else (1.0 if prediction_mass == 0 else 0.0),
+        "Dice": float(2.0 * true_positive / dice_denominator) if dice_denominator else 1.0,
+        "mIoU": float(true_positive / iou_denominator) if iou_denominator else 1.0,
+        "Precision": float(true_positive / precision_denominator)
+        if precision_denominator
+        else 1.0,
+        "Recall": float(true_positive / recall_denominator)
+        if recall_denominator
+        else 1.0,
+        "TP": true_positive,
+        "FP": false_positive,
+        "FN": false_negative,
+        "TN": true_negative,
         "prediction_foreground_volume": float(prediction_mass),
+        "target_foreground_volume": float(target_mass),
     }
+
+
+def zero_shot_diagnostic_fields(
+    metrics: dict[str, float | int],
+) -> dict[str, float | int]:
+    """Use stable zero-shot result names while retaining old Dice aliases."""
+    fields = {
+        f"zero_shot_{key}": metrics[key]
+        for key in (
+            "Dice",
+            "mIoU",
+            "Precision",
+            "Recall",
+            "TP",
+            "FP",
+            "FN",
+            "TN",
+            "prediction_foreground_volume",
+        )
+    }
+    fields["target_foreground_volume"] = metrics["target_foreground_volume"]
+    fields["zero_shot_sliding_dice"] = metrics["Dice"]
+    fields["zero_shot_sliding_miou"] = metrics["mIoU"]
+    return fields
+
+
+def case_metric_changes(
+    adapted: dict[str, float | int],
+    zero_shot: dict[str, float | int],
+) -> dict[str, float | int | None]:
+    """Compute adapted-minus-zero-shot changes for complete-case metrics."""
+    changes: dict[str, float | int | None] = {}
+    for metric in ("Dice", "mIoU", "Precision", "Recall", "TP", "FP", "FN"):
+        changes[f"{metric}_change_from_before_adaptation"] = (
+            adapted[metric] - zero_shot[metric]
+        )
+    changes["prediction_foreground_volume_change"] = (
+        adapted["prediction_foreground_volume"]
+        - zero_shot["prediction_foreground_volume"]
+    )
+    zero_volume = float(zero_shot["prediction_foreground_volume"])
+    changes["prediction_foreground_volume_change_ratio"] = (
+        changes["prediction_foreground_volume_change"] / zero_volume
+        if zero_volume != 0.0
+        else None
+    )
+    return changes
+
+
+def macro_average_case_metrics(
+    case_rows: list[dict[str, float | int | str | bool | None]],
+) -> dict[str, float]:
+    """Compute requested metrics as case-wise macro averages."""
+    keys = (
+        "Dice",
+        "mIoU",
+        "Precision",
+        "Recall",
+        "zero_shot_Dice",
+        "zero_shot_mIoU",
+        "zero_shot_Precision",
+        "zero_shot_Recall",
+        "Dice_change_from_before_adaptation",
+        "mIoU_change_from_before_adaptation",
+        "Precision_change_from_before_adaptation",
+        "Recall_change_from_before_adaptation",
+    )
+    if not case_rows:
+        return {key: 0.0 for key in keys}
+    result = {
+        key: float(np.mean([float(row[key]) for row in case_rows]))
+        for key in keys
+    }
+    # Short names are the stable macro-average fields requested by the
+    # reporting format; retain the explicit per-case names above as well.
+    for metric in ("Dice", "mIoU", "Precision", "Recall"):
+        result[f"{metric}_change"] = result[
+            f"{metric}_change_from_before_adaptation"
+        ]
+    return result
 
 
 def save_prediction_nifti(prediction: np.ndarray, image_path: Path, output_path: Path) -> None:
@@ -170,15 +273,16 @@ def evaluate_case(
         predictor, data, bbox, original_shape, text_feature
     )
     target = np.squeeze(load_ras_label(str(label_path)))
-    metrics = binary_metrics(prediction, target)
+    # Always record complete-case diagnostic metrics.  The legacy argument is
+    # retained for callers but no longer gates Precision/Recall or confusion
+    # statistics on decoder alignment diagnostics.
+    del include_diagnostic_metrics
+    metrics = binary_diagnostic_metrics(prediction, target)
     stem = image_path.name[:-7] if image_path.name.endswith(".nii.gz") else image_path.stem
     prediction_path = output_dir / f"{stem}.nii.gz"
     save_prediction_nifti(prediction, image_path, prediction_path)
     check_prediction_nifti_geometry(prediction_path, image_path, label_path)
-    row = {"basename": image_path.name, **metrics}
-    if include_diagnostic_metrics:
-        row.update(binary_diagnostic_metrics(prediction, target))
-    return row
+    return {"basename": image_path.name, **metrics}
 
 
 def predict_case(
@@ -563,12 +667,11 @@ def main() -> None:
                 zero_shot_text,
             )
             zero_shot_target = np.squeeze(load_ras_label(str(label_path)))
-            zero_shot_sliding_dice = binary_metrics(
+            zero_shot_metrics = binary_diagnostic_metrics(
                 zero_shot_sliding_prediction, zero_shot_target
-            )["Dice"]
-            zero_shot_sliding_miou = binary_metrics(
-                zero_shot_sliding_prediction, zero_shot_target
-            )["mIoU"]
+            )
+            zero_shot_sliding_dice = zero_shot_metrics["Dice"]
+            zero_shot_sliding_miou = zero_shot_metrics["mIoU"]
             zero_shot_nonoverlap_dice = binary_metrics(
                 zero_shot_nonoverlap_prediction, zero_shot_target
             )["Dice"]
@@ -617,15 +720,22 @@ def main() -> None:
                 selector_reports.append(selector_report)
                 row = {
                     "basename": image_path.name,
-                    "Dice": zero_shot_sliding_dice,
-                    "mIoU": zero_shot_sliding_miou,
+                    **zero_shot_metrics,
+                    **zero_shot_diagnostic_fields(zero_shot_metrics),
                     "selected_view": None,
                     "selected_view_GT_Dice_before_adaptation": None,
                     "Dice_change_from_before_adaptation": 0.0,
+                    "mIoU_change_from_before_adaptation": 0.0,
+                    "Precision_change_from_before_adaptation": 0.0,
+                    "Recall_change_from_before_adaptation": 0.0,
+                    "TP_change_from_before_adaptation": 0,
+                    "FP_change_from_before_adaptation": 0,
+                    "FN_change_from_before_adaptation": 0,
+                    "prediction_foreground_volume_change": 0.0,
+                    "prediction_foreground_volume_change_ratio": None,
                     "selector_only_eval": True,
                     "view_metrics": view_metrics,
                     "selector_results": selector_report["selectors"],
-                    "zero_shot_sliding_dice": zero_shot_sliding_dice,
                     "zero_shot_nonoverlap_dice": zero_shot_nonoverlap_dice,
                     "zero_shot_patch_gap": zero_shot_patch_gap,
                 }
@@ -703,18 +813,23 @@ def main() -> None:
                 original_shape,
                 text_feature,
                 predictions_dir,
-                include_diagnostic_metrics=args.decoder_alignment_check,
             )
+            row.update(zero_shot_diagnostic_fields(zero_shot_metrics))
             row["adaptation_quality"] = trace["selected_cac"]
             row["selected_view"] = trace["selected_view"]
             row["selected_view_GT_Dice_before_adaptation"] = selected_view_dice
-            row["Dice_change_from_before_adaptation"] = (
-                row["Dice"] - zero_shot_sliding_dice
-            )
+            row.update(case_metric_changes(row, zero_shot_metrics))
             row["view_metrics"] = row_view_metrics
-            row["zero_shot_sliding_dice"] = zero_shot_sliding_dice
             row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
             row["zero_shot_patch_gap"] = zero_shot_patch_gap
+            # Keep the patch-level values explicitly separate from the full
+            # case prediction volumes recorded above.
+            trace[
+                "selected_view_patch_foreground_volume_before"
+            ] = trace.get("student_before_foreground_volume")
+            trace[
+                "selected_view_patch_foreground_volume_after"
+            ] = trace.get("student_after_foreground_volume")
             # Keep the per-case pseudo-update diagnostics in results.json as
             # well as in the checkpoint history, including mask statistics and
             # the replacement BCE/Tversky terms when enabled.
@@ -815,10 +930,7 @@ def main() -> None:
     finally:
         adapter.close()
 
-    average = {
-        "Dice": float(np.mean([row["Dice"] for row in case_rows])),
-        "mIoU": float(np.mean([row["mIoU"] for row in case_rows])),
-    }
+    average = macro_average_case_metrics(case_rows)
     output = {"cases": case_rows, "average": average}
     if args.selector_only_eval:
         selector_summary = summarize_selector_only(selector_reports)

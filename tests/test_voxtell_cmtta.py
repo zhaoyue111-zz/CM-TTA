@@ -6,6 +6,7 @@ import unittest
 import warnings
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -33,10 +34,15 @@ from method.voxtell_cmtta import (
     tdc_patch_components,
 )
 from run_voxtell_cmtta import (
+    binary_diagnostic_metrics,
+    case_metric_changes,
     check_prediction_nifti_geometry,
+    evaluate_case,
+    macro_average_case_metrics,
     save_prediction_nifti,
     selector_only_case_report,
     summarize_selector_only,
+    zero_shot_diagnostic_fields,
 )
 
 
@@ -132,6 +138,127 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
+    def test_binary_diagnostic_metrics_returns_confusion_and_all_scores(self):
+        prediction = np.array([1, 1, 0, 0], dtype=np.uint8)
+        target = np.array([1, 0, 1, 0], dtype=np.uint8)
+        metrics = binary_diagnostic_metrics(prediction, target)
+        self.assertEqual(
+            {key: metrics[key] for key in ("TP", "FP", "FN", "TN")},
+            {"TP": 1, "FP": 1, "FN": 1, "TN": 1},
+        )
+        self.assertAlmostEqual(metrics["Dice"], 0.5)
+        self.assertAlmostEqual(metrics["mIoU"], 1.0 / 3.0)
+        self.assertAlmostEqual(metrics["Precision"], 0.5)
+        self.assertAlmostEqual(metrics["Recall"], 0.5)
+        self.assertEqual(metrics["prediction_foreground_volume"], 2.0)
+        self.assertEqual(metrics["target_foreground_volume"], 2.0)
+        self.assertAlmostEqual(
+            metrics["Dice"],
+            2.0 * metrics["Precision"] * metrics["Recall"]
+            / (metrics["Precision"] + metrics["Recall"]),
+        )
+
+    def test_binary_diagnostic_metrics_empty_cases_are_finite_and_compatible(self):
+        cases = (
+            (
+                np.zeros(4, dtype=np.uint8),
+                np.zeros(4, dtype=np.uint8),
+                {"TP": 0, "FP": 0, "FN": 0, "TN": 4,
+                 "Dice": 1.0, "mIoU": 1.0, "Precision": 1.0, "Recall": 1.0},
+            ),
+            (
+                np.zeros(4, dtype=np.uint8),
+                np.array([1, 1, 0, 0], dtype=np.uint8),
+                {"TP": 0, "FP": 0, "FN": 2, "TN": 2,
+                 "Dice": 0.0, "mIoU": 0.0, "Precision": 1.0, "Recall": 0.0},
+            ),
+            (
+                np.array([1, 1, 0, 0], dtype=np.uint8),
+                np.zeros(4, dtype=np.uint8),
+                {"TP": 0, "FP": 2, "FN": 0, "TN": 2,
+                 "Dice": 0.0, "mIoU": 0.0, "Precision": 0.0, "Recall": 1.0},
+            ),
+        )
+        for prediction, target, expected in cases:
+            metrics = binary_diagnostic_metrics(prediction, target)
+            for key, value in expected.items():
+                self.assertEqual(metrics[key], value)
+            self.assertTrue(
+                all(np.isfinite(float(metrics[key])) for key in (
+                    "Dice", "mIoU", "Precision", "Recall"
+                ))
+            )
+
+    def test_evaluate_case_always_records_full_case_diagnostics(self):
+        prediction = np.array(
+            [[[1, 0], [1, 0]], [[0, 0], [0, 0]]], dtype=np.uint8
+        )
+        target = np.array(
+            [[[1, 1], [0, 0]], [[0, 0], [0, 0]]], dtype=np.uint8
+        )
+        with patch("run_voxtell_cmtta.predict_case", return_value=prediction), \
+             patch("run_voxtell_cmtta.load_ras_label", return_value=target), \
+             patch("run_voxtell_cmtta.save_prediction_nifti"), \
+             patch("run_voxtell_cmtta.check_prediction_nifti_geometry"):
+            row = evaluate_case(
+                predictor=None,
+                image_path=Path("case.nii.gz"),
+                label_path=Path("case_label.nii.gz"),
+                data=None,
+                bbox=None,
+                original_shape=target.shape,
+                text_feature=None,
+                output_dir=Path("unused"),
+                include_diagnostic_metrics=False,
+            )
+        self.assertEqual(row["TP"], 1)
+        self.assertEqual(row["FP"], 1)
+        self.assertEqual(row["FN"], 1)
+        self.assertEqual(row["TN"], 5)
+        self.assertEqual(row["prediction_foreground_volume"], 2.0)
+        self.assertEqual(row["target_foreground_volume"], 2.0)
+        self.assertIn("Precision", row)
+        self.assertIn("Recall", row)
+
+    def test_zero_shot_aliases_changes_and_macro_average_are_case_level(self):
+        zero = binary_diagnostic_metrics(
+            np.array([1, 0, 0, 0], dtype=np.uint8),
+            np.array([1, 1, 0, 0], dtype=np.uint8),
+        )
+        adapted = binary_diagnostic_metrics(
+            np.array([1, 1, 1, 0], dtype=np.uint8),
+            np.array([1, 1, 0, 0], dtype=np.uint8),
+        )
+        zero_fields = zero_shot_diagnostic_fields(zero)
+        self.assertEqual(zero_fields["zero_shot_Dice"], zero_fields["zero_shot_sliding_dice"])
+        self.assertEqual(zero_fields["zero_shot_mIoU"], zero_fields["zero_shot_sliding_miou"])
+        changes = case_metric_changes(adapted, zero)
+        self.assertGreater(changes["Dice_change_from_before_adaptation"], 0.0)
+        self.assertGreater(changes["mIoU_change_from_before_adaptation"], 0.0)
+        self.assertGreater(changes["prediction_foreground_volume_change"], 0.0)
+        self.assertAlmostEqual(changes["prediction_foreground_volume_change_ratio"], 2.0)
+        zero_empty = binary_diagnostic_metrics(
+            np.zeros(2, dtype=np.uint8), np.zeros(2, dtype=np.uint8)
+        )
+        self.assertIsNone(case_metric_changes(adapted, zero_empty)["prediction_foreground_volume_change_ratio"])
+
+        row_one = {
+            "Dice": 0.5, "mIoU": 0.25, "Precision": 0.5, "Recall": 0.5,
+            "zero_shot_Dice": 0.25, "zero_shot_mIoU": 0.1,
+            "zero_shot_Precision": 0.2, "zero_shot_Recall": 0.3,
+            "Dice_change_from_before_adaptation": 0.25,
+            "mIoU_change_from_before_adaptation": 0.15,
+            "Precision_change_from_before_adaptation": 0.3,
+            "Recall_change_from_before_adaptation": 0.2,
+        }
+        row_two = {key: value * 0.5 for key, value in row_one.items()}
+        average = macro_average_case_metrics([row_one, row_two])
+        self.assertAlmostEqual(average["Dice"], 0.375)
+        self.assertAlmostEqual(average["zero_shot_Dice"], 0.1875)
+        self.assertAlmostEqual(average["Dice_change_from_before_adaptation"], 0.1875)
+        self.assertAlmostEqual(average["Dice_change"], 0.1875)
+        self.assertAlmostEqual(average["Precision_change"], 0.225)
+
     def test_decoder_alignment_diagnostic_uses_d5_index_zero_and_dhw(self):
         model = TinyVoxTell()
         result = check_voxtell_decoder_d5_alignment(
