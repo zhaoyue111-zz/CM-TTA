@@ -2499,7 +2499,11 @@ class VoxTellCMTTA:
             # exposing that this value is the replacement pseudo loss.
             sums["pseudo_loss"] = soft_dice
             sums.update(self._last_pseudo_diagnostics)
-            sums["pseudo_loss_type"] = "masked_balanced_bce_tversky"
+            sums["pseudo_loss_type"] = (
+                "masked_balanced_bce_tversky_amb_anchor"
+                if self.amb_weight > 0
+                else "masked_balanced_bce_tversky"
+            )
             sums["legacy_soft_dice_field_is_pseudo_loss"] = True
         sums["entropy_loss"] = entropy_loss
         sums["loss"] = soft_dice + self.w_entropy * entropy_loss
