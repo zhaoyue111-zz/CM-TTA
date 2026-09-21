@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from data.voxtell_p0 import make_case_patches, pad_to_patch_grid
 from method.voxtell_cmtta import (
@@ -20,6 +21,8 @@ from method.voxtell_cmtta import (
     cac_components_from_features,
     decoder_consistency_probabilities,
     decoder_grid_to_input_order,
+    masked_balanced_bce_from_components,
+    masked_tversky_loss_from_components,
     masked_dice_components,
     masked_entropy_components,
     select_cac_view,
@@ -148,6 +151,74 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertFalse(bool(converted[0, 0, 1, 0, 2]))
         self.assertEqual(int(converted.sum()), 23)
 
+    def test_decoder_masks_handle_fg_only_bg_only_and_ambiguous_regions(self):
+        fg_outputs = [torch.full((1, 1, 2, 2, 3), 4.0) for _ in range(4)]
+        bg_outputs = [torch.full((1, 1, 2, 2, 3), -4.0) for _ in range(4)]
+        ambiguous_outputs = [torch.zeros(1, 1, 2, 2, 3) for _ in range(4)]
+        valid = torch.ones(1, 3, 2, 2)
+        fg = decoder_consistency_probabilities(fg_outputs, valid)
+        bg = decoder_consistency_probabilities(bg_outputs, valid)
+        ambiguous = decoder_consistency_probabilities(ambiguous_outputs, valid)
+        self.assertEqual(int(fg["fg"].sum()), 12)
+        self.assertEqual(int(fg["bg"].sum()), 0)
+        self.assertEqual(int(bg["fg"].sum()), 0)
+        self.assertEqual(int(bg["bg"].sum()), 12)
+        self.assertEqual(int(ambiguous["amb"].sum()), 12)
+
+    def test_masked_balanced_bce_gives_equal_fg_bg_weight(self):
+        fg_sum = torch.tensor(4.0, requires_grad=True)
+        bg_sum = torch.tensor(12.0, requires_grad=True)
+        result = masked_balanced_bce_from_components(fg_sum, bg_sum, 2.0, 6.0)
+        self.assertAlmostEqual(float(result.detach()), 2.0, places=6)
+        result.backward()
+        self.assertAlmostEqual(float(fg_sum.grad), 0.25, places=6)
+        self.assertAlmostEqual(float(bg_sum.grad), 1.0 / 12.0, places=6)
+
+    def test_masked_tversky_is_per_view_case_mean_not_merged_case_ratio(self):
+        tp = torch.tensor([8.0, 1.0])
+        fp = torch.tensor([0.0, 9.0])
+        fn = torch.tensor([2.0, 1.0])
+        mean_loss, per_view = masked_tversky_loss_from_components(
+            tp, fp, fn, alpha=0.3, beta=0.7,
+        )
+        expected_per_view = 1.0 - tp / (tp + 0.3 * fp + 0.7 * fn + 1e-8)
+        merged = 1.0 - tp.sum() / (
+            tp.sum() + 0.3 * fp.sum() + 0.7 * fn.sum() + 1e-8
+        )
+        self.assertTrue(torch.allclose(per_view, expected_per_view))
+        self.assertAlmostEqual(float(mean_loss), float(expected_per_view.mean()), places=6)
+        self.assertNotAlmostEqual(float(mean_loss), float(merged), places=4)
+
+    def test_empty_tversky_has_zero_loss_and_zero_gradient(self):
+        tp = torch.zeros(2, requires_grad=True)
+        fp = torch.zeros(2, requires_grad=True)
+        fn = torch.zeros(2, requires_grad=True)
+        loss, per_view = masked_tversky_loss_from_components(
+            tp, fp, fn, valid_mass=torch.zeros(2)
+        )
+        self.assertEqual(float(loss.detach()), 0.0)
+        self.assertTrue(torch.equal(per_view, torch.zeros(2)))
+        loss.backward()
+        self.assertTrue(torch.equal(tp.grad, torch.zeros_like(tp)))
+        self.assertTrue(torch.equal(fp.grad, torch.zeros_like(fp)))
+        self.assertTrue(torch.equal(fn.grad, torch.zeros_like(fn)))
+
+    def test_ambiguous_region_has_no_bce_or_tversky_gradient(self):
+        logits = torch.zeros(1, 1, 2, 2, 2, requires_grad=True)
+        probability = torch.sigmoid(logits)
+        target = torch.full_like(probability, 0.7)
+        ambiguous = torch.ones_like(probability)
+        known = torch.zeros_like(probability)
+        bce = (F.binary_cross_entropy_with_logits(logits, target, reduction="none") * known).sum()
+        tp = (probability * target * known).sum().view(1)
+        fp = (probability * (1.0 - target) * known).sum().view(1)
+        fn = ((1.0 - probability) * target * known).sum().view(1)
+        tversky, _ = masked_tversky_loss_from_components(
+            tp, fp, fn, valid_mass=known.sum().view(1)
+        )
+        (bce + tversky + ambiguous.sum() * 0.0).backward()
+        self.assertTrue(torch.equal(logits.grad, torch.zeros_like(logits)))
+
     def test_decoder_masked_pseudo_update_has_safe_empty_regions_and_one_step(self):
         adapter = VoxTellCMTTA(
             TinyVoxTell(),
@@ -191,6 +262,20 @@ class VoxTellCMTTATest(unittest.TestCase):
         )
         try:
             before = adapter.ctx_delta.detach().clone()
+            original_diagnostics = adapter._selected_prompt_region_diagnostics
+            diagnostic_contexts = {}
+
+            def capture_diagnostics(
+                patches, valid_masks, params, selected_view, ctx, cache,
+                autocast_enabled, prefix,
+            ):
+                diagnostic_contexts[prefix] = ctx.detach().clone()
+                return original_diagnostics(
+                    patches, valid_masks, params, selected_view, ctx, cache,
+                    autocast_enabled, prefix,
+                )
+
+            adapter._selected_prompt_region_diagnostics = capture_diagnostics
             trace = adapter.adapt_case(
                 [torch.zeros(1, 2, 2, 2)], [torch.ones(2, 2, 2)]
             )
@@ -201,6 +286,19 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertGreater(trace["tversky_loss"], 0.0)
             self.assertTrue(torch.isfinite(adapter.ctx_delta).all())
             self.assertFalse(torch.equal(before, adapter.ctx_delta.detach()))
+            self.assertEqual(trace["pseudo_loss_type"], "masked_balanced_bce_tversky")
+            self.assertAlmostEqual(trace["pseudo_loss"], trace["bce_loss"] + trace["tversky_loss"], places=6)
+            self.assertIn("entropy_loss", trace)
+            self.assertIn("cac_loss", trace)
+            self.assertIn("total_loss", trace)
+            self.assertTrue(torch.equal(diagnostic_contexts["student_before"], before))
+            self.assertTrue(
+                torch.equal(
+                    diagnostic_contexts["student_after"], adapter.ctx_delta.detach()
+                )
+            )
+            self.assertIn("student_before_foreground_volume", trace)
+            self.assertIn("student_after_foreground_volume", trace)
         finally:
             adapter.close()
 
