@@ -37,7 +37,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 STAT_FIELDS = (
     "voxel_count", "mean", "std", "min", "p05", "p25", "median", "p75", "p95", "max"
 )
-REGIONS = ("valid", "gt_foreground", "gt_background_valid", "gt_background_all", "TP", "FN", "FP", "TN")
+REGIONS = ("valid", "gt_foreground", "gt_background_valid", "TP", "FN", "FP", "TN")
 SCORE_NAMES = ("probability", "raw_attention", "rank_attention", "residual")
 DECODER_COUNT = 5
 
@@ -170,6 +170,30 @@ def aggregate_attention_patches(
     return fused.astype(np.float32, copy=False)
 
 
+def crop_gt_to_inference_region(
+    gt_full: np.ndarray,
+    valid_inference_mask: np.ndarray,
+    bbox: Sequence[Sequence[int]],
+    case: str,
+) -> np.ndarray:
+    gt_full = np.asarray(gt_full, dtype=bool)
+    valid_inference_mask = np.asarray(valid_inference_mask, dtype=bool)
+    if gt_full.shape != valid_inference_mask.shape:
+        raise AssertionError(
+            f"{case}: GT/mask shape mismatch before crop: {gt_full.shape} vs {valid_inference_mask.shape}"
+        )
+    outside_count = int(np.count_nonzero(gt_full & ~valid_inference_mask))
+    if outside_count:
+        raise ValueError(
+            f"{case}: {outside_count} GT foreground voxels lie outside predictor crop bbox"
+        )
+    slices = tuple(slice(int(lo), int(hi)) for lo, hi in bbox)
+    cropped = gt_full[slices]
+    if not np.all(valid_inference_mask[slices]):
+        raise AssertionError(f"{case}: predictor crop bbox contains invalid inference voxels")
+    return cropped.astype(bool, copy=False)
+
+
 def confusion_regions(
     probability: np.ndarray, gt: np.ndarray, valid_mask: np.ndarray, threshold: float = 0.5
 ) -> dict[str, np.ndarray]:
@@ -183,7 +207,6 @@ def confusion_regions(
         "valid": valid_mask,
         "gt_foreground": valid_mask & gt,
         "gt_background_valid": valid_mask & ~gt,
-        "gt_background_all": ~gt,
         "TP": valid_mask & gt & predicted,
         "FN": valid_mask & gt & ~predicted,
         "FP": valid_mask & ~gt & predicted,
@@ -191,11 +214,92 @@ def confusion_regions(
     }
 
 
-def safe_auc_pr(y_true: np.ndarray, score: np.ndarray) -> tuple[float, float]:
+def assert_same_embedding(reference: torch.Tensor, candidate: torch.Tensor) -> None:
+    if reference is candidate:
+        return
+    if reference.shape != candidate.shape or reference.dtype != candidate.dtype:
+        raise AssertionError(
+            f"embedding shape/dtype mismatch: {tuple(reference.shape)}/{reference.dtype} vs "
+            f"{tuple(candidate.shape)}/{candidate.dtype}"
+        )
+    if not torch.equal(reference, candidate):
+        raise AssertionError("TDC and probability/attention do not use identical text embeddings")
+
+
+@contextlib.contextmanager
+def fixed_embedding_for_selector(adapter: Any, embedding: torch.Tensor):
+    """Make the existing selector consume a pre-encoded embedding unchanged.
+
+    ``VoxTellCMTTA._select_case_view`` normally receives a context delta and
+    encodes it internally. The diagnostic already owns the required fixed
+    ``short_ctx`` embedding, so temporarily redirect only this selector call
+    to that tensor. No model, parameter, optimizer, or training method is
+    changed.
+    """
+    original_encode = adapter._encode_ctx
+
+    def return_fixed(_ctx_delta: torch.Tensor) -> torch.Tensor:
+        assert_same_embedding(embedding, embedding)
+        return embedding
+
+    adapter._encode_ctx = return_fixed
+    try:
+        yield
+    finally:
+        adapter._encode_ctx = original_encode
+
+
+def selected_view_from_tdc(tdc_scores: Sequence[float]) -> tuple[int, list[int]]:
+    scores = np.asarray(tdc_scores, dtype=np.float64)
+    if scores.ndim != 1 or scores.size == 0 or not np.all(np.isfinite(scores)):
+        raise AssertionError(f"TDC scores must be a non-empty finite vector, got {scores}")
+    expected = int(np.argmax(scores))
+    order = np.argsort(-scores, kind="stable")
+    ranks = np.empty(scores.size, dtype=np.int64)
+    ranks[order] = np.arange(scores.size, dtype=np.int64)
+    return expected, ranks.tolist()
+
+
+def _metric_samples(
+    y_true: np.ndarray,
+    score: np.ndarray,
+    max_negative_voxels: int | None = None,
+    seed: int = 20260923,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int | bool]]:
     y_true = np.asarray(y_true, dtype=bool)
     score = np.asarray(score, dtype=np.float32)
     finite = np.isfinite(score)
     y_true, score = y_true[finite], score[finite]
+    positive = np.flatnonzero(y_true)
+    negative = np.flatnonzero(~y_true)
+    metadata: dict[str, int | bool] = {
+        "raw_positive_count": int(positive.size),
+        "raw_negative_count": int(negative.size),
+        "negative_sampling_enabled": bool(max_negative_voxels is not None),
+    }
+    if max_negative_voxels is not None:
+        if int(max_negative_voxels) < 1:
+            raise ValueError("metric_max_negative_voxels must be positive when provided")
+        if negative.size > int(max_negative_voxels):
+            rng = np.random.default_rng(int(seed))
+            negative = np.sort(rng.choice(negative, size=int(max_negative_voxels), replace=False))
+    selected = np.concatenate((positive, negative))
+    metadata.update({
+        "actual_positive_count": int(positive.size),
+        "actual_negative_count": int(negative.size),
+        "actual_sample_count": int(selected.size),
+        "negative_sampled": bool(negative.size < metadata["raw_negative_count"]),
+    })
+    return y_true[selected], score[selected], metadata
+
+
+def safe_auc_pr(
+    y_true: np.ndarray,
+    score: np.ndarray,
+    max_negative_voxels: int | None = None,
+    seed: int = 20260923,
+) -> tuple[float, float]:
+    y_true, score, _ = _metric_samples(y_true, score, max_negative_voxels, seed)
     if y_true.size == 0 or np.unique(y_true).size < 2:
         return float("nan"), float("nan")
     try:
@@ -239,6 +343,7 @@ def compute_case_metrics(
     selected_view_tdc: float = float("nan"),
     threshold: float = 0.5,
     balanced_seed: int = 20260923,
+    metric_max_negative_voxels: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, np.ndarray]]:
     probability = np.asarray(probability, dtype=np.float32)
     raw_attention = np.asarray(raw_attention, dtype=np.float32)
@@ -291,7 +396,11 @@ def compute_case_metrics(
         "pearson_attention_probability_balanced": balanced_pearson,
         "spearman_attention_probability_balanced": balanced_spearman,
     })
-    score_for_metrics = {"attention": raw_attention, "probability": probability, "R": residual}
+    # Classification metrics use percentile-rank attention. Raw attention is
+    # retained for descriptive region statistics only and is not interpreted
+    # as a cross-case comparable global intensity.
+    score_for_metrics = {"attention": rank_attention, "probability": probability, "R": residual}
+    sampling_metadata: dict[str, dict[str, int | bool]] = {}
     for group_name, positive_region, negative_region in (
         ("background_FN_TN", "FN", "TN"),
         ("foreground_TP_FP", "TP", "FP"),
@@ -300,9 +409,28 @@ def compute_case_metrics(
         selection = regions[positive_region] | regions[negative_region]
         labels = regions[positive_region][selection]
         for score_name, score_map in score_for_metrics.items():
-            auc, ap = safe_auc_pr(labels, score_map[selection])
+            auc, ap = safe_auc_pr(
+                labels,
+                score_map[selection],
+                max_negative_voxels=metric_max_negative_voxels,
+                seed=balanced_seed + sum(ord(char) for char in f"{group_name}:{score_name}"),
+            )
             metrics[f"{group_name}_{score_name}_auroc"] = auc
             metrics[f"{group_name}_{score_name}_auprc"] = ap
+            _, _, sample_metadata = _metric_samples(
+                labels,
+                score_map[selection],
+                max_negative_voxels=metric_max_negative_voxels,
+                seed=balanced_seed + sum(ord(char) for char in f"{group_name}:{score_name}"),
+            )
+            sampling_metadata[f"{group_name}_{score_name}"] = sample_metadata
+            for field, value in sample_metadata.items():
+                metrics[f"{group_name}_{score_name}_{field}"] = value
+    metrics["metric_max_negative_voxels"] = (
+        "" if metric_max_negative_voxels is None else int(metric_max_negative_voxels)
+    )
+    metrics["metric_negative_sampling"] = "negative_only" if metric_max_negative_voxels is not None else "none"
+    metrics["metric_sampling_seed"] = int(balanced_seed)
     return rows, metrics, {"probability": probability, "raw_attention": raw_attention, "rank_attention": rank_attention, "residual": residual, **regions}
 
 
@@ -340,6 +468,11 @@ class AttentionCapture(contextlib.AbstractContextManager):
             weights = output[1].detach().float().cpu().numpy()
             if weights.ndim != 4:
                 raise AssertionError(f"expected per-head attention weights, got {weights.shape}")
+            if weights.shape[2] != 1:
+                raise AssertionError(
+                    "fixed query=0 is only valid for one organ query; "
+                    f"captured {weights.shape[2]} queries"
+                )
             if not self.memory_shapes:
                 raise AssertionError("attention was captured before projected memory")
             memory_shape = self.memory_shapes[-1]
@@ -381,7 +514,7 @@ def build_adapter(predictor, args):
         pseudo_update_mode="original", bg_threshold=0.1, tversky_alpha=0.3,
         tversky_beta=0.7, tversky_weight=1.0, amb_weight=0.0,
         num_aug_views=args.num_aug_views, selection_p=args.selection_p,
-        view_selection_metric="tdc", use_entropy_rank=args.use_entropy_rank,
+        view_selection_metric="tdc", use_entropy_rank=False,
         short_memory_length=1, view_batch_size=args.view_batch_size,
         grad_clip=1.0, max_text_length=getattr(predictor, "max_text_length", 8192),
         decoder_alignment_check=False,
@@ -424,11 +557,9 @@ def _numeric_summary(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _region_summary(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Summarize region statistics case-wise; exclude all-background by default."""
+    """Summarize region statistics case-wise over valid crop-space regions."""
     result = []
     for region in REGIONS:
-        if region == "gt_background_all":
-            continue
         group = [row for row in rows if row.get("region") == region]
         if not group:
             continue
@@ -464,20 +595,61 @@ def _json_safe(value: Any) -> Any:
 
 
 def _conclusions(metrics_rows: Sequence[Mapping[str, Any]], region_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    def region_mean(region: str, field: str) -> float:
-        values = [float(row[field]) for row in region_rows if row.get("region") == region and math.isfinite(float(row.get(field, "nan")))]
-        return float(np.mean(values)) if values else float("nan")
-    fn_att, tn_att = region_mean("FN", "raw_attention_mean"), region_mean("TN", "raw_attention_mean")
-    fn_r, tn_r = region_mean("FN", "residual_mean"), region_mean("TN", "residual_mean")
-    fp_att, tp_att = region_mean("FP", "raw_attention_mean"), region_mean("TP", "raw_attention_mean")
-    fp_r, tp_r = region_mean("FP", "residual_mean"), region_mean("TP", "residual_mean")
+    del region_rows  # Raw attention region means remain descriptive CSV fields only.
+
+    def metric_summary(group: str, score: str, metric: str) -> dict[str, Any]:
+        field = f"{group}_{score}_{metric}"
+        values = np.asarray(
+            [float(row[field]) for row in metrics_rows if math.isfinite(float(row.get(field, "nan")))],
+            dtype=np.float64,
+        )
+        return {
+            "mean": float(np.mean(values)) if values.size else float("nan"),
+            "median": float(np.median(values)) if values.size else float("nan"),
+            "valid_case_count": int(values.size),
+            "greater_than_0_5_case_count": int(np.count_nonzero(values > 0.5)),
+        }
+
+    def group_summary(group: str) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for score in ("attention", "R"):
+            result[score] = {
+                "auroc": metric_summary(group, score, "auroc"),
+                "auprc": metric_summary(group, score, "auprc"),
+            }
+        for metric in ("auroc", "auprc"):
+            r_values = np.asarray(
+                [float(row[f"{group}_R_{metric}"]) for row in metrics_rows if math.isfinite(float(row.get(f"{group}_R_{metric}", "nan")))],
+                dtype=np.float64,
+            )
+            attention_values = np.asarray(
+                [float(row[f"{group}_attention_{metric}"]) for row in metrics_rows if math.isfinite(float(row.get(f"{group}_R_{metric}", "nan"))) and math.isfinite(float(row.get(f"{group}_attention_{metric}", "nan")))],
+                dtype=np.float64,
+            )
+            probability_values = np.asarray(
+                [float(row[f"{group}_probability_{metric}"]) for row in metrics_rows if math.isfinite(float(row.get(f"{group}_R_{metric}", "nan"))) and math.isfinite(float(row.get(f"{group}_probability_{metric}", "nan")))],
+                dtype=np.float64,
+            )
+            result[f"R_vs_attention_{metric}"] = {
+                "mean_delta": float(np.mean(r_values - attention_values)) if r_values.size == attention_values.size and r_values.size else float("nan"),
+                "R_better_case_count": int(np.count_nonzero(r_values > attention_values)) if r_values.size == attention_values.size else 0,
+                "valid_case_count": int(min(r_values.size, attention_values.size)),
+            }
+            result[f"R_vs_probability_{metric}"] = {
+                "mean_delta": float(np.mean(r_values - probability_values)) if r_values.size == probability_values.size and r_values.size else float("nan"),
+                "R_better_case_count": int(np.count_nonzero(r_values > probability_values)) if r_values.size == probability_values.size else 0,
+                "valid_case_count": int(min(r_values.size, probability_values.size)),
+            }
+        return result
+
     pearson = _finite_case_mean(metrics_rows, "pearson_attention_probability")
     spearman = _finite_case_mean(metrics_rows, "spearman_attention_probability")
     return {
-        "FN_vs_TN": {"raw_attention_FN_mean": fn_att, "raw_attention_TN_mean": tn_att, "residual_FN_mean": fn_r, "residual_TN_mean": tn_r, "attention_FN_higher_than_TN": bool(fn_att > tn_att) if math.isfinite(fn_att) and math.isfinite(tn_att) else None, "residual_FN_higher_than_TN": bool(fn_r > tn_r) if math.isfinite(fn_r) and math.isfinite(tn_r) else None},
-        "FP_vs_TP": {"raw_attention_FP_mean": fp_att, "raw_attention_TP_mean": tp_att, "residual_FP_mean": fp_r, "residual_TP_mean": tp_r, "attention_FP_lower_than_TP": bool(fp_att < tp_att) if math.isfinite(fp_att) and math.isfinite(tp_att) else None, "residual_FP_lower_than_TP": bool(fp_r < tp_r) if math.isfinite(fp_r) and math.isfinite(tp_r) else None},
+        "FN_vs_TN": group_summary("background_FN_TN"),
+        "TP_vs_FP": group_summary("foreground_TP_FP"),
         "attention_probability_similarity": {"pearson_mean": pearson, "spearman_mean": spearman},
-        "interpretation": "描述性诊断；固定使用最后 decoder layer、器官 query、所有 head 均值，不按 GT 选择聚合方式或调阈值。",
+        "raw_attention_note": "raw attention 仅作病例内描述性统计，不解释为跨病例可直接比较的全局强度。",
+        "interpretation": "指标按病例汇总；R/attention/probability 的比较不由区域均值单独判定有效性。",
     }
 
 
@@ -506,8 +678,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-aug-views", type=int, default=9)
     parser.add_argument("--view-batch-size", type=int, default=1)
     parser.add_argument("--selection-p", type=float, default=0.1)
-    parser.add_argument("--use-entropy-rank", action=argparse.BooleanOptionalAction, default=False,
-                        help="match the optional existing TDC+entropy rank; default selects by TDC rank directly")
+    parser.add_argument("--metric-max-negative-voxels", type=int, default=None,
+                        help="optional cap for negative voxels in AUROC/AUPRC; default uses all voxels")
     parser.add_argument("--balanced-seed", type=int, default=20260923)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--save-case", action="append", default=None, help="case basename to save maps for; repeat as needed")
@@ -554,7 +726,6 @@ def run(args: argparse.Namespace) -> int:
         return_all_layers_on_cpu=not args.all_layers_on_device,
     )
     adapter = build_adapter(predictor, args)
-    text_embedding = predictor.embed_text_prompts([args.prompt])
     ctx_snapshot = adapter.ctx_delta.detach().clone()
     region_rows: list[dict[str, Any]] = []
     metric_rows: list[dict[str, Any]] = []
@@ -566,17 +737,33 @@ def run(args: argparse.Namespace) -> int:
         patches, valid_masks, _locations, crop_shape = make_case_patches(data, predictor.patch_size)
         params = adapter._sample_intensity_params(args.num_aug_views)
         short_ctx = adapter._encode_ctx(adapter.ctx_delta.detach()).detach()
-        selected_view, _ = adapter._select_case_view(patches, params, short_ctx, valid_masks, collect_tdc=True)
+        with fixed_embedding_for_selector(adapter, short_ctx):
+            selected_view, _ = adapter._select_case_view(
+                patches, params, short_ctx, valid_masks, collect_tdc=True
+            )
         if not torch.equal(adapter.ctx_delta.detach(), ctx_snapshot):
             raise AssertionError("offline diagnostic changed ctx_delta")
         selection = dict(adapter.last_view_selection)
         tdc_scores = selection.get("tdc") or []
+        expected_view, tdc_ranks = selected_view_from_tdc(tdc_scores)
+        if int(selected_view) != expected_view:
+            raise AssertionError(
+                f"TDC selection mismatch for {case}: selected={selected_view}, "
+                f"argmax_tdc={expected_view}, scores={tdc_scores}"
+            )
+        if selection.get("tdc_rank") is not None and list(selection["tdc_rank"]) != tdc_ranks:
+            raise AssertionError(
+                f"TDC rank mismatch for {case}: selector={selection['tdc_rank']}, expected={tdc_ranks}"
+            )
         view_rows.extend({
             "case": case, "prompt": args.prompt, "view": view, "tdc_score": float(score),
-            "selected_view": int(selected_view), "scale": float(params[view]["scale"]), "offset": float(params[view]["offset"]),
+            "tdc_rank": int(tdc_ranks[view]), "selected_view": int(selected_view),
+            "scale": float(params[view]["scale"]), "offset": float(params[view]["offset"]),
         } for view, score in enumerate(tdc_scores))
         selected_param = params[selected_view]
         selected_data = apply_intensity_view(data.float(), selected_param)
+        diagnostic_embedding = short_ctx
+        assert_same_embedding(short_ctx, diagnostic_embedding)
         # Crop space has no predictor padding. The only valid mask is therefore
         # all crop voxels; predictor padding is removed by its public API.
         full_valid_mask = predictor.get_last_valid_inference_mask()
@@ -586,7 +773,7 @@ def run(args: argparse.Namespace) -> int:
             raise AssertionError("predictor valid inference mask does not exactly cover the preprocessed crop")
         with AttentionCapture(predictor.network) as capture:
             returned_logits = predictor.predict_sliding_window_return_logits(
-                selected_data, text_embedding, return_all_layers=True
+                selected_data, diagnostic_embedding, return_all_layers=True
             )
         if not isinstance(returned_logits, (list, tuple)) or len(returned_logits) != DECODER_COUNT:
             raise AssertionError("return_all_layers=True must return five decoder outputs")
@@ -596,6 +783,10 @@ def run(args: argparse.Namespace) -> int:
             raise AssertionError(f"D5 probability shape {probability.shape} != crop shape {crop_shape}")
         padded_data, _revert = pad_nd_image(selected_data, predictor.patch_size, "constant", {"value": 0}, True, None)
         slicers = predictor._internal_get_sliding_window_slicers(padded_data.shape[1:])
+        if len(capture.records) != len(slicers):
+            raise AssertionError(
+                f"captured {len(capture.records)} attention patches for {len(slicers)} sliding-window slicers"
+            )
         gaussian = compute_gaussian(tuple(predictor.patch_size), sigma_scale=1.0 / 8, value_scaling_factor=10, device="cpu").numpy().astype(np.float32)
         raw_attention = aggregate_attention_patches(capture.records, slicers, padded_data.shape[1:], _revert[1:], gaussian)
         raw_attention = inverse_view_map(raw_attention, selected_param)
@@ -604,7 +795,7 @@ def run(args: argparse.Namespace) -> int:
 
         label_full = reader.read_images([str(label_path)])[0][0]
         gt_full = np.rint(label_full).astype(np.int64) == label_values[case]
-        gt = gt_full[crop_slices].astype(bool, copy=False)
+        gt = crop_gt_to_inference_region(gt_full, full_valid_mask, bbox, case)
         if gt.shape != probability.shape:
             gt = F.interpolate(torch.from_numpy(gt.astype(np.float32))[None, None], size=probability.shape, mode="nearest")[0, 0].numpy().astype(bool)
         if not (raw_attention.shape == probability.shape == gt.shape == valid_mask.shape):
@@ -613,6 +804,7 @@ def run(args: argparse.Namespace) -> int:
             probability, raw_attention, gt, valid_mask, case=case, prompt=args.prompt,
             selected_view=selected_view, selected_view_tdc=tdc_scores[selected_view],
             threshold=args.threshold, balanced_seed=args.balanced_seed,
+            metric_max_negative_voxels=args.metric_max_negative_voxels,
         )
         observed_shapes: list[Sequence[int] | None] = [None] * DECODER_COUNT
         for info in getattr(predictor, "decoder_output_metadata", []):
@@ -635,9 +827,10 @@ def run(args: argparse.Namespace) -> int:
             "raw_shape": json_shape(metadata[-1]["raw_shape"]), "aligned_shape": json_shape(probability.shape),
             "attention_memory_shape": json_shape(capture.records[0]["memory_shape_dhw"]),
             "attention_layer": "last_transformer_decoder_layer", "attention_head_aggregation": "mean_all_heads",
-            "attention_query": "current_organ_query", "attention_semantics": "patch_attention_upsampled_then_sliding_window_gaussian_fused",
+            "attention_query": "current_organ_query", "attention_semantics": "patch-local softmax cross-attention, upsampled and Gaussian fused",
             "decoder_metadata_json": json.dumps(metadata), "decoder_semantics_json": json.dumps(decoder_semantics),
-            "view_count": len(params), "tdc_scores_json": json.dumps(tdc_scores), "view_params_json": json.dumps(params),
+            "view_count": len(params), "tdc_scores_json": json.dumps(tdc_scores),
+            "tdc_ranks_json": json.dumps(tdc_ranks), "view_params_json": json.dumps(params),
         })
         for row in rows:
             row.update({
@@ -645,9 +838,10 @@ def run(args: argparse.Namespace) -> int:
                 "aligned_shape": json_shape(probability.shape), "threshold": args.threshold,
                 "attention_memory_shape": json_shape(capture.records[0]["memory_shape_dhw"]),
                 "attention_layer": "last_transformer_decoder_layer", "attention_head_aggregation": "mean_all_heads",
-                "attention_query": "current_organ_query", "attention_semantics": "patch_attention_upsampled_then_sliding_window_gaussian_fused",
+                "attention_query": "current_organ_query", "attention_semantics": "patch-local softmax cross-attention, upsampled and Gaussian fused",
                 "decoder_metadata_json": json.dumps(metadata), "decoder_semantics_json": json.dumps(decoder_semantics),
-                "view_count": len(params), "tdc_scores_json": json.dumps(tdc_scores), "view_params_json": json.dumps(params),
+                "view_count": len(params), "tdc_scores_json": json.dumps(tdc_scores),
+                "tdc_ranks_json": json.dumps(tdc_ranks), "view_params_json": json.dumps(params),
             })
         region_rows.extend(rows)
         metric_rows.append(metrics)
@@ -673,7 +867,7 @@ def run(args: argparse.Namespace) -> int:
             "D5 is model return list index 0 and final output; D1 is index 4.",
             "D1-D4 semantics are patch-upsampled then sliding-window Gaussian-fused full-volume probabilities, not raw low-resolution maps.",
             "Summary statistics are computed from per-case rows before case-level aggregation.",
-            "Crop-outside voxels are absent from crop-space valid statistics; gt_background_all is not used for default metric analysis.",
+            "Crop-outside voxels are rejected if they contain GT foreground; crop-space statistics use gt_background_valid only.",
         ],
     }
     (output_dir / "attention_probability_diagnostics.json").write_text(json.dumps(_json_safe(diagnostics), ensure_ascii=False, indent=2), encoding="utf-8")

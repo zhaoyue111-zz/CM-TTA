@@ -6,20 +6,54 @@ import numpy as np
 import torch
 
 from attention_probability_diagnostic import (
+    AttentionCapture,
     aggregate_attention_patches,
     apply_intensity_view,
+    assert_same_embedding,
     attention_tokens_to_3d,
     balanced_indices,
     compute_case_metrics,
     confusion_regions,
+    crop_gt_to_inference_region,
+    fixed_embedding_for_selector,
     inverse_view_map,
+    parse_args,
     percentile_rank,
     resolve_label_value,
     safe_auc_pr,
+    selected_view_from_tdc,
+    _metric_samples,
 )
 
 
 class AttentionProbabilityDiagnosticTest(unittest.TestCase):
+    def test_tdc_only_selection_is_descending_argmax_and_entropy_is_not_a_cli_option(self):
+        selected, ranks = selected_view_from_tdc([0.2, 0.8, 0.4])
+        self.assertEqual(selected, 1)
+        self.assertEqual(ranks, [2, 0, 1])
+        args = parse_args([
+            "--data-dir", "/tmp/data", "--model-dir", "/tmp/model",
+            "--text-model", "/tmp/text", "--output-dir", "/tmp/out",
+        ])
+        self.assertFalse(hasattr(args, "use_entropy_rank"))
+
+    def test_tdc_probability_and_attention_can_share_only_the_same_embedding(self):
+        embedding = torch.randn(1, 1, 4)
+        assert_same_embedding(embedding, embedding)
+        assert_same_embedding(embedding, embedding.clone())
+        with self.assertRaises(AssertionError):
+            assert_same_embedding(embedding, embedding + 1.0)
+
+        class Adapter:
+            def _encode_ctx(self, value):
+                return value + 1.0
+
+        adapter = Adapter()
+        original = adapter._encode_ctx
+        with fixed_embedding_for_selector(adapter, embedding):
+            self.assertIs(adapter._encode_ctx(torch.zeros_like(embedding)), embedding)
+        self.assertIs(adapter._encode_ctx.__func__, original.__func__)
+
     def test_attention_tokens_restore_voxtell_hwd_order(self):
         tokens = np.arange(2 * 3 * 4, dtype=np.float32)
         restored = attention_tokens_to_3d(tokens, (4, 2, 3))
@@ -43,6 +77,11 @@ class AttentionProbabilityDiagnosticTest(unittest.TestCase):
         self.assertAlmostEqual(float(result[1, 1, 1]), 2.75)
         self.assertAlmostEqual(float(result[2, 2, 2]), 3.0)
 
+    def test_attention_patch_count_mismatch_is_rejected(self):
+        slicers = [(slice(None), slice(0, 2), slice(0, 2), slice(0, 2))]
+        with self.assertRaisesRegex(AssertionError, "captured 0 attention patches"):
+            aggregate_attention_patches([], slicers, (2, 2, 2), (slice(0, 2),) * 3, np.ones((2, 2, 2), dtype=np.float32))
+
     def test_intensity_view_inverse_preserves_map_coordinates(self):
         data = torch.ones(1, 2, 2, 2)
         viewed = apply_intensity_view(data, {"scale": 2.0, "offset": 0.5})
@@ -61,6 +100,13 @@ class AttentionProbabilityDiagnosticTest(unittest.TestCase):
         self.assertEqual(int(regions["TN"].sum()), 1)
         _, metrics, _ = compute_case_metrics(probability, np.zeros_like(probability), gt, valid)
         self.assertEqual(metrics["gt_background_valid_voxel_count"], 1)
+        self.assertEqual(set(regions), {"valid", "gt_foreground", "gt_background_valid", "TP", "FN", "FP", "TN"})
+
+    def test_gt_foreground_outside_crop_is_rejected(self):
+        gt = np.array([[[True, False, True]]])
+        valid = np.array([[[True, True, False]]])
+        with self.assertRaisesRegex(ValueError, r"case-x.*1 GT foreground"):
+            crop_gt_to_inference_region(gt, valid, ((0, 1), (0, 1), (0, 3)), "case-x")
 
     def test_rank_and_residual_are_case_valid_only(self):
         values = np.array([[[0.1, 0.9, 0.0]]], dtype=np.float32)
@@ -76,6 +122,17 @@ class AttentionProbabilityDiagnosticTest(unittest.TestCase):
         auc, ap = safe_auc_pr(np.array([True, True]), np.array([0.1, 0.2], dtype=np.float32))
         self.assertTrue(np.isnan(auc))
         self.assertTrue(np.isnan(ap))
+
+    def test_negative_metric_sampling_is_fixed_and_records_counts(self):
+        labels = np.array([True, False, False, False, False, False])
+        score = np.array([0.9, 0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32)
+        first = _metric_samples(labels, score, max_negative_voxels=2, seed=7)
+        second = _metric_samples(labels, score, max_negative_voxels=2, seed=7)
+        np.testing.assert_array_equal(first[0], second[0])
+        np.testing.assert_array_equal(first[1], second[1])
+        self.assertEqual(first[2]["raw_negative_count"], 5)
+        self.assertEqual(first[2]["actual_negative_count"], 2)
+        self.assertTrue(first[2]["negative_sampled"])
         auc, ap = safe_auc_pr(np.array([], dtype=bool), np.array([], dtype=np.float32))
         self.assertTrue(np.isnan(auc))
         self.assertTrue(np.isnan(ap))
@@ -92,6 +149,35 @@ class AttentionProbabilityDiagnosticTest(unittest.TestCase):
         self.assertEqual(resolve_label_value(np.array([0, 4, 4]), None, "one"), 4)
         with self.assertRaisesRegex(ValueError, r"\[4, 9\].*--label-value"):
             resolve_label_value(np.array([0, 4, 9]), None, "ambiguous")
+
+    def test_attention_capture_rejects_multiple_queries_and_restores_forward(self):
+        class Toy(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                layer = torch.nn.Module()
+                layer.multihead_attn = torch.nn.MultiheadAttention(4, 2)
+                self.transformer_decoder = torch.nn.Module()
+                self.transformer_decoder.layers = torch.nn.ModuleList([layer])
+                self.project_bottleneck_embed = torch.nn.Identity()
+
+        model = Toy().eval()
+        attention = model.transformer_decoder.layers[-1].multihead_attn
+        original_function = attention.forward.__func__
+        memory = torch.randn(1, 2, 2, 2, 4)
+        flat_memory = memory.reshape(-1, 1, 4)
+        with AttentionCapture(model) as capture:
+            model.project_bottleneck_embed(memory)
+            query = torch.randn(1, 1, 4)
+            attention(query, flat_memory, flat_memory)
+        self.assertEqual(len(capture.records), 1)
+        self.assertIs(attention.forward.__func__, original_function)
+
+        with self.assertRaisesRegex(AssertionError, "one organ query"):
+            with AttentionCapture(model):
+                model.project_bottleneck_embed(memory)
+                query = torch.randn(2, 1, 4)
+                attention(query, flat_memory, flat_memory)
+        self.assertIs(attention.forward.__func__, original_function)
 
     def test_real_voxtell_decoder_order_matches_metadata(self):
         root = Path("/data/zy/VoxTell_from_disk")
