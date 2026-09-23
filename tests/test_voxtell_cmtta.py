@@ -37,9 +37,11 @@ from run_voxtell_cmtta import (
     binary_diagnostic_metrics,
     case_metric_changes,
     check_prediction_nifti_geometry,
+    compute_tdc_sliding_comparisons,
     evaluate_case,
     macro_average_case_metrics,
     save_prediction_nifti,
+    selected_view_data,
     selector_only_case_report,
     summarize_selector_only,
     zero_shot_diagnostic_fields,
@@ -259,6 +261,128 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertAlmostEqual(average["Dice_change_from_before_adaptation"], 0.1875)
         self.assertAlmostEqual(average["Dice_change"], 0.1875)
         self.assertAlmostEqual(average["Precision_change"], 0.225)
+
+    def test_selected_view_data_reuses_params_and_view_zero_is_identity(self):
+        data = torch.arange(8, dtype=torch.float32).reshape(1, 2, 2, 2)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 2.0, "offset": -0.5},
+        ]
+        original, original_param = selected_view_data(data, params, 0)
+        selected, selected_param = selected_view_data(data, params, 1)
+        self.assertIs(original, data)
+        self.assertEqual(original_param, params[0])
+        self.assertTrue(torch.equal(selected, data * 2.0 - 0.5))
+        self.assertEqual(selected_param, params[1])
+
+    def test_tdc_sliding_comparisons_use_trace_view_four_sliding_calls_and_no_step(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        try:
+            patch_tensor = torch.zeros(1, 2, 2, 2)
+            valid = torch.ones(2, 2, 2)
+            prepared = adapter.prepare_case([patch_tensor], [valid])
+            with torch.no_grad():
+                pre_text = adapter._encode_ctx(adapter.ctx_delta.detach()).detach()
+            trace = adapter.adapt_case(
+                [patch_tensor], [valid], prepared_case=prepared
+            )
+            steps_before_eval = adapter.optimizer_step_count
+            target = np.zeros((2, 2, 2), dtype=np.uint8)
+            predictions = [
+                np.zeros_like(target),
+                np.ones_like(target),
+                np.zeros_like(target),
+                np.ones_like(target),
+            ]
+            with patch("run_voxtell_cmtta.predict_case", side_effect=predictions) as mocked:
+                result = compute_tdc_sliding_comparisons(
+                    predictor=object(),
+                    data=patch_tensor,
+                    bbox=None,
+                    original_shape=target.shape,
+                    target=target,
+                    pre_text_feature=pre_text,
+                    post_text_feature=pre_text,
+                    params=prepared["params"],
+                    selected_view=trace["selected_view"],
+                )
+            self.assertEqual(mocked.call_count, 4)
+            self.assertEqual(result["selected_view"], trace["selected_view"])
+            self.assertEqual(
+                result["selected_param"],
+                prepared["params"][trace["selected_view"]],
+            )
+            self.assertEqual(
+                result["predictions"]["pre_original_sliding"].shape,
+                target.shape,
+            )
+            self.assertIn("post_selected_minus_pre_selected", result["differences"])
+            self.assertEqual(adapter.optimizer_step_count, steps_before_eval)
+        finally:
+            adapter.close()
+
+    def test_tdc_sliding_differences_and_macro_average(self):
+        target = np.array([1, 1, 0, 0], dtype=np.uint8)
+        predictions = [
+            np.array([1, 0, 0, 0], dtype=np.uint8),
+            np.array([1, 1, 0, 0], dtype=np.uint8),
+            np.array([1, 1, 1, 0], dtype=np.uint8),
+            np.array([1, 1, 1, 1], dtype=np.uint8),
+        ]
+        metrics = [binary_diagnostic_metrics(prediction, target) for prediction in predictions]
+        expected_delta = metrics[3]["Dice"] - metrics[1]["Dice"]
+        row = {
+            "Dice": metrics[2]["Dice"],
+            "mIoU": metrics[2]["mIoU"],
+            "Precision": metrics[2]["Precision"],
+            "Recall": metrics[2]["Recall"],
+            "zero_shot_Dice": metrics[0]["Dice"],
+            "zero_shot_mIoU": metrics[0]["mIoU"],
+            "zero_shot_Precision": metrics[0]["Precision"],
+            "zero_shot_Recall": metrics[0]["Recall"],
+            "Dice_change_from_before_adaptation": 0.0,
+            "mIoU_change_from_before_adaptation": 0.0,
+            "Precision_change_from_before_adaptation": 0.0,
+            "Recall_change_from_before_adaptation": 0.0,
+            "pre_original_sliding": metrics[0],
+            "pre_selected_sliding": metrics[1],
+            "post_original_sliding": metrics[2],
+            "post_selected_sliding": metrics[3],
+            "tdc_sliding_differences": {
+                "post_selected_minus_pre_selected": {
+                    metric: metrics[3][metric] - metrics[1][metric]
+                    for metric in ("Dice", "mIoU", "Precision", "Recall")
+                },
+                "post_original_minus_pre_original": {
+                    metric: metrics[2][metric] - metrics[0][metric]
+                    for metric in ("Dice", "mIoU", "Precision", "Recall")
+                },
+                "post_selected_minus_post_original": {
+                    metric: metrics[3][metric] - metrics[2][metric]
+                    for metric in ("Dice", "mIoU", "Precision", "Recall")
+                },
+            },
+        }
+        average = macro_average_case_metrics([row, row])
+        self.assertAlmostEqual(
+            average["tdc_sliding_comparisons"]["post_selected_sliding"]["Dice"],
+            metrics[3]["Dice"],
+        )
+        self.assertAlmostEqual(
+            average["tdc_sliding_differences"]["post_selected_minus_pre_selected"]["Dice"],
+            expected_delta,
+        )
 
     def test_decoder_alignment_diagnostic_uses_d5_index_zero_and_dhw(self):
         model = TinyVoxTell()
@@ -658,7 +782,9 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertGreater(trace["tversky_loss"], 0.0)
             self.assertTrue(torch.isfinite(adapter.ctx_delta).all())
             self.assertFalse(torch.equal(before, adapter.ctx_delta.detach()))
-            self.assertEqual(trace["pseudo_loss_type"], "masked_balanced_bce_tversky")
+            self.assertTrue(
+                trace["pseudo_loss_type"].startswith("masked_balanced_bce_tversky")
+            )
             self.assertAlmostEqual(
                 trace["pseudo_loss"],
                 trace["bce_loss"]

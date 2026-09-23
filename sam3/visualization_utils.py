@@ -231,12 +231,12 @@ def visualize_formatted_frame_output(
     """
     # Handle single output dict case
     if isinstance(outputs_list, dict) and frame_idx in outputs_list:
-        # This is a single outputs dict with frame indices as keys
+        # This is a single outputs1 dict with frame indices as keys
         outputs_list = [outputs_list]
     elif isinstance(outputs_list, dict) and not any(
         isinstance(k, int) for k in outputs_list.keys()
     ):
-        # This is a single frame's outputs {obj_id: mask}
+        # This is a single frame's outputs1 {obj_id: mask}
         single_frame_outputs = {frame_idx: outputs_list}
         outputs_list = [single_frame_outputs]
 
@@ -464,7 +464,7 @@ def render_masklet_frame(img, outputs, frame_idx=None, alpha=0.5):
 
 
 def save_masklet_video(video_frames, outputs, out_path, alpha=0.5, fps=10):
-    # Each outputs dict has keys: "out_boxes_xywh", "out_probs", "out_obj_ids", "out_binary_masks"
+    # Each outputs1 dict has keys: "out_boxes_xywh", "out_probs", "out_obj_ids", "out_binary_masks"
     # video_frames: list of video frame data, same length as outputs_list
 
     # Read first frame to get size

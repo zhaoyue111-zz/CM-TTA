@@ -238,7 +238,7 @@ class LossWithWeights(nn.Module):
         # weights for each computed loss key (those losses not in weight_dict
         # will not be aggregated in the final reduced core loss)
         self.weight_dict = weight_dict if weight_dict is not None else {}
-        # whether this loss will be applied on auxiliary outputs
+        # whether this loss will be applied on auxiliary outputs1
         self.compute_aux = compute_aux
         self.supports_o2m_loss = supports_o2m_loss
         self.target_keys = []
@@ -579,7 +579,7 @@ class Masks(LossWithWeights):
     ):
         super().__init__(weight_dict, compute_aux)
         if compute_aux:
-            warnings.warn("Masks loss usually shouldn't be applied to aux outputs")
+            warnings.warn("Masks loss usually shouldn't be applied to aux outputs1")
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
         self.num_sample_points = num_sample_points
@@ -726,7 +726,7 @@ class Masks(LossWithWeights):
 #         self.focal_gamma = focal_gamma
 #         self.target_keys.extend(["masks"])
 
-#     def get_loss(self, outputs, targets, indices, num_boxes):
+#     def get_loss(self, outputs1, targets, indices, num_boxes):
 #         """Compute the losses related to the masks: the focal loss and the dice loss.
 #         targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
 
@@ -734,7 +734,7 @@ class Masks(LossWithWeights):
 #         corresponding to one iterative prediction step in SAM-style training. We treat each
 #         channel as a mask prediction and sum the loss across channels.
 #         """
-#         src_masks = outputs["multistep_pred_masks"]
+#         src_masks = outputs1["multistep_pred_masks"]
 #         target_masks = targets["masks"]
 #         assert src_masks.size(0) == target_masks.size(0)
 #         assert src_masks.dim() == 4
@@ -806,7 +806,7 @@ class Masks(LossWithWeights):
 #         self.iou_use_l1_loss = iou_use_l1_loss
 #         self.pred_obj_scores = pred_obj_scores
 
-#     def get_loss(self, outputs, targets, indices, num_boxes):
+#     def get_loss(self, outputs1, targets, indices, num_boxes):
 #         """
 #         Compute the losses related to the masks: the focal loss and the dice loss.
 #         and also the MSE loss between predicted IoUs and actual IoUs.
@@ -821,9 +821,9 @@ class Masks(LossWithWeights):
 
 #         target_masks = targets["masks"].unsqueeze(1).float()
 #         assert target_masks.dim() == 4  # [N, 1, H, W]
-#         src_masks_list = outputs["multistep_pred_multimasks_high_res"]
-#         ious_list = outputs["multistep_pred_ious"]
-#         object_score_logits_list = outputs["multistep_object_score_logits"]
+#         src_masks_list = outputs1["multistep_pred_multimasks_high_res"]
+#         ious_list = outputs1["multistep_pred_ious"]
+#         object_score_logits_list = outputs1["multistep_object_score_logits"]
 
 #         assert len(src_masks_list) == len(ious_list)
 #         assert len(object_score_logits_list) == len(ious_list)
@@ -942,18 +942,18 @@ class Masks(LossWithWeights):
 #         self.max_seq_len = max_seq_len
 #         self.in_lengths = None
 
-#     def get_loss(self, outputs, **kwargs):
-#         nb_tokens = outputs["captioning_tokenized_target"].input_ids.numel()
-#         bs, seq_len = outputs["captioning_tokenized_target"].input_ids.shape
+#     def get_loss(self, outputs1, **kwargs):
+#         nb_tokens = outputs1["captioning_tokenized_target"].input_ids.numel()
+#         bs, seq_len = outputs1["captioning_tokenized_target"].input_ids.shape
 #         ce = F.cross_entropy(
-#             outputs["captioning_pred_text"].flatten(0, -2),
-#             outputs["captioning_tokenized_target"].input_ids.flatten(),
+#             outputs1["captioning_pred_text"].flatten(0, -2),
+#             outputs1["captioning_tokenized_target"].input_ids.flatten(),
 #             ignore_index=self.pad_token,
 #             reduction="sum",
 #         )
 
 #         not_pad = (
-#             outputs["captioning_tokenized_target"]
+#             outputs1["captioning_tokenized_target"]
 #             .input_ids.reshape(-1)
 #             .ne(self.pad_token)
 #         )
@@ -962,18 +962,18 @@ class Masks(LossWithWeights):
 #             nb_non_pad = not_pad.numel()
 #             ce = ce / nb_non_pad
 
-#         preds = outputs["captioning_pred_text"].flatten(0, -2).argmax(-1)[not_pad]
-#         targets = outputs["captioning_tokenized_target"].input_ids.flatten()[not_pad]
+#         preds = outputs1["captioning_pred_text"].flatten(0, -2).argmax(-1)[not_pad]
+#         targets = outputs1["captioning_tokenized_target"].input_ids.flatten()[not_pad]
 #         correct = preds == targets
 #         correct = correct.sum() / (correct.numel() + 1e-5)
 
 #         correct_sequence_level = torch.all(
 #             (
-#                 outputs["captioning_pred_text"]
+#                 outputs1["captioning_pred_text"]
 #                 .flatten(0, -2)
 #                 .argmax(-1)
 #                 .reshape(bs, seq_len)
-#                 == outputs["captioning_tokenized_target"].input_ids
+#                 == outputs1["captioning_tokenized_target"].input_ids
 #             )
 #             | (~not_pad).view(bs, seq_len),
 #             dim=1,

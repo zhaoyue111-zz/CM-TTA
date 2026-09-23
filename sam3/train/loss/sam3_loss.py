@@ -57,7 +57,7 @@ class Sam3LossWrapper(torch.nn.Module):
         self.matcher = matcher
         self.o2m_matcher = o2m_matcher
         self.o2m_weight = o2m_weight
-        # whether to use the o2m matcher on the o2m queries in auxiliary outputs
+        # whether to use the o2m matcher on the o2m queries in auxiliary outputs1
         self.use_o2m_matcher_on_o2m_aux = use_o2m_matcher_on_o2m_aux
         self.loss_fn_semantic_seg = loss_fn_semantic_seg
         self.scale_by_find_batch_size = scale_by_find_batch_size
@@ -85,7 +85,7 @@ class Sam3LossWrapper(torch.nn.Module):
         o2m_out_is_valid = nested_out.get("o2m_out_is_valid", None)
         o2m_target_is_valid_padded = nested_out.get("o2m_target_is_valid_padded", None)
 
-        # Get a list of outputs, including auxiliary and first stage outputs
+        # Get a list of outputs1, including auxiliary and first stage outputs1
         output_list = [(nested_out, "", False)]  # (out, suffix, is_aux)
         if "aux_outputs" in nested_out:
             output_list.extend(

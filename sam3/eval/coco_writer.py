@@ -47,7 +47,7 @@ class PredictionDumper:
     """
     Handles collection and dumping of COCO-format predictions from a model.
 
-    This class processes model outputs through a postprocessor, converts them to COCO format,
+    This class processes model outputs1 through a postprocessor, converts them to COCO format,
     and saves them to disk. It supports distributed processing with multiple GPUs/processes.
     """
 
@@ -95,7 +95,7 @@ class PredictionDumper:
 
     def update(self, *args, **kwargs):
         """
-        Process and accumulate predictions from model outputs.
+        Process and accumulate predictions from model outputs1.
 
         Args:
             *args, **kwargs: Arguments passed to postprocessor.process_results()

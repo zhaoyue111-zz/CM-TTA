@@ -14,7 +14,7 @@ from .viz import visualize
 
 
 def sam3_inference(processor, image_path, text_prompt):
-    """Run SAM 3 image inference with text prompts and format the outputs"""
+    """Run SAM 3 image inference with text prompts and format the outputs1"""
     image = Image.open(image_path)
     orig_img_w, orig_img_h = image.size
 
@@ -24,7 +24,7 @@ def sam3_inference(processor, image_path, text_prompt):
         state=inference_state, prompt=text_prompt
     )
 
-    # format and assemble outputs
+    # format and assemble outputs1
     pred_boxes_xyxy = torch.stack(
         [
             inference_state["boxes"][:, 0] / orig_img_w,

@@ -37,7 +37,7 @@ class Sam3VideoBase(nn.Module):
         self,
         detector: nn.Module,
         tracker: nn.Module,
-        # prob threshold for detection outputs -- only keep detections above this threshold
+        # prob threshold for detection outputs1 -- only keep detections above this threshold
         # enters NMS and det-to-track matching
         score_threshold_detection=0.5,
         # IoU threshold for detection NMS
@@ -50,7 +50,7 @@ class Sam3VideoBase(nn.Module):
         trk_assoc_iou_thresh=0.5,
         # prob threshold for a detection to be added as a new object
         new_det_thresh=0.0,
-        # hotstart parameters: we hold off the outputs for `hotstart_delay` frames and
+        # hotstart parameters: we hold off the outputs1 for `hotstart_delay` frames and
         # 1) remove those tracklets unmatched by any detections based on `hotstart_unmatch_thresh`
         # 2) remove those tracklets overlapping with one another based on `hotstart_dup_thresh`
         hotstart_delay=0,
@@ -208,7 +208,7 @@ class Sam3VideoBase(nn.Module):
             )
         )
 
-        # Step 3: based on detection outputs and the propagated SAM2 prediction masks, we make plans
+        # Step 3: based on detection outputs1 and the propagated SAM2 prediction masks, we make plans
         # for SAM2 masklet updates (i.e. which objects to add and remove, how to load-balance them, etc).
         # We also run SAM2 memory encoder globally in this step to resolve non-overlapping constraints.
         # **This step should involve all the heuristics needed for any updates.** Most of the update
@@ -248,8 +248,8 @@ class Sam3VideoBase(nn.Module):
             feature_cache=feature_cache,
         )
 
-        # Step 5: finally, build the outputs for this frame (it only needs to be done on GPU 0 since
-        # only GPU 0 will send outputs to the server).
+        # Step 5: finally, build the outputs1 for this frame (it only needs to be done on GPU 0 since
+        # only GPU 0 will send outputs1 to the server).
         if self.rank == 0:
             obj_id_to_mask = self.build_outputs(
                 frame_idx=frame_idx,
@@ -267,7 +267,7 @@ class Sam3VideoBase(nn.Module):
             )
             obj_id_to_score = tracker_metadata_new["obj_id_to_score"]
         else:
-            obj_id_to_mask, obj_id_to_score = {}, {}  # dummy outputs on other GPUs
+            obj_id_to_mask, obj_id_to_score = {}, {}  # dummy outputs1 on other GPUs
         # a few statistics for the current frame as a part of the output
         frame_stats = {
             "num_obj_tracked": np.sum(tracker_metadata_new["num_obj_per_gpu"]),
@@ -368,7 +368,7 @@ class Sam3VideoBase(nn.Module):
             pred_probs = pred_probs - 1e8  # make sure no detections are kept
         pred_boxes_xyxy = sam3_image_out["pred_boxes_xyxy"]
         pred_masks = sam3_image_out["pred_masks"]
-        # get the positive detection outputs above threshold
+        # get the positive detection outputs1 above threshold
         pos_pred_idx = torch.where(pred_probs > self.score_threshold_detection)
         det_out = {
             "bbox": pred_boxes_xyxy[pos_pred_idx[0], pos_pred_idx[1]],
@@ -795,7 +795,7 @@ class Sam3VideoBase(nn.Module):
                 np.max(new_det_obj_ids),
             )
         # for removed objects, we set their scores to a very low value (-1e4) but still
-        # keep them in "obj_id_to_score" (it's easier to handle outputs this way)
+        # keep them in "obj_id_to_score" (it's easier to handle outputs1 this way)
         for obj_id in obj_ids_newly_removed:
             tracker_metadata_new["obj_id_to_score"][obj_id] = -1e4
             tracker_metadata_new["obj_id_to_tracker_score_frame_wise"][frame_idx][
@@ -1099,7 +1099,7 @@ class Sam3VideoBase(nn.Module):
         inference_states: List[Any],
         frame_idx: int,
         reverse: bool,
-        # by default, we disable memory encoding until we gather all outputs
+        # by default, we disable memory encoding until we gather all outputs1
         run_mem_encoder: bool = False,
     ):
         """
@@ -1625,7 +1625,7 @@ class Sam3VideoBase(nn.Module):
                 "removed_obj_ids": set(),
                 "suppressed_obj_ids": defaultdict(
                     set
-                ),  # frame_idx --> set of objects with suppressed outputs, but still continue to be tracked
+                ),  # frame_idx --> set of objects with suppressed outputs1, but still continue to be tracked
             }
             if self.masklet_confirmation_enable:
                 # all the following are npt.NDArray with the same shape as `obj_ids_all_gpu`

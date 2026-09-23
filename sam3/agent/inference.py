@@ -53,7 +53,7 @@ def run_single_image_inference(
     final_output_dict["text_prompt"] = text_prompt
     final_output_dict["image_path"] = image_path
 
-    # Save outputs
+    # Save outputs1
     json.dump(final_output_dict, open(output_json_path, "w"), indent=4)
     json.dump(agent_history, open(agent_history_path, "w"), indent=4)
     rendered_final_output.save(output_image_path)

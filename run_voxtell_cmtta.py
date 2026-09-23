@@ -144,7 +144,7 @@ def case_metric_changes(
 
 def macro_average_case_metrics(
     case_rows: list[dict[str, float | int | str | bool | None]],
-) -> dict[str, float]:
+) -> dict[str, object]:
     """Compute requested metrics as case-wise macro averages."""
     keys = (
         "Dice",
@@ -172,6 +172,43 @@ def macro_average_case_metrics(
         result[f"{metric}_change"] = result[
             f"{metric}_change_from_before_adaptation"
         ]
+    comparison_groups = (
+        "pre_original_sliding",
+        "pre_selected_sliding",
+        "post_original_sliding",
+        "post_selected_sliding",
+    )
+    if all(group in case_rows[0] for group in comparison_groups):
+        result["tdc_sliding_comparisons"] = {
+            group: {
+                metric: float(
+                    np.mean([float(row[group][metric]) for row in case_rows])
+                )
+                for metric in (
+                    "Dice",
+                    "mIoU",
+                    "Precision",
+                    "Recall",
+                    "TP",
+                    "FP",
+                    "FN",
+                    "TN",
+                    "prediction_foreground_volume",
+                )
+            }
+            for group in comparison_groups
+        }
+        result["tdc_sliding_differences"] = {
+            name: {
+                metric: float(
+                    np.mean(
+                        [float(row["tdc_sliding_differences"][name][metric]) for row in case_rows]
+                    )
+                )
+                for metric in SLIDING_COMPARISON_METRICS
+            }
+            for name in case_rows[0]["tdc_sliding_differences"]
+        }
     return result
 
 
@@ -272,17 +309,132 @@ def evaluate_case(
     prediction = predict_case(
         predictor, data, bbox, original_shape, text_feature
     )
+    return evaluate_prediction_case(
+        prediction,
+        image_path,
+        label_path,
+        output_dir,
+    )
+
+
+def evaluate_prediction_case(
+    prediction: np.ndarray,
+    image_path: Path,
+    label_path: Path,
+    output_dir: Path,
+) -> dict[str, float | str]:
+    """Evaluate and save one already-computed full-case prediction."""
     target = np.squeeze(load_ras_label(str(label_path)))
     # Always record complete-case diagnostic metrics.  The legacy argument is
     # retained for callers but no longer gates Precision/Recall or confusion
     # statistics on decoder alignment diagnostics.
-    del include_diagnostic_metrics
     metrics = binary_diagnostic_metrics(prediction, target)
     stem = image_path.name[:-7] if image_path.name.endswith(".nii.gz") else image_path.stem
     prediction_path = output_dir / f"{stem}.nii.gz"
     save_prediction_nifti(prediction, image_path, prediction_path)
     check_prediction_nifti_geometry(prediction_path, image_path, label_path)
     return {"basename": image_path.name, **metrics}
+
+
+SLIDING_COMPARISON_METRICS = (
+    "Dice",
+    "mIoU",
+    "Precision",
+    "Recall",
+)
+
+
+def selected_view_data(
+    data: torch.Tensor,
+    params: list[dict[str, float]],
+    selected_view: int,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Apply an already-sampled TDC view parameter without resampling."""
+    if not 0 <= int(selected_view) < len(params):
+        raise IndexError(
+            f"selected_view={selected_view} is outside {len(params)} prepared views"
+        )
+    selected_param = params[int(selected_view)]
+    if (
+        float(selected_param["scale"]) == 1.0
+        and float(selected_param["offset"]) == 0.0
+    ):
+        return data, selected_param
+    selected_data = data * float(selected_param["scale"]) + float(
+        selected_param["offset"]
+    )
+    return selected_data, selected_param
+
+
+def compute_tdc_sliding_comparisons(
+    predictor,
+    data: torch.Tensor,
+    bbox,
+    original_shape,
+    target: np.ndarray,
+    pre_text_feature: torch.Tensor,
+    post_text_feature: torch.Tensor,
+    params: list[dict[str, float]],
+    selected_view: int,
+) -> dict[str, object]:
+    """Run the four TDC-only full-case sliding-window comparisons.
+
+    ``pre_text_feature`` is the current prompt embedding immediately before
+    this case's update.  ``post_text_feature`` is the embedding immediately
+    after that update.  The fixed zero-shot embedding remains a separate
+    diagnostic and is deliberately not used here.
+    """
+    selected_data, selected_param = selected_view_data(
+        data, params, selected_view
+    )
+    inputs = {
+        "pre_original_sliding": (data, pre_text_feature),
+        "pre_selected_sliding": (selected_data, pre_text_feature),
+        "post_original_sliding": (data, post_text_feature),
+        "post_selected_sliding": (selected_data, post_text_feature),
+    }
+    predictions = {}
+    metrics = {}
+    for name, (view_data, text_feature) in inputs.items():
+        prediction = predict_case(
+            predictor, view_data, bbox, original_shape, text_feature
+        )
+        predictions[name] = prediction
+        metrics[name] = binary_diagnostic_metrics(prediction, target)
+
+    differences = {}
+    for name, left, right in (
+        (
+            "post_selected_minus_pre_selected",
+            "post_selected_sliding",
+            "pre_selected_sliding",
+        ),
+        (
+            "post_original_minus_pre_original",
+            "post_original_sliding",
+            "pre_original_sliding",
+        ),
+        (
+            "post_selected_minus_post_original",
+            "post_selected_sliding",
+            "post_original_sliding",
+        ),
+    ):
+        differences[name] = {
+            metric: metrics[left][metric] - metrics[right][metric]
+            for metric in SLIDING_COMPARISON_METRICS
+        }
+    return {
+        "selected_view": int(selected_view),
+        "selected_param": dict(selected_param),
+        "metrics": metrics,
+        "predictions": predictions,
+        "differences": differences,
+        "prompt_sources": {
+            "pre": "current_prompt_embedding_before_case_update",
+            "post": "current_prompt_embedding_after_case_update",
+        },
+    }
 
 
 def predict_case(
@@ -742,6 +894,8 @@ def main() -> None:
                     "selector_only_eval": True,
                     "view_metrics": view_metrics,
                     "selector_results": selector_report["selectors"],
+                    "zero_shot_prompt_source": "fixed_zero_shot_ctx_delta_zero",
+                    "selection_prompt_source": "prepared_case_short_context",
                     "zero_shot_nonoverlap_dice": zero_shot_nonoverlap_dice,
                     "zero_shot_patch_gap": zero_shot_patch_gap,
                 }
@@ -810,20 +964,61 @@ def main() -> None:
                 "GT_Dice_before_adaptation"
             ]
             row_view_metrics = view_metrics
-            row = evaluate_case(
-                predictor,
-                image_path,
-                label_path,
-                data,
-                bbox,
-                original_shape,
-                text_feature,
-                predictions_dir,
-            )
+            if args.view_selection_metric == "tdc":
+                # TDC-only evaluation reuses the exact selected view and the
+                # exact prepared scale/offset from adapt_case().  The four
+                # comparisons use the same official sliding-window path.
+                tdc_sliding = compute_tdc_sliding_comparisons(
+                    predictor,
+                    data,
+                    bbox,
+                    original_shape,
+                    zero_shot_target,
+                    prompt_embedding_before,
+                    text_feature,
+                    prepared_case["params"],
+                    trace["selected_view"],
+                )
+                row = evaluate_prediction_case(
+                    tdc_sliding["predictions"]["post_original_sliding"],
+                    image_path,
+                    label_path,
+                    predictions_dir,
+                )
+                row.update(tdc_sliding["metrics"]["post_original_sliding"])
+                row["pre_original_sliding"] = tdc_sliding["metrics"][
+                    "pre_original_sliding"
+                ]
+                row["pre_selected_sliding"] = tdc_sliding["metrics"][
+                    "pre_selected_sliding"
+                ]
+                row["post_original_sliding"] = tdc_sliding["metrics"][
+                    "post_original_sliding"
+                ]
+                row["post_selected_sliding"] = tdc_sliding["metrics"][
+                    "post_selected_sliding"
+                ]
+                row["tdc_sliding_differences"] = tdc_sliding["differences"]
+                row["tdc_sliding_prompt_sources"] = tdc_sliding["prompt_sources"]
+                row["tdc_selected_view"] = tdc_sliding["selected_view"]
+                row["tdc_selected_param"] = tdc_sliding["selected_param"]
+            else:
+                row = evaluate_case(
+                    predictor,
+                    image_path,
+                    label_path,
+                    data,
+                    bbox,
+                    original_shape,
+                    text_feature,
+                    predictions_dir,
+                )
             row.update(zero_shot_diagnostic_fields(zero_shot_metrics))
             row["adaptation_quality"] = trace["selected_cac"]
             row["selected_view"] = trace["selected_view"]
             row["selected_view_GT_Dice_before_adaptation"] = selected_view_dice
+            row["zero_shot_prompt_source"] = "fixed_zero_shot_ctx_delta_zero"
+            row["selection_prompt_source"] = "prepared_case_short_context"
             row.update(case_metric_changes(row, zero_shot_metrics))
             row["view_metrics"] = row_view_metrics
             row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
@@ -841,6 +1036,16 @@ def main() -> None:
             # the replacement BCE/Tversky terms when enabled.
             row["adaptation_trace"] = trace
             case_rows.append(row)
+            if args.view_selection_metric == "tdc":
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    "TDC sliding Dice: "
+                    f"pre_orig={row['pre_original_sliding']['Dice']:.4f} "
+                    f"pre_sel={row['pre_selected_sliding']['Dice']:.4f} "
+                    f"post_orig={row['post_original_sliding']['Dice']:.4f} "
+                    f"post_sel={row['post_selected_sliding']['Dice']:.4f} "
+                    f"selected_view={row['tdc_selected_view']}"
+                )
             for view_metric in view_metrics:
                 print(
                     f"case {case_index}/{len(entries)} {image_path.name} "
@@ -942,6 +1147,37 @@ def main() -> None:
         selector_summary = summarize_selector_only(selector_reports)
         output["selector_only_summary"] = selector_summary
         print(f"Selector-only summary: {json.dumps(selector_summary, sort_keys=True)}")
+    if args.view_selection_metric == "tdc" and "tdc_sliding_comparisons" in average:
+        macro_sliding = average["tdc_sliding_comparisons"]
+        macro_differences = average["tdc_sliding_differences"]
+        print(
+            "TDC sliding macro Dice: "
+            f"pre_orig={macro_sliding['pre_original_sliding']['Dice']:.4f} "
+            f"pre_sel={macro_sliding['pre_selected_sliding']['Dice']:.4f} "
+            f"post_orig={macro_sliding['post_original_sliding']['Dice']:.4f} "
+            f"post_sel={macro_sliding['post_selected_sliding']['Dice']:.4f}"
+        )
+        print("TDC sliding macro table (Dice/mIoU/Precision/Recall):")
+        for group in (
+            "pre_original_sliding",
+            "pre_selected_sliding",
+            "post_original_sliding",
+            "post_selected_sliding",
+        ):
+            values = macro_sliding[group]
+            print(
+                f"  {group}: "
+                f"{values['Dice']:.4f}/"
+                f"{values['mIoU']:.4f}/"
+                f"{values['Precision']:.4f}/"
+                f"{values['Recall']:.4f}"
+            )
+        print(
+            "TDC sliding macro deltas: "
+            f"post_sel-pre_sel={macro_differences['post_selected_minus_pre_selected']['Dice']:.4f} "
+            f"post_orig-pre_orig={macro_differences['post_original_minus_pre_original']['Dice']:.4f} "
+            f"post_sel-post_orig={macro_differences['post_selected_minus_post_original']['Dice']:.4f}"
+        )
     (output_dir / "results.json").write_text(
         json.dumps(output, indent=2, ensure_ascii=False),
         encoding="utf-8",

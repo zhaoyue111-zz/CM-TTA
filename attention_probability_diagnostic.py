@@ -10,7 +10,7 @@ and Gaussian weights.
 
 The VoxTell multi-output predictor returns ``[D5, D4, D3, D2, D1]``.  The
 diagnostic uses D5 for the probability map.  D1--D4, when described in
-metadata, mean patch-upsampled-then-sliding-window-fused full-volume outputs,
+metadata, mean patch-upsampled-then-sliding-window-fused full-volume outputs1,
 not raw low-resolution probability maps.
 """
 
@@ -730,7 +730,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--split-file", default=None)
-    parser.add_argument("--voxtell-root", default="/data/zy/VoxTell_from_disk")
+    parser.add_argument("--voxtell-root", default="/mnt/afs2/zy/VoxTell_from_disk")
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--text-model", required=True)
     parser.add_argument("--device", default="cuda:0")
@@ -846,7 +846,7 @@ def run(args: argparse.Namespace) -> int:
         if selector_embedding_count < 1 or len(embedding_records) < 1:
             raise AssertionError("TDC selector or diagnostic prediction did not reach the model")
         if not isinstance(returned_logits, (list, tuple)) or len(returned_logits) != DECODER_COUNT:
-            raise AssertionError("return_all_layers=True must return five decoder outputs")
+            raise AssertionError("return_all_layers=True must return five decoder outputs1")
         d5_logits = returned_logits[0][0].detach().float().cpu()
         probability = torch.sigmoid(d5_logits).numpy().astype(np.float32, copy=False)
         if probability.shape != tuple(crop_shape):

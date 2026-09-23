@@ -130,7 +130,7 @@ def agent_inference(
 ):
     """
     Given a text prompt and an image, this tool will perform all aspects of agentic problem solving,
-    while saving sam3 and MLLM outputs to their respective directories.
+    while saving sam3 and MLLM outputs1 to their respective directories.
 
     Args:
         img_path: Path to the input image
@@ -369,11 +369,11 @@ def agent_inference(
                 )
                 if "Accept" in verdict:
                     assert not "Reject" in verdict
-                    print(f"Mask {i+1} accepted, keeping it in the outputs.")
+                    print(f"Mask {i+1} accepted, keeping it in the outputs1.")
                     masks_to_keep.append(i)
                 elif "Reject" in verdict:
                     assert not "Accept" in verdict
-                    print(f"Mask {i+1} rejected, removing it from the outputs.")
+                    print(f"Mask {i+1} rejected, removing it from the outputs1.")
                 else:
                     raise ValueError(
                         f"Unexpected verdict in generated text: {checking_generated_text}. Expected 'Accept' or 'Reject'."
@@ -400,7 +400,7 @@ def agent_inference(
                 ),
             )
             image_w_check_masks.save(image_w_check_masks_path)
-            # save the updated json outputs and append to message history
+            # save the updated json outputs1 and append to message history
             messages.append(
                 {
                     "role": "assistant",

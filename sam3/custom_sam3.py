@@ -145,7 +145,7 @@ class SAM3Tuning(nn.Module):
         
         # Process each image separately (SAM3 expects batched but we handle one at a time for compatibility)
         for i in range(batch_size):
-            # Slice backbone/text outputs to a single-item batch and reset ids to 0
+            # Slice backbone/text outputs1 to a single-item batch and reset ids to 0
             single_backbone_out = _slice_batch(backbone_out, i)
             # Create empty geometric prompt for this image (we're using text only)
             geometric_prompt = Prompt(
@@ -193,7 +193,7 @@ class SAM3Tuning(nn.Module):
             image_embeddings.append(seg)
             pred_masks.append(seg.sigmoid())
             
-            # Extract outputs
+            # Extract outputs1
             # pred_masks: [1, num_queries, H, W] or [1, num_queries, 1, H, W]
             # out_masks = output["pred_masks"]  # Shape: [1, num_queries, H, W] or [1, num_queries, 1, H, W]
             # out_logits = output["pred_logits"]  # Shape: [1, num_queries, 1]
@@ -642,7 +642,7 @@ class SAM3TestTimeTuning(nn.Module):
         
         # Process each image separately (SAM3 expects batched but we handle one at a time for compatibility)
         for i in range(images.size(0)):
-            # Slice backbone/text outputs to a single-item batch and reset ids to 0
+            # Slice backbone/text outputs1 to a single-item batch and reset ids to 0
             single_backbone_out = _slice_batch(backbone_out, i)
             # Create empty geometric prompt for this image (we're using text only)
             geometric_prompt = Prompt(
@@ -1210,7 +1210,7 @@ class SAM3LoraTestTimeTuning(nn.Module):
         
         # Process each image separately (SAM3 expects batched but we handle one at a time for compatibility)
         for i in range(images.size(0)):
-            # Slice backbone/text outputs to a single-item batch and reset ids to 0
+            # Slice backbone/text outputs1 to a single-item batch and reset ids to 0
             single_backbone_out = _slice_batch(backbone_out, i)
             # Create empty geometric prompt for this image (we're using text only)
             geometric_prompt = Prompt(
@@ -1610,7 +1610,7 @@ class SAM3TestTimeTuning_Dynamic(nn.Module):
         
         # Process each image separately (SAM3 expects batched but we handle one at a time for compatibility)
         for i in range(images.size(0)):
-            # Slice backbone/text outputs to a single-item batch and reset ids to 0
+            # Slice backbone/text outputs1 to a single-item batch and reset ids to 0
             single_backbone_out = _slice_batch(backbone_out, i)
             # Create empty geometric prompt for this image (we're using text only)
             geometric_prompt = Prompt(
@@ -1855,7 +1855,7 @@ class SAM3TestTimeTuning_Multi_Dynamic(nn.Module):
         
         # Process each image separately (SAM3 expects batched but we handle one at a time for compatibility)
         for i in range(images.size(0)):
-            # Slice backbone/text outputs to a single-item batch and reset ids to 0
+            # Slice backbone/text outputs1 to a single-item batch and reset ids to 0
             single_backbone_out = _slice_batch(backbone_out, i)
             # Create empty geometric prompt for this image (we're using text only)
             geometric_prompt = Prompt(

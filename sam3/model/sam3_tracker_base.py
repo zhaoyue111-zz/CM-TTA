@@ -54,7 +54,7 @@ class Sam3TrackerBase(torch.nn.Module):
         # For r>1, the (self.num_maskmem - 1) non-conditioning memory frames consist of
         # (self.num_maskmem - 2) nearest frames from every r-th frames, plus the last frame.
         memory_temporal_stride_for_eval=1,
-        # whether to offload outputs to CPU memory during evaluation, to avoid GPU OOM on very long videos or very large resolutions or too many objects
+        # whether to offload outputs1 to CPU memory during evaluation, to avoid GPU OOM on very long videos or very large resolutions or too many objects
         # (it's recommended to use `forward_backbone_per_frame_for_eval=True` first before setting this option to True)
         offload_output_to_cpu_for_eval=False,
         # whether to trim the output of past non-conditioning frames (num_maskmem frames before the current frame) during evaluation
@@ -90,7 +90,7 @@ class Sam3TrackerBase(torch.nn.Module):
         self.transformer = transformer
         self.hidden_dim = transformer.d_model
 
-        # Part 3: memory encoder for the previous frame's outputs
+        # Part 3: memory encoder for the previous frame's outputs1
         self.maskmem_backbone = maskmem_backbone
         self.mem_dim = self.hidden_dim
         if hasattr(self.maskmem_backbone, "out_proj") and hasattr(
@@ -304,7 +304,7 @@ class Sam3TrackerBase(torch.nn.Module):
             boxes=None,
             masks=sam_mask_prompt,
         )
-        # Clone image_pe and the outputs of sam_prompt_encoder
+        # Clone image_pe and the outputs1 of sam_prompt_encoder
         # to enable compilation
         sparse_embeddings = self._maybe_clone(sparse_embeddings)
         dense_embeddings = self._maybe_clone(dense_embeddings)
@@ -1043,7 +1043,7 @@ class Sam3TrackerBase(torch.nn.Module):
             current_out["maskmem_features"] = None
             current_out["maskmem_pos_enc"] = None
 
-        # Optionally, offload the outputs to CPU memory during evaluation to avoid
+        # Optionally, offload the outputs1 to CPU memory during evaluation to avoid
         # GPU OOM on very long videos or very large resolution or too many objects
         if self.offload_output_to_cpu_for_eval and not self.training:
             # Here we only keep those keys needed for evaluation to get a compact output

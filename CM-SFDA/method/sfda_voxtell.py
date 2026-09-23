@@ -280,13 +280,13 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5, valid_mask=None):
     """Compute Text-conditioned Decoder Consensus for ``[D5,D4,D3,D2]`` logits.
 
     VoxTell returns decoder logits from highest to lowest resolution. D5 is the
-    reference grid; the other three outputs are trilinearly resized before
+    reference grid; the other three outputs1 are trilinearly resized before
     sigmoid and thresholding. Empty/empty pairs are omitted from the mean,
     while one-empty pairs contribute Dice zero.
     """
     if not isinstance(decoder_outputs, (tuple, list)) or len(decoder_outputs) < 4:
         raise ValueError(
-            "TDC requires at least four VoxTell decoder outputs; the first four "
+            "TDC requires at least four VoxTell decoder outputs1; the first four "
             "must be [D5,D4,D3,D2]"
         )
     if not 0.0 <= float(threshold) <= 1.0:
@@ -318,7 +318,7 @@ def compute_tdc_consensus(decoder_outputs, threshold=0.5, valid_mask=None):
             shape = getattr(logits, "shape", None)
             raise ValueError(f"Decoder output D{5 - level} must be (B,N,H,W,D), got {shape}")
         if logits.shape[:2] != (batch, prompts):
-            raise ValueError("All decoder outputs must agree in batch and prompt dimensions")
+            raise ValueError("All decoder outputs1 must agree in batch and prompt dimensions")
         logits = logits.float()
         finite &= torch.isfinite(logits).flatten(start_dim=1).all(dim=1)
         logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)

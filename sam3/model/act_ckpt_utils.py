@@ -98,10 +98,10 @@ def clone_output_wrapper(f: Callable[..., T]) -> Callable[..., T]:
     related to in-place operations on tensors.
 
     Args:
-        f: The function whose CUDA tensor outputs should be cloned
+        f: The function whose CUDA tensor outputs1 should be cloned
 
     Returns:
-        A wrapped function that clones any CUDA tensor outputs
+        A wrapped function that clones any CUDA tensor outputs1
     """
 
     @wraps(f)

@@ -170,7 +170,7 @@ class Sam3VideoInference(Sam3VideoBase):
         inference_state["per_frame_geometric_prompt"] = [None] * num_frames
         inference_state["per_frame_cur_step"] = [0] * num_frames
 
-        # placeholders for cached outputs
+        # placeholders for cached outputs1
         # (note: currently, a single visual prompt embedding is shared for all frames)
         inference_state["visual_prompt_embed"] = None
         inference_state["visual_prompt_mask"] = None
@@ -256,7 +256,7 @@ class Sam3VideoInference(Sam3VideoBase):
     ):
         """
         Propagate the prompts to get grounding results_ for the entire video. This method
-        is a generator and yields inference outputs for all frames in the range specified
+        is a generator and yields inference outputs1 for all frames in the range specified
         by `start_frame_idx`, `max_frame_num_to_track`, and `reverse`.
         """
         # compile the model (it's a no-op if the model is already compiled)
@@ -292,7 +292,7 @@ class Sam3VideoInference(Sam3VideoBase):
             out = self._run_single_frame_inference(inference_state, frame_idx, reverse)
 
             if self.hotstart_delay > 0:
-                # accumulate the outputs for the first `hotstart_delay` frames
+                # accumulate the outputs1 for the first `hotstart_delay` frames
                 hotstart_buffer.append([frame_idx, out])
                 # update the object IDs removed by hotstart so that we don't output them
                 if self.rank == 0:
@@ -395,7 +395,7 @@ class Sam3VideoInference(Sam3VideoBase):
         # update inference state
         inference_state["tracker_inference_states"] = tracker_states_local_new
         inference_state["tracker_metadata"] = tracker_metadata_new
-        # use a dummy string in "previous_stages_out" to indicate this frame has outputs
+        # use a dummy string in "previous_stages_out" to indicate this frame has outputs1
         inference_state["previous_stages_out"][frame_idx] = "_THIS_FRAME_HAS_OUTPUTS_"
 
         if self.rank == 0:
@@ -463,7 +463,7 @@ class Sam3VideoInference(Sam3VideoBase):
 
             assert out_binary_masks.dtype == torch.bool
             keep = out_binary_masks.any(dim=(1, 2)).cpu()  # remove masks with 0 areas
-            # hide outputs for those object IDs in `obj_ids_to_hide`
+            # hide outputs1 for those object IDs in `obj_ids_to_hide`
             obj_ids_to_hide = []
             if suppressed_obj_ids is not None:
                 obj_ids_to_hide.extend(suppressed_obj_ids)
@@ -475,7 +475,7 @@ class Sam3VideoInference(Sam3VideoBase):
                 obj_ids_to_hide_t = torch.tensor(obj_ids_to_hide, dtype=torch.int64)
                 keep &= ~torch.isin(out_obj_ids, obj_ids_to_hide_t)
 
-            # slice those valid entries from the original outputs
+            # slice those valid entries from the original outputs1
             keep_idx = torch.nonzero(keep, as_tuple=True)[0]
             keep_idx_gpu = keep_idx.pin_memory().to(
                 device=out_binary_masks.device, non_blocking=True
@@ -553,7 +553,7 @@ class Sam3VideoInference(Sam3VideoBase):
         assert (
             "cached_frame_outputs" in inference_state
             and frame_idx in inference_state["cached_frame_outputs"]
-        ), "No cached outputs found. Ensure normal propagation has run first to populate the cache."
+        ), "No cached outputs1 found. Ensure normal propagation has run first to populate the cache."
         cached_outputs = inference_state["cached_frame_outputs"][frame_idx]
 
         obj_id_to_mask = cached_outputs.copy()
@@ -844,7 +844,7 @@ class Sam3VideoInference(Sam3VideoBase):
     ):
         """
         Add text, point or box prompts on a single frame. This method returns the inference
-        outputs only on the prompted frame.
+        outputs1 only on the prompted frame.
 
         Note that text prompts are NOT associated with a particular frame (i.e. they apply
         to all frames). However, we only run inference on the frame specified in `frame_idx`.
@@ -1304,7 +1304,7 @@ class Sam3VideoInferenceWithInstanceInteractivity(Sam3VideoInference):
         tracker_metadata["obj_id_to_score"].pop(obj_id, None)
         # tracker_metadata["max_obj_id"] # we do not reuse the object id, so we do not update it here
 
-        # Clean up cached frame outputs to remove references to the deleted object
+        # Clean up cached frame outputs1 to remove references to the deleted object
         if "cached_frame_outputs" in inference_state:
             for frame_idx in inference_state["cached_frame_outputs"]:
                 frame_cache = inference_state["cached_frame_outputs"][frame_idx]

@@ -166,12 +166,12 @@ def tdc_patch_components(
     """Accumulate one patch's TDC pair statistics on the D5 grid.
 
     VoxTell returns decoder logits in ``[D5,D4,D3,D2,D1]`` order.  TDC uses
-    only the first four outputs; lower-resolution outputs are resized to D5
+    only the first four outputs1; lower-resolution outputs1 are resized to D5
     before hard thresholding.  The returned statistics are intentionally
     additive so callers can perform one exact case-level reduction.
     """
     if not isinstance(decoder_outputs, (list, tuple)) or len(decoder_outputs) < 4:
-        raise ValueError("TDC requires decoder outputs [D5,D4,D3,D2,D1]")
+        raise ValueError("TDC requires decoder outputs1 [D5,D4,D3,D2,D1]")
     if not 0.0 <= float(threshold) <= 1.0:
         raise ValueError(f"TDC threshold must be in [0, 1], got {threshold}")
     # VoxTell decoder logits and input/valid masks are both in (D,H,W) order.
@@ -203,7 +203,7 @@ def tdc_patch_components(
         if not torch.is_tensor(logits) or logits.ndim != 5:
             raise ValueError(f"TDC decoder D{5 - level} must be 5-D logits")
         if logits.shape[:2] != reference.shape[:2]:
-            raise ValueError("TDC decoder outputs must agree in batch and prompt dimensions")
+            raise ValueError("TDC decoder outputs1 must agree in batch and prompt dimensions")
         logits = logits.float()
         finite &= torch.isfinite(logits).flatten(start_dim=1).all(dim=1)
         logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)
@@ -258,7 +258,7 @@ def decoder_consistency_probabilities(
     only spatial resizing is allowed.
     """
     if not isinstance(decoder_outputs, (list, tuple)) or len(decoder_outputs) < 4:
-        raise ValueError("Decoder consistency requires [D5,D4,D3,D2,D1] outputs")
+        raise ValueError("Decoder consistency requires [D5,D4,D3,D2,D1] outputs1")
     if not 0.0 <= float(bg_threshold) <= 1.0:
         raise ValueError(f"bg_threshold must be in [0, 1], got {bg_threshold}")
     reference = decoder_outputs[0]
@@ -292,7 +292,7 @@ def decoder_consistency_probabilities(
         if not torch.is_tensor(logits) or logits.ndim != 5:
             raise ValueError(f"D{5 - level} decoder output must be 5-D")
         if logits.shape[:2] != reference.shape[:2]:
-            raise ValueError("D2--D5 decoder outputs disagree in batch/channel shape")
+            raise ValueError("D2--D5 decoder outputs1 disagree in batch/channel shape")
         logits = torch.nan_to_num(logits.float(), nan=0.0, posinf=20.0, neginf=-20.0)
         if level and tuple(logits.shape[2:]) != d5_shape:
             logits = F.interpolate(logits, size=d5_shape, mode="trilinear", align_corners=False)
@@ -407,7 +407,7 @@ def check_voxtell_decoder_d5_alignment(
             "VoxTell decoder diagnostic expected [D5,D4,D3,D2,D1] or a compatible sequence"
         )
     if not all(torch.is_tensor(output) and output.ndim == 5 for output in decoder_outputs[:4]):
-        raise RuntimeError("VoxTell D2--D5 decoder outputs must all be 5-D tensors")
+        raise RuntimeError("VoxTell D2--D5 decoder outputs1 must all be 5-D tensors")
     d5 = decoder_outputs[0]
     if tuple(normal.shape) != tuple(d5.shape):
         raise RuntimeError(
@@ -1138,7 +1138,7 @@ class VoxTellCMTTA:
             for output in outputs[:4]
         ):
             raise RuntimeError(
-                "VoxTell D2--D5 decoder outputs must be 5-D (B,N,D,H,W) tensors"
+                "VoxTell D2--D5 decoder outputs1 must be 5-D (B,N,D,H,W) tensors"
             )
         return list(outputs)
 

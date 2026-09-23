@@ -426,7 +426,7 @@ class FlexibleFilterFindGetQueries:
 
                 datapoint.images[img_id].objects = new_objects
 
-                # Remap the outputs of the find queries
+                # Remap the outputs1 of the find queries
                 affected_find_queries_ids = set()
                 object_old_to_new_map_per_query = {}
                 for fid, find in enumerate(datapoint.find_queries):

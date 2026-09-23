@@ -68,7 +68,7 @@ class PostProcessImage(nn.Module):
     ):
         """Perform the computation
         Parameters:
-            outputs: raw outputs of the model
+            outputs: raw outputs1 of the model
             target_sizes_boxes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
                           For evaluation, this must be the original image size (before any data augmentation)
                           For visualization, this should be the image size after data augment, but before padding
@@ -83,7 +83,7 @@ class PostProcessImage(nn.Module):
         if ret_tensordict:
             assert (
                 consistent is True
-            ), "We don't support returning TensorDict if the outputs have different shapes"  # NOTE: It's possible but we don't support it.
+            ), "We don't support returning TensorDict if the outputs1 have different shapes"  # NOTE: It's possible but we don't support it.
             assert self.detection_threshold <= 0.0, "TODO: implement?"
             try:
                 from tensordict import TensorDict
@@ -381,8 +381,8 @@ class PostProcessAPIVideo(PostProcessImage):
             raise e
         # Notes and assumptions:
         # 1- This postprocessor assumes results_ only for a single video.
-        # 2- There are N stage outputs corresponding to N video frames
-        # 3- Each stage outputs contains PxQ preds, where P is number of prompts and Q is number of object queries. The output should also contain the tracking object ids corresponding to each object query.
+        # 2- There are N stage outputs1 corresponding to N video frames
+        # 3- Each stage outputs1 contains PxQ preds, where P is number of prompts and Q is number of object queries. The output should also contain the tracking object ids corresponding to each object query.
         # 4- The tracking object id has a default value of -1, indicating that the object query is not tracking any object in the frame, and hence its predictions can be ingored for a given frame.
         # 5- Some objects may be tracked in a subset of frames only. So, we first extract the predictions in a packed representation (for efficient postprocessing -- specially memory)
         # and then we convert the packed representation into a padded one, where we zero pad boxes/masks for objects that are not tracked in some frames.
@@ -606,10 +606,10 @@ class PostProcessCounting(nn.Module):
     def forward(self, outputs, target_sizes):
         """Perform the computation
         Parameters:
-            outputs: raw outputs of the model
+            outputs: raw outputs1 of the model
             target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
         """
-        # Extract scores from model outputs and apply sigmoid
+        # Extract scores from model outputs1 and apply sigmoid
         scores = torch.sigmoid(outputs["pred_logits"]).squeeze(-1)  # [B, N]
         if self.use_presence:
             presence_score = outputs["presence_logit_dec"].sigmoid()

@@ -322,7 +322,7 @@ class YTVISResultsWriter:
         - GPU 4: B2, **A2**
         (as in DistributedSampler in https://github.com/pytorch/pytorch/blob/521588519da9f4876d90ddd7a17c10d0eca89dc6/torch/utils/data/distributed.py#L116-L124)
 
-        so the predictions on A1 and A2 will occur twice in the final gathered outputs
+        so the predictions on A1 and A2 will occur twice in the final gathered outputs1
         in the prediction file (and counted as false positives). This also affects our
         YT-VIS official val evaluation, but to a lesser extent than YT-VIS dev since
         the latter is much smaller and more susceptible to false positives.

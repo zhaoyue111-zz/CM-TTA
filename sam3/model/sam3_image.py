@@ -705,7 +705,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
         geometric_prompt: Prompt,
         frame_idx,
         num_frames,
-        # `multigpu_buffer` is a dict to cache detector's outputs in a chunk between different calls
+        # `multigpu_buffer` is a dict to cache detector's outputs1 in a chunk between different calls
         multigpu_buffer,
         track_in_reverse=False,
         # whether to also return the SAM2 backbone features
@@ -717,10 +717,10 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
         **kwargs,
     ):
         """
-        Compute the detector's detection outputs in a distributed manner, where all GPUs process
+        Compute the detector's detection outputs1 in a distributed manner, where all GPUs process
         a chunk of frames (equal to the number of GPUs) at once and store them in cache.
         """
-        # Step 1: fetch the detector outputs in the current chunk from buffer
+        # Step 1: fetch the detector outputs1 in the current chunk from buffer
         frame_idx_curr_b = frame_idx - frame_idx % self.world_size
         frame_idx_curr_e = min(frame_idx_curr_b + self.world_size, num_frames)
         # in case the current frame's detection results_ are not in the buffer yet, build the current chunk
@@ -749,7 +749,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
                 handle.wait()  # wait for async all-gather to finish
             out[k] = v
 
-        # Step 2: remove detection outputs of the previous chunk from cache to save GPU memory
+        # Step 2: remove detection outputs1 of the previous chunk from cache to save GPU memory
         if not track_in_reverse and frame_idx_curr_b - self.world_size >= 0:
             frame_idx_prev_e = frame_idx_curr_b
             frame_idx_prev_b = frame_idx_curr_b - self.world_size
@@ -762,7 +762,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
             for frame_idx_rm in range(frame_idx_prev_b, frame_idx_prev_e):
                 multigpu_buffer.pop(frame_idx_rm, None)
 
-        # Step 3: compute and cache detection outputs of the next chunk ahead of time
+        # Step 3: compute and cache detection outputs1 of the next chunk ahead of time
         # (so that we can overlap computation with all-gather transfer)
         if not track_in_reverse and frame_idx_curr_e < num_frames:
             frame_idx_next_b = frame_idx_curr_e
@@ -802,7 +802,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
         nms_prob_thresh=None,
         nms_iou_thresh=None,
     ):
-        """Compute detection outputs on a chunk of frames and store their results_ in multigpu_buffer."""
+        """Compute detection outputs1 on a chunk of frames and store their results_ in multigpu_buffer."""
         # each GPU computes detections on one frame in the chunk (in a round-robin manner)
         frame_idx_local_gpu = min(frame_idx_begin + self.rank, frame_idx_end - 1)
         # `forward_grounding` (from base class `Sam3ImageOnVideo`) runs the detector on a single frame
@@ -815,7 +815,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
             )
         if run_nms:
             with torch.profiler.record_function("nms_masks"):
-                # run NMS as a post-processing step on top of the detection outputs
+                # run NMS as a post-processing step on top of the detection outputs1
                 assert nms_prob_thresh is not None and nms_iou_thresh is not None
                 pred_probs = out_local["pred_logits"].squeeze(-1).sigmoid()
                 pred_masks = out_local["pred_masks"]
@@ -851,7 +851,7 @@ class Sam3ImageOnVideoMultiGPU(Sam3Image):
             "pred_masks": out_local["pred_masks"],
         }
 
-        # gather the results_: after this step, each GPU will receive detector outputs on
+        # gather the results_: after this step, each GPU will receive detector outputs1 on
         # all frames in the chunk and store them in `multigpu_buffer`
         out_gathered = {k: self._gather_tensor(v) for k, v in out_local.items()}
         for rank in range(self.world_size):

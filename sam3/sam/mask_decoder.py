@@ -257,7 +257,7 @@ class MaskDecoder(nn.Module):
         """
         When outputting a single mask, if the stability score from the current single-mask
         output (based on output token 0) falls below a threshold, we instead select from
-        multi-mask outputs (based on output token 1~3) the mask with the highest predicted
+        multi-mask outputs1 (based on output token 1~3) the mask with the highest predicted
         IoU score. This is intended to ensure a valid mask for both clicking and tracking.
         """
         # The best mask from multimask output tokens (1~3)

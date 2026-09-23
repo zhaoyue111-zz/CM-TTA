@@ -119,11 +119,11 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         inference_state["first_ann_frame_idx"] = None
         # Slice (view) of each object tracking results_, sharing the same memory with "output_dict"
         inference_state["output_dict_per_obj"] = {}
-        # A temporary storage to hold new outputs when user interact with a frame
+        # A temporary storage to hold new outputs1 when user interact with a frame
         # to add clicks or mask (it's merged into "output_dict" before propagation starts)
         inference_state["temp_output_dict_per_obj"] = {}
-        # Frames that already holds consolidated outputs from click or mask inputs
-        # (we directly use their consolidated outputs during tracking)
+        # Frames that already holds consolidated outputs1 from click or mask inputs
+        # (we directly use their consolidated outputs1 during tracking)
         inference_state["consolidated_frame_inds"] = {
             "cond_frame_outputs": set(),  # set containing frame indices
             "non_cond_frame_outputs": set(),  # set containing frame indices
@@ -497,7 +497,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         consolidate_at_video_res=False,
     ):
         """
-        Consolidate the per-object temporary outputs in `temp_output_dict_per_obj` on
+        Consolidate the per-object temporary outputs1 in `temp_output_dict_per_obj` on
         a frame into a single output for all objects, including
         1) fill any missing objects either from `output_dict_per_obj` (if they exist in
            `output_dict_per_obj` for this frame) or leave them as placeholder values
@@ -507,7 +507,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         """
         batch_size = self._get_obj_num(inference_state)
         storage_key = "cond_frame_outputs" if is_cond else "non_cond_frame_outputs"
-        # Optionally, we allow consolidating the temporary outputs at the original
+        # Optionally, we allow consolidating the temporary outputs1 at the original
         # video resolution (to provide a better editing experience for mask prompts).
         if consolidate_at_video_res:
             assert not run_mem_encoder, "memory encoder cannot run at video resolution"
@@ -670,23 +670,23 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
 
     @torch.inference_mode()
     def propagate_in_video_preflight(self, inference_state, run_mem_encoder=True):
-        """Prepare inference_state and consolidate temporary outputs before tracking."""
+        """Prepare inference_state and consolidate temporary outputs1 before tracking."""
         # Tracking has started and we don't allow adding new objects until session is reset.
         inference_state["tracking_has_started"] = True
         batch_size = self._get_obj_num(inference_state)
 
-        # Consolidate per-object temporary outputs in "temp_output_dict_per_obj" and
+        # Consolidate per-object temporary outputs1 in "temp_output_dict_per_obj" and
         # add them into "output_dict".
         temp_output_dict_per_obj = inference_state["temp_output_dict_per_obj"]
         output_dict = inference_state["output_dict"]
         # "consolidated_frame_inds" contains indices of those frames where consolidated
-        # temporary outputs have been added (either in this call or any previous calls
+        # temporary outputs1 have been added (either in this call or any previous calls
         # to `propagate_in_video_preflight`).
         consolidated_frame_inds = inference_state["consolidated_frame_inds"]
         for is_cond in [False, True]:
             # Separately consolidate conditioning and non-conditioning temp outptus
             storage_key = "cond_frame_outputs" if is_cond else "non_cond_frame_outputs"
-            # Find all the frames that contain temporary outputs for any objects
+            # Find all the frames that contain temporary outputs1 for any objects
             # (these should be the frames that have just received clicks for mask inputs
             # via `add_new_points` or `add_new_mask`)
             temp_frame_inds = set()
@@ -713,7 +713,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                     # clear non-conditioning memory of the surrounding frames
                     self._clear_non_cond_mem_around_input(inference_state, frame_idx)
 
-            # clear temporary outputs in `temp_output_dict_per_obj`
+            # clear temporary outputs1 in `temp_output_dict_per_obj`
             for obj_temp_output_dict in temp_output_dict_per_obj.values():
                 obj_temp_output_dict[storage_key].clear()
 
@@ -825,7 +825,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         for frame_idx in tqdm(
             processing_order, desc="propagate in video", disable=tqdm_disable
         ):
-            # We skip those frames already in consolidated outputs (these are frames
+            # We skip those frames already in consolidated outputs1 (these are frames
             # that received input clicks or mask). Note that we cannot directly run
             # batched forward on them via `_run_single_frame_inference` because the
             # number of clicks on each object might be different.
@@ -857,7 +857,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                 )
                 obj_scores = current_out["object_score_logits"]
                 output_dict[storage_key][frame_idx] = current_out
-            # Create slices of per-object outputs for subsequent interaction with each
+            # Create slices of per-object outputs1 for subsequent interaction with each
             # individual object after tracking.
             self._add_output_per_object(
                 inference_state, frame_idx, current_out, storage_key
@@ -949,7 +949,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
                 if obj_out is not None:
                     obj_output_dict["non_cond_frame_outputs"][frame_idx] = obj_out
 
-            # If all the conditioning frames have been removed, we also clear the tracking outputs
+            # If all the conditioning frames have been removed, we also clear the tracking outputs1
             if len(output_dict["cond_frame_outputs"]) == 0:
                 self._reset_tracking_results(inference_state)
 
@@ -1273,7 +1273,7 @@ class Sam3TrackerPredictor(Sam3TrackerBase):
         _slice_state(inference_state["output_dict"], "cond_frame_outputs")
         _slice_state(inference_state["output_dict"], "non_cond_frame_outputs")
 
-        # Step 4: Further collect the outputs on those frames in `obj_input_frames_inds`, which
+        # Step 4: Further collect the outputs1 on those frames in `obj_input_frames_inds`, which
         # could show an updated mask for objects previously occluded by the object being removed
         if need_output:
             temp_output_dict_per_obj = inference_state["temp_output_dict_per_obj"]

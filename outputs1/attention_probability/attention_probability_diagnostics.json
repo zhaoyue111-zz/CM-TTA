@@ -1,0 +1,4160 @@
+{
+  "config": {
+    "data_dir": "/mnt/afs2/zy/CT_MRI_DATA_3D",
+    "split_file": null,
+    "voxtell_root": "/mnt/afs2/zy/VoxTell_from_disk",
+    "model_dir": "/mnt/afs2/zy/VoxTell_from_disk/model",
+    "text_model": "/mnt/afs2/models/huggingface/hub/models--Qwen--Qwen3-Embedding-4B/snapshots/5cf2132abc99cad020ac570b19d031efec650f2b",
+    "device": "cuda:0",
+    "prompt": "liver",
+    "label_value": null,
+    "threshold": 0.5,
+    "num_aug_views": 9,
+    "view_batch_size": 1,
+    "selection_p": 0.1,
+    "metric_max_negative_voxels": null,
+    "balanced_seed": 20260923,
+    "limit": null,
+    "save_case": null,
+    "output_dir": "outputs/attention_probability",
+    "save_maps": false,
+    "all_layers_on_device": false
+  },
+  "view_scores": [
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.7143054008483887,
+      "tdc_rank": 4.0,
+      "selected_view": 6,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.7103845477104187,
+      "tdc_rank": 5.0,
+      "selected_view": 6,
+      "scale": 0.8576596975326538,
+      "offset": 0.022799618542194366
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.7075269818305969,
+      "tdc_rank": 6.0,
+      "selected_view": 6,
+      "scale": 0.9928988218307495,
+      "offset": 0.0472419299185276
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.718602180480957,
+      "tdc_rank": 1.0,
+      "selected_view": 6,
+      "scale": 1.0979764461517334,
+      "offset": -0.12551169097423553
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.7178866863250732,
+      "tdc_rank": 2.0,
+      "selected_view": 6,
+      "scale": 1.1008217334747314,
+      "offset": -0.07787436246871948
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.6994171738624573,
+      "tdc_rank": 7.0,
+      "selected_view": 6,
+      "scale": 0.8651278018951416,
+      "offset": 0.08951590210199356
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.7196596264839172,
+      "tdc_rank": 0.0,
+      "selected_view": 6,
+      "scale": 0.8584694862365723,
+      "offset": -0.10946401208639145
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.7168557047843933,
+      "tdc_rank": 3.0,
+      "selected_view": 6,
+      "scale": 1.0178632736206055,
+      "offset": -0.037078000605106354
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.6989328265190125,
+      "tdc_rank": 9.0,
+      "selected_view": 6,
+      "scale": 1.0705900192260742,
+      "offset": 0.1143781915307045
+    },
+    {
+      "case": "HEM_PA29",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.6991348266601562,
+      "tdc_rank": 8.0,
+      "selected_view": 6,
+      "scale": 0.950071394443512,
+      "offset": 0.10077878832817078
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.6705557703971863,
+      "tdc_rank": 1.0,
+      "selected_view": 4,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.6518165469169617,
+      "tdc_rank": 5.0,
+      "selected_view": 4,
+      "scale": 0.9338346123695374,
+      "offset": 0.09164967387914658
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.6495404839515686,
+      "tdc_rank": 7.0,
+      "selected_view": 4,
+      "scale": 0.9417187571525574,
+      "offset": 0.1171029582619667
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.6476869583129883,
+      "tdc_rank": 9.0,
+      "selected_view": 4,
+      "scale": 0.8616609573364258,
+      "offset": 0.14617425203323364
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.6928520798683167,
+      "tdc_rank": 0.0,
+      "selected_view": 4,
+      "scale": 0.9007253050804138,
+      "offset": -0.14847135543823242
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.6614128947257996,
+      "tdc_rank": 4.0,
+      "selected_view": 4,
+      "scale": 1.0089718103408813,
+      "offset": 0.046673621982336044
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.6516048908233643,
+      "tdc_rank": 6.0,
+      "selected_view": 4,
+      "scale": 0.9830643534660339,
+      "offset": 0.10185311734676361
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.6626346111297607,
+      "tdc_rank": 3.0,
+      "selected_view": 4,
+      "scale": 0.904039740562439,
+      "offset": 0.03585668280720711
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.6490059494972229,
+      "tdc_rank": 8.0,
+      "selected_view": 4,
+      "scale": 0.9465964436531067,
+      "offset": 0.13073843717575073
+    },
+    {
+      "case": "HEM_PA101",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.6650579571723938,
+      "tdc_rank": 2.0,
+      "selected_view": 4,
+      "scale": 0.9967047572135925,
+      "offset": 0.03185001760721207
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.7280469536781311,
+      "tdc_rank": 5.0,
+      "selected_view": 2,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.7302095890045166,
+      "tdc_rank": 2.0,
+      "selected_view": 2,
+      "scale": 0.8588010668754578,
+      "offset": -0.02219867706298828
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.7402352690696716,
+      "tdc_rank": 0.0,
+      "selected_view": 2,
+      "scale": 0.9549269080162048,
+      "offset": -0.13609084486961365
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.7247724533081055,
+      "tdc_rank": 6.0,
+      "selected_view": 2,
+      "scale": 1.074684500694275,
+      "offset": 0.03700048476457596
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.7234227061271667,
+      "tdc_rank": 7.0,
+      "selected_view": 2,
+      "scale": 0.863198459148407,
+      "offset": 0.04106952250003815
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.7399832606315613,
+      "tdc_rank": 1.0,
+      "selected_view": 2,
+      "scale": 0.9489100575447083,
+      "offset": -0.12977652251720428
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.7157031893730164,
+      "tdc_rank": 8.0,
+      "selected_view": 2,
+      "scale": 0.9689686894416809,
+      "offset": 0.09927365928888321
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.7151031494140625,
+      "tdc_rank": 9.0,
+      "selected_view": 2,
+      "scale": 1.104757308959961,
+      "offset": 0.11777766048908234
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.729520857334137,
+      "tdc_rank": 3.0,
+      "selected_view": 2,
+      "scale": 0.967517077922821,
+      "offset": -0.017080916091799736
+    },
+    {
+      "case": "CYST_PA69",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.7286220192909241,
+      "tdc_rank": 4.0,
+      "selected_view": 2,
+      "scale": 1.1161811351776123,
+      "offset": -0.00866287387907505
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.8125068545341492,
+      "tdc_rank": 0.0,
+      "selected_view": 0,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.8109126091003418,
+      "tdc_rank": 1.0,
+      "selected_view": 0,
+      "scale": 0.9605093598365784,
+      "offset": -0.03007718361914158
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.8091157078742981,
+      "tdc_rank": 8.0,
+      "selected_view": 0,
+      "scale": 0.9806379675865173,
+      "offset": 0.1307796686887741
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.8097036480903625,
+      "tdc_rank": 7.0,
+      "selected_view": 0,
+      "scale": 0.9672466516494751,
+      "offset": 0.034671127796173096
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.8097190856933594,
+      "tdc_rank": 6.0,
+      "selected_view": 0,
+      "scale": 1.0291122198104858,
+      "offset": 0.1152450293302536
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.8103030323982239,
+      "tdc_rank": 2.0,
+      "selected_view": 0,
+      "scale": 1.0560436248779297,
+      "offset": -0.03992137312889099
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.8098875880241394,
+      "tdc_rank": 4.0,
+      "selected_view": 0,
+      "scale": 1.102924108505249,
+      "offset": 0.09000785648822784
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.8098219037055969,
+      "tdc_rank": 5.0,
+      "selected_view": 0,
+      "scale": 0.9925603270530701,
+      "offset": 0.09106706082820892
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.8099572658538818,
+      "tdc_rank": 3.0,
+      "selected_view": 0,
+      "scale": 1.0937930345535278,
+      "offset": 0.10315366834402084
+    },
+    {
+      "case": "MET_PA13",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.7945148348808289,
+      "tdc_rank": 9.0,
+      "selected_view": 0,
+      "scale": 0.9742881059646606,
+      "offset": -0.12761887907981873
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.7345430254936218,
+      "tdc_rank": 9.0,
+      "selected_view": 8,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.7350015640258789,
+      "tdc_rank": 8.0,
+      "selected_view": 8,
+      "scale": 1.1118695735931396,
+      "offset": 0.044351041316986084
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.7499967217445374,
+      "tdc_rank": 1.0,
+      "selected_view": 8,
+      "scale": 1.0819752216339111,
+      "offset": 0.10011642426252365
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.7455401420593262,
+      "tdc_rank": 3.0,
+      "selected_view": 8,
+      "scale": 0.9468082785606384,
+      "offset": 0.0735953152179718
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.7374054789543152,
+      "tdc_rank": 6.0,
+      "selected_view": 8,
+      "scale": 0.9674914479255676,
+      "offset": -0.02767578512430191
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.7386994361877441,
+      "tdc_rank": 5.0,
+      "selected_view": 8,
+      "scale": 0.9564691185951233,
+      "offset": 0.05178204923868179
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.7358531951904297,
+      "tdc_rank": 7.0,
+      "selected_view": 8,
+      "scale": 0.8548049330711365,
+      "offset": -0.04294867813587189
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.7419715523719788,
+      "tdc_rank": 4.0,
+      "selected_view": 8,
+      "scale": 1.1311568021774292,
+      "offset": 0.0743621215224266
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.751777172088623,
+      "tdc_rank": 0.0,
+      "selected_view": 8,
+      "scale": 1.0846853256225586,
+      "offset": 0.11632465571165085
+    },
+    {
+      "case": "MET_PA25",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.7495965361595154,
+      "tdc_rank": 2.0,
+      "selected_view": 8,
+      "scale": 1.084661841392517,
+      "offset": 0.09833667427301407
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.7640495300292969,
+      "tdc_rank": 7.0,
+      "selected_view": 1,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.7740338444709778,
+      "tdc_rank": 0.0,
+      "selected_view": 1,
+      "scale": 0.8716461658477783,
+      "offset": -0.1316210925579071
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.7631022334098816,
+      "tdc_rank": 8.0,
+      "selected_view": 1,
+      "scale": 1.0864286422729492,
+      "offset": 0.012216979637742043
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.765355110168457,
+      "tdc_rank": 6.0,
+      "selected_view": 1,
+      "scale": 1.0669336318969727,
+      "offset": -0.016642017289996147
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.7692409157752991,
+      "tdc_rank": 4.0,
+      "selected_view": 1,
+      "scale": 1.1078355312347412,
+      "offset": -0.08121056854724884
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.7711763381958008,
+      "tdc_rank": 1.0,
+      "selected_view": 1,
+      "scale": 1.0202220678329468,
+      "offset": -0.10369565337896347
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.7656503319740295,
+      "tdc_rank": 5.0,
+      "selected_view": 1,
+      "scale": 0.8724583387374878,
+      "offset": -0.017221856862306595
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.7700045704841614,
+      "tdc_rank": 3.0,
+      "selected_view": 1,
+      "scale": 0.9076048731803894,
+      "offset": -0.07594656944274902
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.7700510025024414,
+      "tdc_rank": 2.0,
+      "selected_view": 1,
+      "scale": 1.076099157333374,
+      "offset": -0.09122942388057709
+    },
+    {
+      "case": "HCC_10081574_20140213",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.7610557675361633,
+      "tdc_rank": 9.0,
+      "selected_view": 1,
+      "scale": 1.043601632118225,
+      "offset": 0.030359530821442604
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.9396951794624329,
+      "tdc_rank": 5.0,
+      "selected_view": 9,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.9406075477600098,
+      "tdc_rank": 1.0,
+      "selected_view": 9,
+      "scale": 1.1422927379608154,
+      "offset": 0.08167505264282227
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.9386358857154846,
+      "tdc_rank": 7.0,
+      "selected_view": 9,
+      "scale": 0.9150270223617554,
+      "offset": -0.06744704395532608
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.940586507320404,
+      "tdc_rank": 2.0,
+      "selected_view": 9,
+      "scale": 0.9695678949356079,
+      "offset": 0.06860914081335068
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.9403085708618164,
+      "tdc_rank": 3.0,
+      "selected_view": 9,
+      "scale": 1.0671226978302002,
+      "offset": 0.05433027446269989
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.939272403717041,
+      "tdc_rank": 6.0,
+      "selected_view": 9,
+      "scale": 0.9856582880020142,
+      "offset": -0.030394239351153374
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.9400384426116943,
+      "tdc_rank": 4.0,
+      "selected_view": 9,
+      "scale": 0.8649002909660339,
+      "offset": 0.024800259619951248
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.9386131167411804,
+      "tdc_rank": 8.0,
+      "selected_view": 9,
+      "scale": 0.8625679016113281,
+      "offset": -0.06416639685630798
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.937781035900116,
+      "tdc_rank": 9.0,
+      "selected_view": 9,
+      "scale": 0.9304046034812927,
+      "offset": -0.10445691645145416
+    },
+    {
+      "case": "FNH_PA32",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.9411835074424744,
+      "tdc_rank": 0.0,
+      "selected_view": 9,
+      "scale": 0.9200666546821594,
+      "offset": 0.1467612236738205
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 0,
+      "tdc_score": 0.9520890712738037,
+      "tdc_rank": 4.0,
+      "selected_view": 3,
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 1,
+      "tdc_score": 0.9518740177154541,
+      "tdc_rank": 8.0,
+      "selected_view": 3,
+      "scale": 1.0265949964523315,
+      "offset": -0.13313600420951843
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 2,
+      "tdc_score": 0.9520485997200012,
+      "tdc_rank": 6.0,
+      "selected_view": 3,
+      "scale": 0.904354453086853,
+      "offset": -0.07795440405607224
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 3,
+      "tdc_score": 0.9524511694908142,
+      "tdc_rank": 0.0,
+      "selected_view": 3,
+      "scale": 0.8645005822181702,
+      "offset": 0.14820899069309235
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 4,
+      "tdc_score": 0.9521002173423767,
+      "tdc_rank": 3.0,
+      "selected_view": 3,
+      "scale": 0.9488123655319214,
+      "offset": 0.053633399307727814
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 5,
+      "tdc_score": 0.9521164894104004,
+      "tdc_rank": 2.0,
+      "selected_view": 3,
+      "scale": 1.0545655488967896,
+      "offset": -0.05579434707760811
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 6,
+      "tdc_score": 0.9518814086914062,
+      "tdc_rank": 7.0,
+      "selected_view": 3,
+      "scale": 0.8553650975227356,
+      "offset": -0.13103090226650238
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 7,
+      "tdc_score": 0.9520513415336609,
+      "tdc_rank": 5.0,
+      "selected_view": 3,
+      "scale": 1.1352009773254395,
+      "offset": -0.09119552373886108
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 8,
+      "tdc_score": 0.9518658518791199,
+      "tdc_rank": 9.0,
+      "selected_view": 3,
+      "scale": 0.947715699672699,
+      "offset": -0.12205222994089127
+    },
+    {
+      "case": "HEM_PA66",
+      "prompt": "liver",
+      "view": 9,
+      "tdc_score": 0.9524109959602356,
+      "tdc_rank": 1.0,
+      "selected_view": 3,
+      "scale": 0.8744548559188843,
+      "offset": 0.13605481386184692
+    }
+  ],
+  "metric_summary": [
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "selected_view",
+      "mean": 4.125,
+      "median": 3.5,
+      "std": 3.059309562630104,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "selected_view_tdc",
+      "mean": 0.798087440431118,
+      "median": 0.7629055082798004,
+      "std": 0.09206523368210842,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "threshold",
+      "mean": 0.5,
+      "median": 0.5,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "balanced_seed",
+      "mean": 20260923.0,
+      "median": 20260923.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "valid_voxel_count",
+      "mean": 8535919.625,
+      "median": 5329728.0,
+      "std": 5161032.130585604,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_voxel_count",
+      "mean": 597931.75,
+      "median": 271196.0,
+      "std": 467352.2710386005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_background_valid_voxel_count",
+      "mean": 7937987.875,
+      "median": 5106835.5,
+      "std": 4703510.092541724,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "balanced_sample_count",
+      "mean": 1195863.5,
+      "median": 542392.0,
+      "std": 934704.542077201,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "pearson_attention_probability",
+      "mean": -0.001980990214089172,
+      "median": -0.054748195285323514,
+      "std": 0.10359955950131639,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "spearman_attention_probability",
+      "mean": -0.34772493380071323,
+      "median": -0.3369954620955896,
+      "std": 0.1039437972853362,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "pearson_attention_probability_balanced",
+      "mean": -0.043332716854136755,
+      "median": -0.12233176806838283,
+      "std": 0.1566613526750352,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "spearman_attention_probability_balanced",
+      "mean": -0.21064323330832996,
+      "median": -0.2519131331608174,
+      "std": 0.13843205858468666,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_attention_auroc",
+      "mean": 0.33884412672776626,
+      "median": 0.3138466513159923,
+      "std": 0.07924845440308165,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_attention_auprc",
+      "mean": 0.013320256439280902,
+      "median": 0.0070390910025247225,
+      "std": 0.01777267644089911,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_attention_auroc_full_voxel",
+      "mean": 0.33884412672776626,
+      "median": 0.3138466513159923,
+      "std": 0.07924845440308165,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_attention_auprc_full_voxel",
+      "mean": 0.013320256439280902,
+      "median": 0.0070390910025247225,
+      "std": 0.01777267644089911,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_probability_auroc",
+      "mean": 0.9621920709820819,
+      "median": 0.9828975804316489,
+      "std": 0.05174073601126468,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_probability_auprc",
+      "mean": 0.29398729146918023,
+      "median": 0.3204856341887816,
+      "std": 0.08845380637679152,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_probability_auroc_full_voxel",
+      "mean": 0.9621920709820819,
+      "median": 0.9828975804316489,
+      "std": 0.05174073601126468,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_probability_auprc_full_voxel",
+      "mean": 0.29398729146918023,
+      "median": 0.3204856341887816,
+      "std": 0.08845380637679152,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_R_auroc",
+      "mean": 0.15171992253911346,
+      "median": 0.13311121365905293,
+      "std": 0.06994558761346906,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_R_auprc",
+      "mean": 0.006008792353644638,
+      "median": 0.002798704051489967,
+      "std": 0.008335096830442422,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_R_auroc_full_voxel",
+      "mean": 0.15171992253911346,
+      "median": 0.13311121365905293,
+      "std": 0.06994558761346906,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_R_auprc_full_voxel",
+      "mean": 0.006008792353644638,
+      "median": 0.002798704051489967,
+      "std": 0.008335096830442422,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_raw_positive_count",
+      "mean": 123957.5,
+      "median": 23401.5,
+      "std": 198831.1158232031,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_raw_negative_count",
+      "mean": 7842631.75,
+      "median": 5071420.5,
+      "std": 4620453.74096267,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_negative_sampling_enabled",
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_actual_positive_count",
+      "mean": 123957.5,
+      "median": 23401.5,
+      "std": 198831.1158232031,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_actual_negative_count",
+      "mean": 7842631.75,
+      "median": 5071420.5,
+      "std": 4620453.74096267,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_actual_sample_count",
+      "mean": 7966589.25,
+      "median": 5089486.0,
+      "std": 4769561.362508815,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_negative_sampled",
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "background_FN_TN_sample_seed",
+      "mean": 20260923.0,
+      "median": 20260923.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_attention_auroc",
+      "mean": 0.5359086919854237,
+      "median": 0.5077963492330932,
+      "std": 0.084667038752706,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_attention_auprc",
+      "mean": 0.8616945672546714,
+      "median": 0.8759662381979602,
+      "std": 0.07316185567356982,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_attention_auroc_full_voxel",
+      "mean": 0.5359086919854237,
+      "median": 0.5077963492330932,
+      "std": 0.084667038752706,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_attention_auprc_full_voxel",
+      "mean": 0.8616945672546714,
+      "median": 0.8759662381979602,
+      "std": 0.07316185567356982,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_probability_auroc",
+      "mean": 0.8166593477629085,
+      "median": 0.8460328403143184,
+      "std": 0.11623691647509934,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_probability_auprc",
+      "mean": 0.9451336638559342,
+      "median": 0.9696263689765355,
+      "std": 0.05156658371183055,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_probability_auroc_full_voxel",
+      "mean": 0.8166593477629085,
+      "median": 0.8460328403143184,
+      "std": 0.11623691647509934,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_probability_auprc_full_voxel",
+      "mean": 0.9451336638559342,
+      "median": 0.9696263689765355,
+      "std": 0.05156658371183055,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_R_auroc",
+      "mean": 0.5078433863008822,
+      "median": 0.471016372006071,
+      "std": 0.09313166448054175,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_R_auprc",
+      "mean": 0.8468787729891393,
+      "median": 0.8630952276052721,
+      "std": 0.07420090626377453,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_R_auroc_full_voxel",
+      "mean": 0.5078433863008822,
+      "median": 0.471016372006071,
+      "std": 0.09313166448054175,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_R_auprc_full_voxel",
+      "mean": 0.8468787729891393,
+      "median": 0.8630952276052721,
+      "std": 0.07420090626377453,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_raw_positive_count",
+      "mean": 473974.25,
+      "median": 256221.5,
+      "std": 321577.07137393596,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_raw_negative_count",
+      "mean": 95356.125,
+      "median": 51568.5,
+      "std": 91946.85036127869,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_negative_sampling_enabled",
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_actual_positive_count",
+      "mean": 473974.25,
+      "median": 256221.5,
+      "std": 321577.07137393596,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_actual_negative_count",
+      "mean": 95356.125,
+      "median": 51568.5,
+      "std": 91946.85036127869,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_actual_sample_count",
+      "mean": 569330.375,
+      "median": 293481.0,
+      "std": 410650.13111374306,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_negative_sampled",
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "foreground_TP_FP_sample_seed",
+      "mean": 20260923.0,
+      "median": 20260923.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_attention_auroc",
+      "mean": 0.4119055013295799,
+      "median": 0.3850586202221071,
+      "std": 0.06500358096670668,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_attention_auprc",
+      "mean": 0.09958946869009624,
+      "median": 0.06758799850844387,
+      "std": 0.07490909718731147,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_attention_auroc_full_voxel",
+      "mean": 0.4119055013295799,
+      "median": 0.3850586202221071,
+      "std": 0.06500358096670668,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_attention_auprc_full_voxel",
+      "mean": 0.09958946869009624,
+      "median": 0.06758799850844387,
+      "std": 0.07490909718731147,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_probability_auroc",
+      "mean": 0.9858617800525493,
+      "median": 0.9947841278580615,
+      "std": 0.02566453976662913,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_probability_auprc",
+      "mean": 0.9126452135625083,
+      "median": 0.9481202993574983,
+      "std": 0.08990493200823353,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_probability_auroc_full_voxel",
+      "mean": 0.9858617800525493,
+      "median": 0.9947841278580615,
+      "std": 0.02566453976662913,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_probability_auprc_full_voxel",
+      "mean": 0.9126452135625083,
+      "median": 0.9481202993574983,
+      "std": 0.08990493200823353,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_R_auroc",
+      "mean": 0.16151394164652227,
+      "median": 0.16320269879801677,
+      "std": 0.03254761992337647,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_R_auprc",
+      "mean": 0.035972072939681986,
+      "median": 0.037974621748855464,
+      "std": 0.009154287574557706,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_R_auroc_full_voxel",
+      "mean": 0.16151394164652227,
+      "median": 0.16320269879801677,
+      "std": 0.03254761992337647,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_R_auprc_full_voxel",
+      "mean": 0.035972072939681986,
+      "median": 0.037974621748855464,
+      "std": 0.009154287574557706,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_raw_positive_count",
+      "mean": 597931.75,
+      "median": 271196.0,
+      "std": 467352.2710386005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_raw_negative_count",
+      "mean": 7937987.875,
+      "median": 5106835.5,
+      "std": 4703510.092541724,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_negative_sampling_enabled",
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_actual_positive_count",
+      "mean": 597931.75,
+      "median": 271196.0,
+      "std": 467352.2710386005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_actual_negative_count",
+      "mean": 7937987.875,
+      "median": 5106835.5,
+      "std": 4703510.092541724,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_actual_sample_count",
+      "mean": 8535919.625,
+      "median": 5329728.0,
+      "std": 5161032.130585604,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_negative_sampled",
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "gt_foreground_background_sample_seed",
+      "mean": 20260923.0,
+      "median": 20260923.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "metric_sampling_seed",
+      "mean": 20260923.0,
+      "median": 20260923.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "is_final_output",
+      "mean": 1.0,
+      "median": 1.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "view_count",
+      "mean": 10.0,
+      "median": 10.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "tdc_embedding_forward_count",
+      "mean": 125.0,
+      "median": 90.0,
+      "std": 92.46621004453465,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "metric",
+      "region": "",
+      "metric": "diagnostic_embedding_forward_count",
+      "mean": 31.0,
+      "median": 20.0,
+      "std": 25.918140365388872,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_voxel_count",
+      "mean": 8535919.625,
+      "median": 5329728.0,
+      "std": 5161032.130585604,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_mean",
+      "mean": 0.06343851890414953,
+      "median": 0.0654781199991703,
+      "std": 0.013131214311528342,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_std",
+      "mean": 0.23502283357083797,
+      "median": 0.24216557294130325,
+      "std": 0.022800681048923698,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_min",
+      "mean": 1.0719438686594483e-16,
+      "median": 4.354200011504457e-37,
+      "std": 2.2172322080928754e-16,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_p05",
+      "mean": 4.030213385896808e-10,
+      "median": 1.3214939884684283e-19,
+      "std": 9.368126659512678e-10,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_p25",
+      "mean": 1.2971071917733259e-08,
+      "median": 1.0227206830557451e-16,
+      "std": 2.323161302536692e-08,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_median",
+      "mean": 1.6168393166135774e-07,
+      "median": 4.7682209292077005e-08,
+      "std": 1.8670229218542986e-07,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_p75",
+      "mean": 8.212789037287394e-06,
+      "median": 3.3148762668133713e-06,
+      "std": 9.566520715356272e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_p95",
+      "mean": 0.7449120110832155,
+      "median": 0.9821959435939789,
+      "std": 0.38460862476369345,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "probability_max",
+      "mean": 0.9999945908784866,
+      "median": 0.9999967813491821,
+      "std": 6.094247021049895e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_voxel_count",
+      "mean": 8535919.625,
+      "median": 5329728.0,
+      "std": 5161032.130585604,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_mean",
+      "mean": 0.0005181975247978698,
+      "median": 0.0004753040993819013,
+      "std": 0.00013716034033762098,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_std",
+      "mean": 0.0005123706541780848,
+      "median": 0.00033454920048825443,
+      "std": 0.00032859532094190163,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_min",
+      "mean": 3.8361750966942054e-05,
+      "median": 3.747648952412419e-05,
+      "std": 9.557925944355475e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_p05",
+      "mean": 0.00011883006663993001,
+      "median": 0.00011314716903143562,
+      "std": 1.609366664494717e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_p25",
+      "mean": 0.00025662457665021066,
+      "median": 0.0002370934744249098,
+      "std": 5.507993803185162e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_median",
+      "mean": 0.00044649588016909547,
+      "median": 0.0004755168774863705,
+      "std": 7.735198480785305e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_p75",
+      "mean": 0.0006099789752624929,
+      "median": 0.0006091868272051215,
+      "std": 6.630884334585329e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_p95",
+      "mean": 0.0011433609906816855,
+      "median": 0.000763953139539808,
+      "std": 0.0006090120312361569,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "raw_attention_max",
+      "mean": 0.017047682049451396,
+      "median": 0.01045691897161305,
+      "std": 0.01713397239599792,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_voxel_count",
+      "mean": 8535919.625,
+      "median": 5329728.0,
+      "std": 5161032.130585604,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_mean",
+      "mean": 0.5,
+      "median": 0.5,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_std",
+      "mean": 0.2886751741170883,
+      "median": 0.2886751890182495,
+      "std": 2.1073424255447017e-08,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_min",
+      "mean": 0.0,
+      "median": 0.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_p05",
+      "mean": 0.05000000027939677,
+      "median": 0.05000000074505806,
+      "std": 1.2320239614064762e-09,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_p25",
+      "mean": 0.2500000037252903,
+      "median": 0.25,
+      "std": 9.85619169125181e-09,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_median",
+      "mean": 0.4999999888241291,
+      "median": 0.5,
+      "std": 3.630963841382028e-08,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_p75",
+      "mean": 0.7500000149011612,
+      "median": 0.75,
+      "std": 3.942476676500724e-08,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_p95",
+      "mean": 0.9500000104308128,
+      "median": 0.949999988079071,
+      "std": 2.8855974571462102e-08,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "rank_attention_max",
+      "mean": 1.0,
+      "median": 1.0,
+      "std": 0.0,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_voxel_count",
+      "mean": 8535919.625,
+      "median": 5329728.0,
+      "std": 5161032.130585604,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_mean",
+      "mean": 7.425751333278718e-10,
+      "median": 7.951547476015008e-10,
+      "std": 1.1490720721867764e-09,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_std",
+      "mean": 0.4735890366137028,
+      "median": 0.4720288813114166,
+      "std": 0.018284185774729823,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_min",
+      "mean": -0.9715258628129959,
+      "median": -0.9862991571426392,
+      "std": 0.028052087685572828,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_p05",
+      "mean": -0.7699436768889427,
+      "median": -0.7692032754421234,
+      "std": 0.029919702969383642,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_p25",
+      "mean": -0.4153958298265934,
+      "median": -0.3999672830104828,
+      "std": 0.05203077216747383,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_median",
+      "mean": 0.05214635841548443,
+      "median": 0.04536917805671692,
+      "std": 0.05215448969356753,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_p75",
+      "mean": 0.39072177931666374,
+      "median": 0.3793976753950119,
+      "std": 0.041725399172870305,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_p95",
+      "mean": 0.6966795101761818,
+      "median": 0.6994830667972565,
+      "std": 0.03985587739746273,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "valid",
+      "metric": "residual_max",
+      "mean": 0.9839665219187737,
+      "median": 0.986499696969986,
+      "std": 0.0052092012057174215,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_voxel_count",
+      "mean": 597931.75,
+      "median": 271196.0,
+      "std": 467352.2710386005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_mean",
+      "mean": 0.8648186922073364,
+      "median": 0.9129919111728668,
+      "std": 0.129964484277477,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_std",
+      "mean": 0.26004614122211933,
+      "median": 0.24134375900030136,
+      "std": 0.093935876711117,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_min",
+      "mean": 2.7761101922495635e-05,
+      "median": 9.798698521569044e-08,
+      "std": 6.147781347709234e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_p05",
+      "mean": 0.3072699340409615,
+      "median": 0.128360815346241,
+      "std": 0.3350243093468557,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_p25",
+      "mean": 0.8523343784618191,
+      "median": 0.9865898191928864,
+      "std": 0.3217909601084916,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_median",
+      "mean": 0.9678883627057076,
+      "median": 0.9983111321926117,
+      "std": 0.07853202162152396,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_p75",
+      "mean": 0.9980108216404915,
+      "median": 0.9994721412658691,
+      "std": 0.003747846313482304,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_p95",
+      "mean": 0.9997773244976997,
+      "median": 0.9998729825019836,
+      "std": 0.0002628353209946732,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "probability_max",
+      "mean": 0.9999944269657135,
+      "median": 0.9999964237213135,
+      "std": 6.024714721701354e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_voxel_count",
+      "mean": 597931.75,
+      "median": 271196.0,
+      "std": 467352.2710386005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_mean",
+      "mean": 0.0004773043765453622,
+      "median": 0.00041631168278399855,
+      "std": 0.00013061998356049987,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_std",
+      "mean": 0.0005241524740995374,
+      "median": 0.00034975504968315363,
+      "std": 0.00038640774040968936,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_min",
+      "mean": 6.290201099545811e-05,
+      "median": 5.402946590038482e-05,
+      "std": 2.108199863533546e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_p05",
+      "mean": 0.0001202217035825015,
+      "median": 0.00011777363761211745,
+      "std": 2.338861082658956e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_p25",
+      "mean": 0.00019069260633841623,
+      "median": 0.00019127265841234475,
+      "std": 1.4440612064178385e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_median",
+      "mean": 0.00030699732815264724,
+      "median": 0.0002993273810716346,
+      "std": 3.489941580654804e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_p75",
+      "mean": 0.0005632085521938279,
+      "median": 0.0005238425510469824,
+      "std": 0.00010921283600249844,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_p95",
+      "mean": 0.0013777121130260639,
+      "median": 0.001160247775260359,
+      "std": 0.00047244899895255494,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "raw_attention_max",
+      "mean": 0.007063485390972346,
+      "median": 0.003543536993674934,
+      "std": 0.007196796099866917,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_voxel_count",
+      "mean": 597931.75,
+      "median": 271196.0,
+      "std": 467352.2710386005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_mean",
+      "mean": 0.41728558763861656,
+      "median": 0.39434079825878143,
+      "std": 0.06150527086202405,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_std",
+      "mean": 0.30088502913713455,
+      "median": 0.29268838465213776,
+      "std": 0.0253936958029681,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_min",
+      "mean": 0.008477629972730938,
+      "median": 0.002016548067331314,
+      "std": 0.01009141758716871,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_p05",
+      "mean": 0.05945517332293093,
+      "median": 0.0506083182990551,
+      "std": 0.031209468092071774,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_p25",
+      "mean": 0.1718165408819914,
+      "median": 0.17151319235563278,
+      "std": 0.03916103046661075,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_median",
+      "mean": 0.3277790695428848,
+      "median": 0.31061238050460815,
+      "std": 0.06804113727868093,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_p75",
+      "mean": 0.6437696442008018,
+      "median": 0.6596357226371765,
+      "std": 0.1802742127774564,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_p95",
+      "mean": 0.9601923823356628,
+      "median": 0.9792540073394775,
+      "std": 0.03823855676135922,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "rank_attention_max",
+      "mean": 0.998627096414566,
+      "median": 0.999613344669342,
+      "std": 0.0019398826549439027,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_voxel_count",
+      "mean": 597931.75,
+      "median": 271196.0,
+      "std": 467352.2710386005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_mean",
+      "mean": -0.5378655940294266,
+      "median": -0.5379338264465332,
+      "std": 0.0665840252839821,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_std",
+      "mean": 0.31504231318831444,
+      "median": 0.29993827641010284,
+      "std": 0.051772646334390944,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_min",
+      "mean": -0.9701189920306206,
+      "median": -0.9839134514331818,
+      "std": 0.029075129291700738,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_p05",
+      "mean": -0.8993191942572594,
+      "median": -0.9090175330638885,
+      "std": 0.0309494712435801,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_p25",
+      "mean": -0.7901094406843185,
+      "median": -0.7954361438751221,
+      "std": 0.037988548162630746,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_median",
+      "mean": -0.6373817920684814,
+      "median": -0.6540476381778717,
+      "std": 0.0676640410747144,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_p75",
+      "mean": -0.31966549903154373,
+      "median": -0.30855685472488403,
+      "std": 0.1860498429968642,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_p95",
+      "mean": 0.05041088780853897,
+      "median": 0.013553179800510406,
+      "std": 0.14449992633015085,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_foreground",
+      "metric": "residual_max",
+      "mean": 0.38231615722179413,
+      "median": 0.31246188282966614,
+      "std": 0.3041526416751656,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_voxel_count",
+      "mean": 7937987.875,
+      "median": 5106835.5,
+      "std": 4703510.092541724,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_mean",
+      "mean": 0.010282009840011597,
+      "median": 0.010050255339592695,
+      "std": 0.00595233143616494,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_std",
+      "mean": 0.08614389691501856,
+      "median": 0.0902530774474144,
+      "std": 0.02688833883878109,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_min",
+      "mean": 1.0719438686594483e-16,
+      "median": 4.354200011504457e-37,
+      "std": 2.2172322080928754e-16,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_p05",
+      "mean": 3.545707235257956e-10,
+      "median": 1.038517665800797e-19,
+      "std": 8.267866463645235e-10,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_p25",
+      "mean": 1.086454806102332e-08,
+      "median": 6.409335191856495e-17,
+      "std": 2.004957642555482e-08,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_median",
+      "mean": 1.1703905739149483e-07,
+      "median": 2.5997022756740762e-08,
+      "std": 1.4041049925498085e-07,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_p75",
+      "mean": 2.7702701164145083e-06,
+      "median": 1.708535876332462e-06,
+      "std": 2.776915118853486e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_p95",
+      "mean": 0.0017642564376956216,
+      "median": 0.00035998720704810694,
+      "std": 0.002768853844518694,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "probability_max",
+      "mean": 0.9999315515160561,
+      "median": 0.9999414086341858,
+      "std": 6.465038023343954e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_voxel_count",
+      "mean": 7937987.875,
+      "median": 5106835.5,
+      "std": 4703510.092541724,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_mean",
+      "mean": 0.0005209745977481361,
+      "median": 0.00047922202793415636,
+      "std": 0.00014242190760665565,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_std",
+      "mean": 0.0005014026028220542,
+      "median": 0.00033405829162802547,
+      "std": 0.0003336572149141426,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_min",
+      "mean": 3.852793656733411e-05,
+      "median": 3.747648952412419e-05,
+      "std": 9.768846677028852e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_p05",
+      "mean": 0.00011933178666367894,
+      "median": 0.00011314704897813499,
+      "std": 1.798553114264239e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_p25",
+      "mean": 0.0002680421639524866,
+      "median": 0.0002445857389830053,
+      "std": 6.468473548298747e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_median",
+      "mean": 0.0004519108588283416,
+      "median": 0.0004828501696465537,
+      "std": 7.880642844180763e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_p75",
+      "mean": 0.0006117537195677869,
+      "median": 0.0006095375283621252,
+      "std": 6.719272925362735e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_p95",
+      "mean": 0.0011532621065271087,
+      "median": 0.0007518199854530394,
+      "std": 0.0006256140007031004,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "raw_attention_max",
+      "mean": 0.016953141341218725,
+      "median": 0.01045691897161305,
+      "std": 0.01720079456621318,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_voxel_count",
+      "mean": 7937987.875,
+      "median": 5106835.5,
+      "std": 4703510.092541724,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_mean",
+      "mean": 0.5053800866007805,
+      "median": 0.506476640701294,
+      "std": 0.00399808797311184,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_std",
+      "mean": 0.2863534577190876,
+      "median": 0.28616049885749817,
+      "std": 0.0017469114515154293,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_min",
+      "mean": 2.513579318019765e-07,
+      "median": 0.0,
+      "std": 6.650305776115633e-07,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_p05",
+      "mean": 0.05035245371982455,
+      "median": 0.05020793899893761,
+      "std": 0.003325065835441678,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_p25",
+      "mean": 0.2605220004916191,
+      "median": 0.26063331961631775,
+      "std": 0.006304599328291693,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_median",
+      "mean": 0.51046983897686,
+      "median": 0.5106787979602814,
+      "std": 0.004810816298455272,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_p75",
+      "mean": 0.7521812990307808,
+      "median": 0.7530081570148468,
+      "std": 0.0034208301940094887,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_p95",
+      "mean": 0.946673721075058,
+      "median": 0.9479489028453827,
+      "std": 0.005678928371416851,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "rank_attention_max",
+      "mean": 0.9999877735972404,
+      "median": 1.0,
+      "std": 3.219047381637522e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_voxel_count",
+      "mean": 7937987.875,
+      "median": 5106835.5,
+      "std": 4703510.092541724,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_mean",
+      "mean": 0.036090771900489926,
+      "median": 0.033603137359023094,
+      "std": 0.007790641628196999,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_std",
+      "mean": 0.4602622576057911,
+      "median": 0.4607565999031067,
+      "std": 0.016263941220222726,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_min",
+      "mean": -0.9648268222808838,
+      "median": -0.9844105541706085,
+      "std": 0.033040508987266945,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_p05",
+      "mean": -0.7301621586084366,
+      "median": -0.7281008958816528,
+      "std": 0.02962617538129992,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_p25",
+      "mean": -0.36272556707262993,
+      "median": -0.34238290786743164,
+      "std": 0.04398710983699028,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_median",
+      "mean": 0.10225991997867823,
+      "median": 0.10450654849410057,
+      "std": 0.05947473091472858,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_p75",
+      "mean": 0.40860894322395325,
+      "median": 0.4027017652988434,
+      "std": 0.041988057560969544,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_p95",
+      "mean": 0.7046322748064995,
+      "median": 0.7088989913463593,
+      "std": 0.039414679318647394,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "gt_background_valid",
+      "metric": "residual_max",
+      "mean": 0.9839665219187737,
+      "median": 0.986499696969986,
+      "std": 0.0052092012057174215,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_voxel_count",
+      "mean": 473974.25,
+      "median": 256221.5,
+      "std": 321577.07137393596,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_mean",
+      "mean": 0.9749183282256126,
+      "median": 0.9816039800643921,
+      "std": 0.018611223342672425,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_std",
+      "mean": 0.06657549040392041,
+      "median": 0.0608807597309351,
+      "std": 0.021067121050455006,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_min",
+      "mean": 0.5000525265932083,
+      "median": 0.5000278055667877,
+      "std": 5.8870169361239616e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_p05",
+      "mean": 0.8652736693620682,
+      "median": 0.8935197293758392,
+      "std": 0.10501896691148008,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_p25",
+      "mean": 0.9843632876873016,
+      "median": 0.9942440390586853,
+      "std": 0.0235096203730249,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_median",
+      "mean": 0.9965951219201088,
+      "median": 0.9987378418445587,
+      "std": 0.004874160208113999,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_p75",
+      "mean": 0.9991193190217018,
+      "median": 0.9995339810848236,
+      "std": 0.0010883868446096418,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_p95",
+      "mean": 0.9998422563076019,
+      "median": 0.9998833537101746,
+      "std": 0.00011887445214579708,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "probability_max",
+      "mean": 0.9999944269657135,
+      "median": 0.9999964237213135,
+      "std": 6.024714721701354e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_voxel_count",
+      "mean": 473974.25,
+      "median": 256221.5,
+      "std": 321577.07137393596,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_mean",
+      "mean": 0.0004403761922731064,
+      "median": 0.0004100809746887535,
+      "std": 7.710644220341716e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_std",
+      "mean": 0.0003673062092275359,
+      "median": 0.00031023840710986406,
+      "std": 0.00011360703641844252,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_min",
+      "mean": 6.668300920864567e-05,
+      "median": 5.5544158385600895e-05,
+      "std": 2.431843633382895e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_p05",
+      "mean": 0.00012208725638629403,
+      "median": 0.00012046294796164148,
+      "std": 2.324049868398162e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_p25",
+      "mean": 0.00019393506045162212,
+      "median": 0.0001957621134351939,
+      "std": 1.3193023270236089e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_median",
+      "mean": 0.0003079075977439061,
+      "median": 0.0003031584492418915,
+      "std": 2.0647099935156315e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_p75",
+      "mean": 0.0005546094034798443,
+      "median": 0.0005369087448343635,
+      "std": 9.903644076919811e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_p95",
+      "mean": 0.001233623261214234,
+      "median": 0.0010669511393643916,
+      "std": 0.00036969861921127975,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "raw_attention_max",
+      "mean": 0.002887785667553544,
+      "median": 0.0028611047891899943,
+      "std": 0.0006305455458196777,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_voxel_count",
+      "mean": 473974.25,
+      "median": 256221.5,
+      "std": 321577.07137393596,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_mean",
+      "mean": 0.41478127613663673,
+      "median": 0.3861510902643204,
+      "std": 0.07037833677583381,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_std",
+      "mean": 0.2933909744024277,
+      "median": 0.28643298149108887,
+      "std": 0.025260793616172717,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_min",
+      "mean": 0.010581961169521037,
+      "median": 0.002401173231191933,
+      "std": 0.013226468562438125,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_p05",
+      "mean": 0.062475279439240694,
+      "median": 0.05365859530866146,
+      "std": 0.032263413390267545,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_p25",
+      "mean": 0.17821484617888927,
+      "median": 0.17851563543081284,
+      "std": 0.0424964061275416,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_median",
+      "mean": 0.3316440414637327,
+      "median": 0.3152629882097244,
+      "std": 0.07594472643115534,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_p75",
+      "mean": 0.6403594091534615,
+      "median": 0.6446070969104767,
+      "std": 0.18990320727348717,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_p95",
+      "mean": 0.949172355234623,
+      "median": 0.9754339754581451,
+      "std": 0.050166785082701566,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "rank_attention_max",
+      "mean": 0.9910501092672348,
+      "median": 0.9953486323356628,
+      "std": 0.010847825646212285,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_voxel_count",
+      "mean": 473974.25,
+      "median": 256221.5,
+      "std": 321577.07137393596,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_mean",
+      "mean": -0.556143194437027,
+      "median": -0.5789028406143188,
+      "std": 0.07312040002349658,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_std",
+      "mean": 0.29147882387042046,
+      "median": 0.2829504460096359,
+      "std": 0.025999031545207295,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_min",
+      "mean": -0.9701189920306206,
+      "median": -0.9839134514331818,
+      "std": 0.029075129291700738,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_p05",
+      "mean": -0.9031000584363937,
+      "median": -0.911011129617691,
+      "std": 0.03503685260876449,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_p25",
+      "mean": -0.7906520143151283,
+      "median": -0.7921602725982666,
+      "std": 0.04476636019265087,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_median",
+      "mean": -0.6398299038410187,
+      "median": -0.655886709690094,
+      "std": 0.07826000500426124,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_p75",
+      "mean": -0.3339773155748844,
+      "median": -0.32853245735168457,
+      "std": 0.19153363009298394,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_p95",
+      "mean": -0.02192801225464791,
+      "median": -0.006091104354709387,
+      "std": 0.053233431718720706,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TP",
+      "metric": "residual_max",
+      "mean": 0.05302064120769501,
+      "median": 0.05225065350532532,
+      "std": 0.01572721716176858,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_voxel_count",
+      "mean": 123957.5,
+      "median": 23401.5,
+      "std": 198831.1158232031,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_mean",
+      "mean": 0.12218804657459259,
+      "median": 0.12512848153710365,
+      "std": 0.03395855052314672,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_std",
+      "mean": 0.1424127323552966,
+      "median": 0.14498845487833023,
+      "std": 0.011714294614758055,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_min",
+      "mean": 2.7761101922495635e-05,
+      "median": 9.798698521569044e-08,
+      "std": 6.147781347709234e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_p05",
+      "mean": 0.0010131298422166647,
+      "median": 0.00038433978625107557,
+      "std": 0.001206320303689454,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_p25",
+      "mean": 0.011279581629083026,
+      "median": 0.008453300222754478,
+      "std": 0.009860208392780205,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_median",
+      "mean": 0.0576609400450252,
+      "median": 0.057663533836603165,
+      "std": 0.038913065242333386,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_p75",
+      "mean": 0.19776733592152596,
+      "median": 0.20415294915437698,
+      "std": 0.07536147142501132,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_p95",
+      "mean": 0.4313722178339958,
+      "median": 0.43697258830070496,
+      "std": 0.027237571568903808,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "probability_max",
+      "mean": 0.49992547184228897,
+      "median": 0.4999835193157196,
+      "std": 0.000100558473088598,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_voxel_count",
+      "mean": 123957.5,
+      "median": 23401.5,
+      "std": 198831.1158232031,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_mean",
+      "mean": 0.0004620336949301418,
+      "median": 0.00037230944144539535,
+      "std": 0.00028482431570053807,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_std",
+      "mean": 0.0005932905114605092,
+      "median": 0.0004258961998857558,
+      "std": 0.0006101755845354566,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_min",
+      "mean": 6.387946041286341e-05,
+      "median": 5.58247684239177e-05,
+      "std": 2.044130573149351e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_p05",
+      "mean": 0.00010642468623700552,
+      "median": 9.971678809961304e-05,
+      "std": 2.7588591223139233e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_p25",
+      "mean": 0.00016476711243740283,
+      "median": 0.00015891750808805227,
+      "std": 3.4801666800536594e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_median",
+      "mean": 0.0002527527667552931,
+      "median": 0.00021054148965049535,
+      "std": 0.00010664912066678595,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_p75",
+      "mean": 0.00048471250920556486,
+      "median": 0.00035939746885560453,
+      "std": 0.00026967639932992964,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_p95",
+      "mean": 0.0016150470764841884,
+      "median": 0.001116492843721062,
+      "std": 0.001384282947789138,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "raw_attention_max",
+      "mean": 0.006634205157752149,
+      "median": 0.0026570858899503946,
+      "std": 0.007442813451757424,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_voxel_count",
+      "mean": 123957.5,
+      "median": 23401.5,
+      "std": 198831.1158232031,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_mean",
+      "mean": 0.3440868388861418,
+      "median": 0.31832849979400635,
+      "std": 0.08035619058959365,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_std",
+      "mean": 0.2961293328553438,
+      "median": 0.2934357672929764,
+      "std": 0.050016983840246554,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_min",
+      "mean": 0.008678029199472803,
+      "median": 0.0028115363093093038,
+      "std": 0.009953863434251165,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_p05",
+      "mean": 0.03904178075026721,
+      "median": 0.026657878421247005,
+      "std": 0.027197920325212878,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_p25",
+      "mean": 0.11714904848486185,
+      "median": 0.1192602887749672,
+      "std": 0.02581548274902548,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_median",
+      "mean": 0.2392578162252903,
+      "median": 0.2158689647912979,
+      "std": 0.09162161889257307,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_p75",
+      "mean": 0.5098443515598774,
+      "median": 0.4282720535993576,
+      "std": 0.23528139373253262,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_p95",
+      "mean": 0.9579049348831177,
+      "median": 0.9626294374465942,
+      "std": 0.032371198540289005,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "rank_attention_max",
+      "mean": 0.9978470280766487,
+      "median": 0.9982174038887024,
+      "std": 0.0017684394952367517,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_voxel_count",
+      "mean": 123957.5,
+      "median": 23401.5,
+      "std": 198831.1158232031,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_mean",
+      "mean": -0.5531193912029266,
+      "median": -0.5843824744224548,
+      "std": 0.12248671668669854,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_std",
+      "mean": 0.3282217476516962,
+      "median": 0.3021150529384613,
+      "std": 0.09332450492713294,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_min",
+      "mean": -0.92572420835495,
+      "median": -0.9216671288013458,
+      "std": 0.01934868780569806,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_p05",
+      "mean": -0.8851296827197075,
+      "median": -0.8810692131519318,
+      "std": 0.029093147553497498,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_p25",
+      "mean": -0.805877186357975,
+      "median": -0.8083361387252808,
+      "std": 0.02141792465433129,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_median",
+      "mean": -0.6728872358798981,
+      "median": -0.713074803352356,
+      "std": 0.11844869222798593,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_p75",
+      "mean": -0.3687036782503128,
+      "median": -0.48134860396385193,
+      "std": 0.3048068677174497,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_p95",
+      "mean": 0.12801226665033028,
+      "median": 0.04115656763315201,
+      "std": 0.17823977818868864,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FN",
+      "metric": "residual_max",
+      "mean": 0.38231615722179413,
+      "median": 0.31246188282966614,
+      "std": 0.3041526416751656,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_voxel_count",
+      "mean": 95356.125,
+      "median": 51568.5,
+      "std": 91946.85036127869,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_mean",
+      "mean": 0.8827472031116486,
+      "median": 0.8860357999801636,
+      "std": 0.010838068125065126,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_std",
+      "mean": 0.1420131828635931,
+      "median": 0.14215177297592163,
+      "std": 0.0032256811338022265,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_min",
+      "mean": 0.5000395476818085,
+      "median": 0.5000225305557251,
+      "std": 6.022606948561876e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_p05",
+      "mean": 0.5684140995144844,
+      "median": 0.5681480169296265,
+      "std": 0.007089223570744781,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_p25",
+      "mean": 0.8071513622999191,
+      "median": 0.8144670724868774,
+      "std": 0.023512036925140083,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_median",
+      "mean": 0.9537220597267151,
+      "median": 0.9578912258148193,
+      "std": 0.01401969765719653,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_p75",
+      "mean": 0.9918152540922165,
+      "median": 0.9930199682712555,
+      "std": 0.003132345674026627,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_p95",
+      "mean": 0.9989157468080521,
+      "median": 0.9989686608314514,
+      "std": 0.0007486176543202304,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "probability_max",
+      "mean": 0.9999315515160561,
+      "median": 0.9999414086341858,
+      "std": 6.465038023343954e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_voxel_count",
+      "mean": 95356.125,
+      "median": 51568.5,
+      "std": 91946.85036127869,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_mean",
+      "mean": 0.00045925490849185735,
+      "median": 0.00042940283310599625,
+      "std": 0.00015425394017229264,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_std",
+      "mean": 0.0004257213222444989,
+      "median": 0.0003694756160257384,
+      "std": 0.00017566886052803284,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_min",
+      "mean": 6.187955023051472e-05,
+      "median": 5.620015326712746e-05,
+      "std": 1.8610208730232717e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_p05",
+      "mean": 0.00010282841685693711,
+      "median": 0.00010505172394914553,
+      "std": 2.5911010468483342e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_p25",
+      "mean": 0.00016951419820543379,
+      "median": 0.00017669490625848994,
+      "std": 3.8063235045759716e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_median",
+      "mean": 0.00028408915204636287,
+      "median": 0.00028560683131217957,
+      "std": 6.750172643849434e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_p75",
+      "mean": 0.0005902212760702241,
+      "median": 0.0005586963961832225,
+      "std": 0.0002092624536422321,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_p95",
+      "mean": 0.001417583342117723,
+      "median": 0.0012333878548815846,
+      "std": 0.0005990013853537801,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "raw_attention_max",
+      "mean": 0.0026557358214631677,
+      "median": 0.00264889735262841,
+      "std": 0.0004981119720181122,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_voxel_count",
+      "mean": 95356.125,
+      "median": 51568.5,
+      "std": 91946.85036127869,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_mean",
+      "mean": 0.40055675245821476,
+      "median": 0.4296942204236984,
+      "std": 0.12709037783704386,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_std",
+      "mean": 0.3063469845801592,
+      "median": 0.30741724371910095,
+      "std": 0.03658896179619836,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_min",
+      "mean": 0.007603346707128367,
+      "median": 0.002268408890813589,
+      "std": 0.008675978108926464,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_p05",
+      "mean": 0.04149827879155055,
+      "median": 0.030128364451229572,
+      "std": 0.034370807467315696,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_p25",
+      "mean": 0.14650590647943318,
+      "median": 0.15705806016921997,
+      "std": 0.07567379358776773,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_median",
+      "mean": 0.3135874327272177,
+      "median": 0.31987233459949493,
+      "std": 0.13778998322471445,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_p75",
+      "mean": 0.6381655782461166,
+      "median": 0.7423112690448761,
+      "std": 0.27340904094506563,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_p95",
+      "mean": 0.9498233199119568,
+      "median": 0.9674443602561951,
+      "std": 0.06815634708337284,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "rank_attention_max",
+      "mean": 0.9878703504800797,
+      "median": 0.9945172369480133,
+      "std": 0.017615524008848582,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_voxel_count",
+      "mean": 95356.125,
+      "median": 51568.5,
+      "std": 91946.85036127869,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_mean",
+      "mean": -0.5502677634358406,
+      "median": -0.5155442357063293,
+      "std": 0.13742492884268118,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_std",
+      "mean": 0.3052748292684555,
+      "median": 0.30500631034374237,
+      "std": 0.034461709372161774,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_min",
+      "mean": -0.9639502763748169,
+      "median": -0.9844105541706085,
+      "std": 0.03418786301073336,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_p05",
+      "mean": -0.9081637859344482,
+      "median": -0.9116807878017426,
+      "std": 0.04651126834095399,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_p25",
+      "mean": -0.8043159171938896,
+      "median": -0.7824090123176575,
+      "std": 0.08646393783538633,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_median",
+      "mean": -0.6366295143961906,
+      "median": -0.6209608912467957,
+      "std": 0.14924387352778007,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_p75",
+      "mean": -0.31390414014458656,
+      "median": -0.20148325711488724,
+      "std": 0.2808324922602606,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_p95",
+      "mean": -0.0012206734827486798,
+      "median": 0.0021482721786014736,
+      "std": 0.0720185301826181,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "FP",
+      "metric": "residual_max",
+      "mean": 0.05077756941318512,
+      "median": 0.057094186544418335,
+      "std": 0.022223125263209013,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_voxel_count",
+      "mean": 7842631.75,
+      "median": 5071420.5,
+      "std": 4620453.74096267,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_mean",
+      "mean": 0.0016024043288780376,
+      "median": 0.0013561740051954985,
+      "std": 0.0009340428699752397,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_std",
+      "mean": 0.018767511937767267,
+      "median": 0.01823664177209139,
+      "std": 0.00562526327361757,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_min",
+      "mean": 1.0719438686594483e-16,
+      "median": 4.354200011504457e-37,
+      "std": 2.2172322080928754e-16,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_p05",
+      "mean": 3.5266569877455907e-10,
+      "median": 9.899311445709635e-20,
+      "std": 8.219884172364421e-10,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_p25",
+      "mean": 1.0677000637130449e-08,
+      "median": 5.816407496567055e-17,
+      "std": 1.9777260365662726e-08,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_median",
+      "mean": 1.1219022453903935e-07,
+      "median": 2.329789020039108e-08,
+      "std": 1.3612803216971115e-07,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_p75",
+      "mean": 2.2701229807076118e-06,
+      "median": 1.6381043224100722e-06,
+      "std": 2.161793822416515e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_p95",
+      "mean": 0.000536198239103669,
+      "median": 0.0001950834302988369,
+      "std": 0.0006442951612536711,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "probability_max",
+      "mean": 0.4999367520213127,
+      "median": 0.49997276067733765,
+      "std": 8.864322777841296e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_voxel_count",
+      "mean": 7842631.75,
+      "median": 5071420.5,
+      "std": 4620453.74096267,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_mean",
+      "mean": 0.000522135855135275,
+      "median": 0.00048044772120192647,
+      "std": 0.00014433875224920077,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_std",
+      "mean": 0.0005017086787120206,
+      "median": 0.00033419852843508124,
+      "std": 0.0003367696359867935,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_min",
+      "mean": 3.852793656733411e-05,
+      "median": 3.747648952412419e-05,
+      "std": 9.768846677028852e-06,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_p05",
+      "mean": 0.00012001389586657751,
+      "median": 0.00011416428242227994,
+      "std": 1.8745546237433907e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_p25",
+      "mean": 0.00027071692784375045,
+      "median": 0.00024624298384878784,
+      "std": 6.723538729565196e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_median",
+      "mean": 0.00045280282938620076,
+      "median": 0.00048448069719597697,
+      "std": 7.927320607938412e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_p75",
+      "mean": 0.000612238232861273,
+      "median": 0.0006096359866205603,
+      "std": 6.82267745416972e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_p95",
+      "mean": 0.0011553226795513183,
+      "median": 0.0007512050215154886,
+      "std": 0.0006305566182960305,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "raw_attention_max",
+      "mean": 0.01691755055799149,
+      "median": 0.01045691897161305,
+      "std": 0.017229357049850288,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_voxel_count",
+      "mean": 7842631.75,
+      "median": 5071420.5,
+      "std": 4620453.74096267,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_mean",
+      "mean": 0.506487037986517,
+      "median": 0.5079977512359619,
+      "std": 0.0050306799269184445,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_std",
+      "mean": 0.28574781492352486,
+      "median": 0.2854035347700119,
+      "std": 0.001886065698615408,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_min",
+      "mean": 2.513579318019765e-07,
+      "median": 0.0,
+      "std": 6.650305776115633e-07,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_p05",
+      "mean": 0.05109676253050566,
+      "median": 0.050799332559108734,
+      "std": 0.004367355616567491,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_p25",
+      "mean": 0.2627568505704403,
+      "median": 0.2627169191837311,
+      "std": 0.008024722356835013,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_median",
+      "mean": 0.5122542753815651,
+      "median": 0.5138134062290192,
+      "std": 0.005901434137106772,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_p75",
+      "mean": 0.7525281235575676,
+      "median": 0.7528904974460602,
+      "std": 0.0037203216640922746,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_p95",
+      "mean": 0.9462832510471344,
+      "median": 0.9477223753929138,
+      "std": 0.0061013568833819766,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "rank_attention_max",
+      "mean": 0.9999739602208138,
+      "median": 1.0,
+      "std": 6.642797563424037e-05,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_voxel_count",
+      "mean": 7842631.75,
+      "median": 5071420.5,
+      "std": 4620453.74096267,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_mean",
+      "mean": 0.04199066571891308,
+      "median": 0.0368723776191473,
+      "std": 0.010355080729165255,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_std",
+      "mean": 0.45763885229825974,
+      "median": 0.4574988931417465,
+      "std": 0.015678924418519754,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_min",
+      "mean": -0.9295836165547371,
+      "median": -0.9275705218315125,
+      "std": 0.01590173977477181,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_p05",
+      "mean": -0.721672385931015,
+      "median": -0.7241493463516235,
+      "std": 0.03087093914357529,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_p25",
+      "mean": -0.3542678914964199,
+      "median": -0.3372376561164856,
+      "std": 0.040050256009440094,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_median",
+      "mean": 0.10992763750255108,
+      "median": 0.1072135865688324,
+      "std": 0.061850499201139136,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_p75",
+      "mean": 0.41132789850234985,
+      "median": 0.40636835992336273,
+      "std": 0.04268501810321554,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_p95",
+      "mean": 0.7057552114129066,
+      "median": 0.7097533941268921,
+      "std": 0.03941969929929625,
+      "valid_case_count": 8
+    },
+    {
+      "summary_type": "region_stat",
+      "region": "TN",
+      "metric": "residual_max",
+      "mean": 0.9839665219187737,
+      "median": 0.986499696969986,
+      "std": 0.0052092012057174215,
+      "valid_case_count": 8
+    }
+  ],
+  "conclusions": {
+    "FN_vs_TN": {
+      "metric_scope": [
+        "full_voxel"
+      ],
+      "attention": {
+        "auroc": {
+          "mean": 0.33884412672776626,
+          "median": 0.3138466513159923,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 0
+        },
+        "auprc": {
+          "mean": 0.013320256439280902,
+          "median": 0.0070390910025247225,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 0
+        }
+      },
+      "R": {
+        "auroc": {
+          "mean": 0.15171992253911346,
+          "median": 0.13311121365905293,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 0
+        },
+        "auprc": {
+          "mean": 0.006008792353644638,
+          "median": 0.002798704051489967,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 0
+        }
+      },
+      "R_vs_attention_auroc": {
+        "mean_delta": -0.1871242041886528,
+        "R_better_case_count": 0,
+        "valid_case_count": 8
+      },
+      "R_vs_probability_auroc": {
+        "mean_delta": -0.8104721484429684,
+        "R_better_case_count": 0,
+        "valid_case_count": 8
+      },
+      "R_vs_attention_auprc": {
+        "mean_delta": -0.007311464085636265,
+        "R_better_case_count": 0,
+        "valid_case_count": 8
+      },
+      "R_vs_probability_auprc": {
+        "mean_delta": -0.28797849911553564,
+        "R_better_case_count": 0,
+        "valid_case_count": 8
+      }
+    },
+    "TP_vs_FP": {
+      "metric_scope": [
+        "full_voxel"
+      ],
+      "attention": {
+        "auroc": {
+          "mean": 0.5359086919854237,
+          "median": 0.5077963492330932,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 5
+        },
+        "auprc": {
+          "mean": 0.8616945672546714,
+          "median": 0.8759662381979602,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 8
+        }
+      },
+      "R": {
+        "auroc": {
+          "mean": 0.5078433863008822,
+          "median": 0.471016372006071,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 3
+        },
+        "auprc": {
+          "mean": 0.8468787729891393,
+          "median": 0.8630952276052721,
+          "valid_case_count": 8,
+          "greater_than_0_5_case_count": 8
+        }
+      },
+      "R_vs_attention_auroc": {
+        "mean_delta": -0.028065305684541464,
+        "R_better_case_count": 0,
+        "valid_case_count": 8
+      },
+      "R_vs_probability_auroc": {
+        "mean_delta": -0.30881596146202633,
+        "R_better_case_count": 1,
+        "valid_case_count": 8
+      },
+      "R_vs_attention_auprc": {
+        "mean_delta": -0.014815794265532214,
+        "R_better_case_count": 0,
+        "valid_case_count": 8
+      },
+      "R_vs_probability_auprc": {
+        "mean_delta": -0.09825489086679501,
+        "R_better_case_count": 1,
+        "valid_case_count": 8
+      }
+    },
+    "attention_probability_similarity": {
+      "pearson_mean": -0.001980990214089172,
+      "spearman_mean": -0.34772493380071323
+    },
+    "raw_attention_note": "raw attention 仅作病例内描述性统计，不解释为跨病例可直接比较的全局强度。",
+    "interpretation": "指标按病例汇总；R/attention/probability 的比较不由区域均值单独判定有效性。"
+  },
+  "notes": [
+    "D5 is model return list index 0 and final output; D1 is index 4.",
+    "D1-D4 semantics are patch-upsampled then sliding-window Gaussian-fused full-volume probabilities, not raw low-resolution maps.",
+    "Summary statistics are computed from per-case rows before case-level aggregation.",
+    "Crop-outside voxels are rejected if they contain GT foreground; crop-space statistics use gt_background_valid only."
+  ]
+}

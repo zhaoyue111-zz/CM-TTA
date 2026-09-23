@@ -158,7 +158,7 @@ class Sam3VideoPredictor:
             box_labels=bounding_box_labels,
             obj_id=obj_id,
         )
-        return {"frame_index": frame_idx, "outputs": outputs}
+        return {"frame_index": frame_idx, "outputs1": outputs}
 
     def remove_object(
         self,
@@ -208,7 +208,7 @@ class Sam3VideoPredictor:
                     max_frame_num_to_track=max_frame_num_to_track,
                     reverse=False,
                 ):
-                    yield {"frame_index": frame_idx, "outputs": outputs}
+                    yield {"frame_index": frame_idx, "outputs1": outputs}
             # Then doing the backward propagation (reverse in time)
             if propagation_direction in ["both", "backward"]:
                 for frame_idx, outputs in self.model.propagate_in_video(
@@ -217,7 +217,7 @@ class Sam3VideoPredictor:
                     max_frame_num_to_track=max_frame_num_to_track,
                     reverse=True,
                 ):
-                    yield {"frame_index": frame_idx, "outputs": outputs}
+                    yield {"frame_index": frame_idx, "outputs1": outputs}
         finally:
             # Log upon completion (so that e.g. we can see if two propagations happen in parallel).
             # Using `finally` here to log even when the tracking is aborted with GeneratorExit.

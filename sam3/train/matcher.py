@@ -70,7 +70,7 @@ class HungarianMatcher(nn.Module):
         """Performs the matching
 
         Params:
-            outputs: This is a dict that contains at least these entries:
+            outputs1: This is a dict that contains at least these entries:
                  "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
                  "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
 
@@ -204,7 +204,7 @@ class BinaryHungarianMatcher(nn.Module):
         """Performs the matching
 
         Params:
-            outputs: This is a dict that contains at least these entries:
+            outputs1: This is a dict that contains at least these entries:
                  "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
                  "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
 
@@ -329,7 +329,7 @@ class BinaryFocalHungarianMatcher(nn.Module):
         """Performs the matching
 
         Params:
-            outputs: This is a dict that contains at least these entries:
+            outputs1: This is a dict that contains at least these entries:
                  "pred_logits": Tensor of dim [batch_size, num_queries, num_classes] with the classification logits
                  "pred_boxes": Tensor of dim [batch_size, num_queries, 4] with the predicted box coordinates
 
@@ -489,12 +489,12 @@ class BinaryHungarianMatcherV2(nn.Module):
         target_is_valid_padded=None,
     ):
         """
-        Performs the matching. The inputs and outputs are the same as
+        Performs the matching. The inputs and outputs1 are the same as
         BinaryHungarianMatcher.forward, except for the optional cached_padded
         flag and the optional "_boxes_padded" entry of batched_targets.
 
         Inputs:
-        - outputs: A dict with the following keys:
+        - outputs1: A dict with the following keys:
             - "pred_logits": Tensor of shape (batch_size, num_queries, 1) with
                classification logits
             - "pred_boxes": Tensor of shape (batch_size, num_queries, 4) with
@@ -547,16 +547,16 @@ class BinaryHungarianMatcherV2(nn.Module):
             tgt_bbox = tgt_bbox[batch_keep]
             if target_is_valid_padded is not None:
                 target_is_valid_padded = target_is_valid_padded[batch_keep]
-        # Repeat the targets (for the case of batched aux outputs in the matcher)
+        # Repeat the targets (for the case of batched aux outputs1 in the matcher)
         if repeat_batch > 1:
             # In this case, out_prob and out_bbox will be a concatenation of
-            # both final and auxiliary outputs, so we also repeat the targets
+            # both final and auxiliary outputs1, so we also repeat the targets
             num_boxes = num_boxes.repeat(repeat_batch)
             tgt_bbox = tgt_bbox.repeat(repeat_batch, 1, 1)
             if target_is_valid_padded is not None:
                 target_is_valid_padded = target_is_valid_padded.repeat(repeat_batch, 1)
 
-        # keep only samples w/ at least 1 GT box in outputs
+        # keep only samples w/ at least 1 GT box in outputs1
         if self.remove_samples_with_0_gt:
             if repeat_batch > 1:
                 batch_keep = batch_keep.repeat(repeat_batch)
@@ -604,7 +604,7 @@ class BinaryHungarianMatcherV2(nn.Module):
             + self.cost_class * cost_class
             + self.cost_giou * cost_giou
         )
-        # assign a very high cost (1e9) to invalid outputs and targets, so that we can
+        # assign a very high cost (1e9) to invalid outputs1 and targets, so that we can
         # filter them out (in `_do_matching`) from bipartite matching results_
         do_filtering = out_is_valid is not None or target_is_valid_padded is not None
         if out_is_valid is not None:
@@ -708,11 +708,11 @@ class BinaryOneToManyMatcher(nn.Module):
         target_is_valid_padded=None,
     ):
         """
-        Performs the matching. The inputs and outputs are the same as
+        Performs the matching. The inputs and outputs1 are the same as
         BinaryHungarianMatcher.forward
 
         Inputs:
-        - outputs: A dict with the following keys:
+        - outputs1: A dict with the following keys:
             - "pred_logits": Tensor of shape (batch_size, num_queries, 1) with
                classification logits
             - "pred_boxes": Tensor of shape (batch_size, num_queries, 4) with

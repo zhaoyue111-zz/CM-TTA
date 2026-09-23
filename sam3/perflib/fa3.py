@@ -19,7 +19,7 @@ def flash_attn_func(q, k, v):
 
 @flash_attn_func_op.register_fake
 def _(q, k, v, **kwargs):
-    # two outputs:
+    # two outputs1:
     # 1. output: (batch, seq_len, num_heads, head_dim)
     # 2. softmax_lse: (batch, num_heads, seq_len) with dtype=torch.float32
     # output needs to be bfloat16, not float8!
