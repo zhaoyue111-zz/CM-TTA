@@ -227,51 +227,68 @@ def assert_same_embedding(reference: torch.Tensor, candidate: torch.Tensor) -> N
 
 
 @contextlib.contextmanager
-def fixed_embedding_for_selector(adapter: Any, embedding: torch.Tensor):
-    """Make the existing selector consume a pre-encoded embedding unchanged.
+def capture_model_text_embeddings(model: torch.nn.Module, expected: torch.Tensor):
+    """Capture the actual text tensor entering every model forward call."""
+    records: list[torch.Tensor] = []
 
-    ``VoxTellCMTTA._select_case_view`` normally receives a context delta and
-    encodes it internally. The diagnostic already owns the required fixed
-    ``short_ctx`` embedding, so temporarily redirect only this selector call
-    to that tensor. No model, parameter, optimizer, or training method is
-    changed.
-    """
-    original_encode = adapter._encode_ctx
+    def capture(_module, args):
+        if len(args) < 2 or args[1] is None:
+            raise AssertionError("VoxTell model forward did not receive text embedding")
+        actual = args[1]
+        if actual.ndim == 4 and actual.shape[2] == 1:
+            actual = actual.squeeze(2)
+        if actual.ndim != 3:
+            raise AssertionError(f"unexpected model text embedding shape: {tuple(actual.shape)}")
+        expected_device = expected.to(device=actual.device, dtype=actual.dtype)
+        expected_batch = expected_device.expand(actual.shape[0], -1, -1)
+        if actual.shape != expected_batch.shape:
+            raise AssertionError(
+                f"model text embedding shape mismatch: {tuple(actual.shape)} vs {tuple(expected_batch.shape)}"
+            )
+        if actual.dtype != expected_batch.dtype or actual.device != expected_batch.device:
+            raise AssertionError("model text embedding dtype/device mismatch")
+        if not torch.equal(actual, expected_batch):
+            raise AssertionError("model received a text embedding different from diagnostic short_ctx")
+        records.append(actual.detach().clone())
 
-    def return_fixed(_ctx_delta: torch.Tensor) -> torch.Tensor:
-        assert_same_embedding(embedding, embedding)
-        return embedding
-
-    adapter._encode_ctx = return_fixed
+    handle = model.register_forward_pre_hook(capture)
     try:
-        yield
+        yield records
     finally:
-        adapter._encode_ctx = original_encode
+        handle.remove()
 
 
-def selected_view_from_tdc(tdc_scores: Sequence[float]) -> tuple[int, list[int]]:
+def selected_view_from_tdc(tdc_scores: Sequence[float]) -> tuple[int, list[float]]:
+    """Return the original selector's stable winner and average-tie ranks."""
+    from method.voxtell_cmtta import _average_tie_rank_1d
+
     scores = np.asarray(tdc_scores, dtype=np.float64)
     if scores.ndim != 1 or scores.size == 0 or not np.all(np.isfinite(scores)):
         raise AssertionError(f"TDC scores must be a non-empty finite vector, got {scores}")
-    expected = int(np.argmax(scores))
-    order = np.argsort(-scores, kind="stable")
-    ranks = np.empty(scores.size, dtype=np.int64)
-    ranks[order] = np.arange(scores.size, dtype=np.int64)
+    torch_scores = torch.as_tensor(scores, dtype=torch.float32)
+    ranks = _average_tie_rank_1d(torch_scores, descending=True).detach().cpu().numpy().astype(np.float64)
+    best_rank = float(np.min(ranks))
+    # The real selector uses stable argsort on these ranks. Selecting the first
+    # equal minimum preserves that exact tie-break without constructing ranks
+    # locally or changing the original selector's behavior.
+    expected = int(np.flatnonzero(np.isclose(ranks, best_rank, rtol=0.0, atol=0.0))[0])
     return expected, ranks.tolist()
 
 
-def _metric_samples(
+def sample_metric_indices(
     y_true: np.ndarray,
-    score: np.ndarray,
+    finite_mask: np.ndarray | None = None,
     max_negative_voxels: int | None = None,
     seed: int = 20260923,
-) -> tuple[np.ndarray, np.ndarray, dict[str, int | bool]]:
+) -> tuple[np.ndarray, dict[str, int | bool]]:
     y_true = np.asarray(y_true, dtype=bool)
-    score = np.asarray(score, dtype=np.float32)
-    finite = np.isfinite(score)
-    y_true, score = y_true[finite], score[finite]
-    positive = np.flatnonzero(y_true)
-    negative = np.flatnonzero(~y_true)
+    finite = np.ones(y_true.shape, dtype=bool) if finite_mask is None else np.asarray(finite_mask, dtype=bool)
+    if finite.shape != y_true.shape:
+        raise ValueError(f"finite mask shape mismatch: {finite.shape} vs {y_true.shape}")
+    original_indices = np.flatnonzero(finite)
+    labels = y_true[finite]
+    positive = np.flatnonzero(labels)
+    negative = np.flatnonzero(~labels)
     metadata: dict[str, int | bool] = {
         "raw_positive_count": int(positive.size),
         "raw_negative_count": int(negative.size),
@@ -283,14 +300,51 @@ def _metric_samples(
         if negative.size > int(max_negative_voxels):
             rng = np.random.default_rng(int(seed))
             negative = np.sort(rng.choice(negative, size=int(max_negative_voxels), replace=False))
-    selected = np.concatenate((positive, negative))
+    selected = original_indices[np.concatenate((positive, negative))]
     metadata.update({
         "actual_positive_count": int(positive.size),
         "actual_negative_count": int(negative.size),
         "actual_sample_count": int(selected.size),
         "negative_sampled": bool(negative.size < metadata["raw_negative_count"]),
     })
-    return y_true[selected], score[selected], metadata
+    return selected.astype(np.int64, copy=False), metadata
+
+
+def _metric_samples(
+    y_true: np.ndarray,
+    score: np.ndarray,
+    max_negative_voxels: int | None = None,
+    seed: int = 20260923,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int | bool]]:
+    """Compatibility helper returning one sampled label/score pair."""
+    score = np.asarray(score, dtype=np.float32)
+    indices, metadata = sample_metric_indices(
+        y_true, np.isfinite(score), max_negative_voxels=max_negative_voxels, seed=seed
+    )
+    return np.asarray(y_true, dtype=bool)[indices], score[indices], metadata
+
+
+def sample_metric_scores(
+    y_true: np.ndarray,
+    score_maps: Mapping[str, np.ndarray],
+    max_negative_voxels: int | None = None,
+    seed: int = 20260923,
+) -> tuple[dict[str, tuple[np.ndarray, np.ndarray]], dict[str, int | bool]]:
+    """Sample one task once and apply identical indices to every score."""
+    labels = np.asarray(y_true, dtype=bool)
+    finite = np.ones(labels.shape, dtype=bool)
+    arrays: dict[str, np.ndarray] = {}
+    for name, score in score_maps.items():
+        arrays[name] = np.asarray(score, dtype=np.float32)
+        if arrays[name].shape != labels.shape:
+            raise ValueError(f"score shape mismatch for {name}: {arrays[name].shape} vs {labels.shape}")
+        finite &= np.isfinite(arrays[name])
+    indices, metadata = sample_metric_indices(
+        labels, finite, max_negative_voxels=max_negative_voxels, seed=seed
+    )
+    return {
+        name: (labels[indices], score[indices]) for name, score in arrays.items()
+    }, metadata
 
 
 def safe_auc_pr(
@@ -400,7 +454,6 @@ def compute_case_metrics(
     # retained for descriptive region statistics only and is not interpreted
     # as a cross-case comparable global intensity.
     score_for_metrics = {"attention": rank_attention, "probability": probability, "R": residual}
-    sampling_metadata: dict[str, dict[str, int | bool]] = {}
     for group_name, positive_region, negative_region in (
         ("background_FN_TN", "FN", "TN"),
         ("foreground_TP_FP", "TP", "FP"),
@@ -408,28 +461,35 @@ def compute_case_metrics(
     ):
         selection = regions[positive_region] | regions[negative_region]
         labels = regions[positive_region][selection]
-        for score_name, score_map in score_for_metrics.items():
-            auc, ap = safe_auc_pr(
-                labels,
-                score_map[selection],
-                max_negative_voxels=metric_max_negative_voxels,
-                seed=balanced_seed + sum(ord(char) for char in f"{group_name}:{score_name}"),
-            )
+        task_scores = {score_name: score_map[selection] for score_name, score_map in score_for_metrics.items()}
+        sampled_scores, sample_metadata = sample_metric_scores(
+            labels,
+            task_scores,
+            max_negative_voxels=metric_max_negative_voxels,
+            seed=balanced_seed,
+        )
+        scope = "sampled" if bool(sample_metadata["negative_sampled"]) else "full_voxel"
+        for score_name, (sampled_labels, sampled_score) in sampled_scores.items():
+            if sampled_labels.size == 0 or np.unique(sampled_labels).size < 2:
+                auc, ap = float("nan"), float("nan")
+            else:
+                try:
+                    auc = float(roc_auc_score(sampled_labels, sampled_score))
+                    ap = float(average_precision_score(sampled_labels, sampled_score))
+                except ValueError:
+                    auc, ap = float("nan"), float("nan")
             metrics[f"{group_name}_{score_name}_auroc"] = auc
             metrics[f"{group_name}_{score_name}_auprc"] = ap
-            _, _, sample_metadata = _metric_samples(
-                labels,
-                score_map[selection],
-                max_negative_voxels=metric_max_negative_voxels,
-                seed=balanced_seed + sum(ord(char) for char in f"{group_name}:{score_name}"),
-            )
-            sampling_metadata[f"{group_name}_{score_name}"] = sample_metadata
-            for field, value in sample_metadata.items():
-                metrics[f"{group_name}_{score_name}_{field}"] = value
+            metrics[f"{group_name}_{score_name}_auroc_{scope}"] = auc
+            metrics[f"{group_name}_{score_name}_auprc_{scope}"] = ap
+        for field, value in sample_metadata.items():
+            metrics[f"{group_name}_{field}"] = value
+        metrics[f"{group_name}_metric_scope"] = scope
+        metrics[f"{group_name}_sample_seed"] = int(balanced_seed)
     metrics["metric_max_negative_voxels"] = (
         "" if metric_max_negative_voxels is None else int(metric_max_negative_voxels)
     )
-    metrics["metric_negative_sampling"] = "negative_only" if metric_max_negative_voxels is not None else "none"
+    metrics["metric_negative_sampling"] = "requested_negative_cap" if metric_max_negative_voxels is not None else "none"
     metrics["metric_sampling_seed"] = int(balanced_seed)
     return rows, metrics, {"probability": probability, "raw_attention": raw_attention, "rank_attention": rank_attention, "residual": residual, **regions}
 
@@ -611,7 +671,9 @@ def _conclusions(metrics_rows: Sequence[Mapping[str, Any]], region_rows: Sequenc
         }
 
     def group_summary(group: str) -> dict[str, Any]:
-        result: dict[str, Any] = {}
+        result: dict[str, Any] = {
+            "metric_scope": sorted({str(row.get(f"{group}_metric_scope", "unknown")) for row in metrics_rows})
+        }
         for score in ("attention", "R"):
             result[score] = {
                 "auroc": metric_summary(group, score, "auroc"),
@@ -737,10 +799,11 @@ def run(args: argparse.Namespace) -> int:
         patches, valid_masks, _locations, crop_shape = make_case_patches(data, predictor.patch_size)
         params = adapter._sample_intensity_params(args.num_aug_views)
         short_ctx = adapter._encode_ctx(adapter.ctx_delta.detach()).detach()
-        with fixed_embedding_for_selector(adapter, short_ctx):
+        with capture_model_text_embeddings(predictor.network, short_ctx) as embedding_records:
             selected_view, _ = adapter._select_case_view(
-                patches, params, short_ctx, valid_masks, collect_tdc=True
+                patches, params, adapter.ctx_delta.detach(), valid_masks, collect_tdc=True
             )
+            selector_embedding_count = len(embedding_records)
         if not torch.equal(adapter.ctx_delta.detach(), ctx_snapshot):
             raise AssertionError("offline diagnostic changed ctx_delta")
         selection = dict(adapter.last_view_selection)
@@ -751,19 +814,23 @@ def run(args: argparse.Namespace) -> int:
                 f"TDC selection mismatch for {case}: selected={selected_view}, "
                 f"argmax_tdc={expected_view}, scores={tdc_scores}"
             )
-        if selection.get("tdc_rank") is not None and list(selection["tdc_rank"]) != tdc_ranks:
+        if selection.get("tdc_rank") is not None and not np.allclose(
+            np.asarray(selection["tdc_rank"], dtype=np.float64),
+            np.asarray(tdc_ranks, dtype=np.float64),
+            rtol=1e-6,
+            atol=1e-7,
+        ):
             raise AssertionError(
                 f"TDC rank mismatch for {case}: selector={selection['tdc_rank']}, expected={tdc_ranks}"
             )
         view_rows.extend({
             "case": case, "prompt": args.prompt, "view": view, "tdc_score": float(score),
-            "tdc_rank": int(tdc_ranks[view]), "selected_view": int(selected_view),
+            "tdc_rank": float(tdc_ranks[view]), "selected_view": int(selected_view),
             "scale": float(params[view]["scale"]), "offset": float(params[view]["offset"]),
         } for view, score in enumerate(tdc_scores))
         selected_param = params[selected_view]
         selected_data = apply_intensity_view(data.float(), selected_param)
         diagnostic_embedding = short_ctx
-        assert_same_embedding(short_ctx, diagnostic_embedding)
         # Crop space has no predictor padding. The only valid mask is therefore
         # all crop voxels; predictor padding is removed by its public API.
         full_valid_mask = predictor.get_last_valid_inference_mask()
@@ -771,10 +838,13 @@ def run(args: argparse.Namespace) -> int:
         valid_mask = full_valid_mask[crop_slices].astype(bool, copy=False)
         if valid_mask.shape != tuple(int(v) for v in crop_shape) or not np.all(valid_mask):
             raise AssertionError("predictor valid inference mask does not exactly cover the preprocessed crop")
-        with AttentionCapture(predictor.network) as capture:
-            returned_logits = predictor.predict_sliding_window_return_logits(
-                selected_data, diagnostic_embedding, return_all_layers=True
-            )
+        with capture_model_text_embeddings(predictor.network, short_ctx) as embedding_records:
+            with AttentionCapture(predictor.network) as capture:
+                returned_logits = predictor.predict_sliding_window_return_logits(
+                    selected_data, diagnostic_embedding, return_all_layers=True
+                )
+        if selector_embedding_count < 1 or len(embedding_records) < 1:
+            raise AssertionError("TDC selector or diagnostic prediction did not reach the model")
         if not isinstance(returned_logits, (list, tuple)) or len(returned_logits) != DECODER_COUNT:
             raise AssertionError("return_all_layers=True must return five decoder outputs")
         d5_logits = returned_logits[0][0].detach().float().cpu()
@@ -831,6 +901,8 @@ def run(args: argparse.Namespace) -> int:
             "decoder_metadata_json": json.dumps(metadata), "decoder_semantics_json": json.dumps(decoder_semantics),
             "view_count": len(params), "tdc_scores_json": json.dumps(tdc_scores),
             "tdc_ranks_json": json.dumps(tdc_ranks), "view_params_json": json.dumps(params),
+            "tdc_embedding_forward_count": selector_embedding_count,
+            "diagnostic_embedding_forward_count": len(embedding_records),
         })
         for row in rows:
             row.update({
@@ -842,6 +914,8 @@ def run(args: argparse.Namespace) -> int:
                 "decoder_metadata_json": json.dumps(metadata), "decoder_semantics_json": json.dumps(decoder_semantics),
                 "view_count": len(params), "tdc_scores_json": json.dumps(tdc_scores),
                 "tdc_ranks_json": json.dumps(tdc_ranks), "view_params_json": json.dumps(params),
+                "tdc_embedding_forward_count": selector_embedding_count,
+                "diagnostic_embedding_forward_count": len(embedding_records),
             })
         region_rows.extend(rows)
         metric_rows.append(metrics)

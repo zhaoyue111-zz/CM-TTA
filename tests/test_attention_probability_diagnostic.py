@@ -12,17 +12,18 @@ from attention_probability_diagnostic import (
     assert_same_embedding,
     attention_tokens_to_3d,
     balanced_indices,
+    capture_model_text_embeddings,
     compute_case_metrics,
     confusion_regions,
     crop_gt_to_inference_region,
-    fixed_embedding_for_selector,
     inverse_view_map,
     parse_args,
     percentile_rank,
     resolve_label_value,
     safe_auc_pr,
+    sample_metric_indices,
+    sample_metric_scores,
     selected_view_from_tdc,
-    _metric_samples,
 )
 
 
@@ -30,7 +31,13 @@ class AttentionProbabilityDiagnosticTest(unittest.TestCase):
     def test_tdc_only_selection_is_descending_argmax_and_entropy_is_not_a_cli_option(self):
         selected, ranks = selected_view_from_tdc([0.2, 0.8, 0.4])
         self.assertEqual(selected, 1)
-        self.assertEqual(ranks, [2, 0, 1])
+        np.testing.assert_allclose(ranks, [2.0, 0.0, 1.0])
+        selected, ranks = selected_view_from_tdc([0.8, 0.8, 0.2])
+        self.assertEqual(selected, 0)
+        np.testing.assert_allclose(ranks, [0.5, 0.5, 2.0])
+        selected, ranks = selected_view_from_tdc([0.8, 0.8, 0.8])
+        self.assertEqual(selected, 0)
+        np.testing.assert_allclose(ranks, [1.0, 1.0, 1.0])
         args = parse_args([
             "--data-dir", "/tmp/data", "--model-dir", "/tmp/model",
             "--text-model", "/tmp/text", "--output-dir", "/tmp/out",
@@ -44,15 +51,18 @@ class AttentionProbabilityDiagnosticTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_same_embedding(embedding, embedding + 1.0)
 
-        class Adapter:
-            def _encode_ctx(self, value):
-                return value + 1.0
+        class Toy(torch.nn.Module):
+            def forward(self, image, text_embedding):
+                return image, text_embedding
 
-        adapter = Adapter()
-        original = adapter._encode_ctx
-        with fixed_embedding_for_selector(adapter, embedding):
-            self.assertIs(adapter._encode_ctx(torch.zeros_like(embedding)), embedding)
-        self.assertIs(adapter._encode_ctx.__func__, original.__func__)
+        model = Toy()
+        with capture_model_text_embeddings(model, embedding) as records:
+            model(torch.zeros(1, 1), embedding)
+        self.assertEqual(len(records), 1)
+        with self.assertRaises(AssertionError):
+            with capture_model_text_embeddings(model, embedding):
+                model(torch.zeros(1, 1), embedding + 1.0)
+        self.assertEqual(len(model._forward_pre_hooks), 0)
 
     def test_attention_tokens_restore_voxtell_hwd_order(self):
         tokens = np.arange(2 * 3 * 4, dtype=np.float32)
@@ -125,14 +135,32 @@ class AttentionProbabilityDiagnosticTest(unittest.TestCase):
 
     def test_negative_metric_sampling_is_fixed_and_records_counts(self):
         labels = np.array([True, False, False, False, False, False])
-        score = np.array([0.9, 0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32)
-        first = _metric_samples(labels, score, max_negative_voxels=2, seed=7)
-        second = _metric_samples(labels, score, max_negative_voxels=2, seed=7)
-        np.testing.assert_array_equal(first[0], second[0])
-        np.testing.assert_array_equal(first[1], second[1])
-        self.assertEqual(first[2]["raw_negative_count"], 5)
-        self.assertEqual(first[2]["actual_negative_count"], 2)
-        self.assertTrue(first[2]["negative_sampled"])
+        attention = np.array([0.9, 0.1, 0.2, 0.3, 0.4, 0.5], dtype=np.float32)
+        probability = np.array([0.8, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=np.float32)
+        residual = np.array([0.7, 0.3, 0.4, 0.5, 0.6, 0.8], dtype=np.float32)
+        first, metadata = sample_metric_scores(
+            labels, {"attention": attention, "probability": probability, "R": residual}, max_negative_voxels=2, seed=7
+        )
+        second, _ = sample_metric_scores(
+            labels, {"attention": attention, "probability": probability, "R": residual}, max_negative_voxels=2, seed=7
+        )
+        different, _ = sample_metric_indices(labels, max_negative_voxels=2, seed=8)
+        np.testing.assert_array_equal(first["attention"][0], first["probability"][0])
+        attention_indices = np.asarray([int(np.flatnonzero(attention == value)[0]) for value in first["attention"][1]])
+        probability_indices = np.asarray([int(np.flatnonzero(probability == value)[0]) for value in first["probability"][1]])
+        np.testing.assert_array_equal(attention_indices, probability_indices)
+        residual_indices = np.asarray([int(np.flatnonzero(residual == value)[0]) for value in first["R"][1]])
+        np.testing.assert_array_equal(attention_indices, residual_indices)
+        np.testing.assert_array_equal(first["attention"][0], second["attention"][0])
+        self.assertFalse(np.array_equal(first["attention"][1], attention[different]))
+        self.assertEqual(metadata["raw_negative_count"], 5)
+        self.assertEqual(metadata["actual_negative_count"], 2)
+        self.assertTrue(metadata["negative_sampled"])
+        full, full_metadata = sample_metric_scores(labels, {"attention": attention}, seed=7)
+        np.testing.assert_array_equal(full["attention"][0], labels)
+        np.testing.assert_array_equal(full["attention"][1], attention)
+        self.assertFalse(full_metadata["negative_sampled"])
+        self.assertEqual(safe_auc_pr(labels, attention), safe_auc_pr(labels, attention, max_negative_voxels=None))
         auc, ap = safe_auc_pr(np.array([], dtype=bool), np.array([], dtype=np.float32))
         self.assertTrue(np.isnan(auc))
         self.assertTrue(np.isnan(ap))
