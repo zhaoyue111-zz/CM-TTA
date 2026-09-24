@@ -209,7 +209,57 @@ def macro_average_case_metrics(
             }
             for name in case_rows[0]["tdc_sliding_differences"]
         }
+    gradient_summary = summarize_gradient_conflict_diagnostics(case_rows)
+    if gradient_summary["enabled_case_count"]:
+        result["gradient_conflict_diagnostics"] = gradient_summary
     return result
+
+
+def summarize_gradient_conflict_diagnostics(
+    case_rows: list[dict[str, object]],
+) -> dict[str, object]:
+    """Summarize enabled original-path gradient conflict diagnostics."""
+    cosine_fields = (
+        "cos_pseudo_entropy",
+        "cos_pseudo_cac",
+        "cos_entropy_cac",
+    )
+    conflict_fields = (
+        "pseudo_entropy_conflict",
+        "pseudo_cac_conflict",
+    )
+    diagnostics = []
+    for row in case_rows:
+        value = row.get("gradient_conflict_diagnostics")
+        if isinstance(value, dict) and value.get("enabled"):
+            diagnostics.append(value)
+    summary: dict[str, object] = {
+        "enabled_case_count": len(diagnostics),
+        "valid_case_count": sum(
+            all(diag.get(field) is not None for field in cosine_fields)
+            for diag in diagnostics
+        ),
+        "average_cosine": {},
+        "valid_cosine_case_count": {},
+        "conflict_case_count": {},
+    }
+    for field in cosine_fields:
+        values = [
+            float(diag[field])
+            for diag in diagnostics
+            if diag.get(field) is not None and np.isfinite(float(diag[field]))
+        ]
+        summary["average_cosine"][field] = (
+            float(np.mean(values)) if values else None
+        )
+        summary["valid_cosine_case_count"][field] = len(values)
+        # Keep a flat alias for simple downstream CSV/JSON consumers.
+        summary[f"mean_{field}"] = summary["average_cosine"][field]
+    for field in conflict_fields:
+        summary["conflict_case_count"][field] = sum(
+            diag.get(field) is True for diag in diagnostics
+        )
+    return summary
 
 
 def save_prediction_nifti(prediction: np.ndarray, image_path: Path, output_path: Path) -> None:
@@ -717,6 +767,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w_cac", type=float, default=1.0)
     parser.add_argument("--w_entropy", type=float, default=0.1)
     parser.add_argument(
+        "--gradient_conflict_diagnostics",
+        action="store_true",
+        help=(
+            "Recompute original-path pseudo/entropy/CAC ctx gradients for diagnostics "
+            "without changing adaptation."
+        ),
+    )
+    parser.add_argument(
         "--pseudo_update_mode",
         choices=("original", "decoder_masked"),
         default="original",
@@ -1035,7 +1093,23 @@ def main() -> None:
             # well as in the checkpoint history, including mask statistics and
             # the replacement BCE/Tversky terms when enabled.
             row["adaptation_trace"] = trace
+            if "gradient_conflict_diagnostics" in trace:
+                row["gradient_conflict_diagnostics"] = trace[
+                    "gradient_conflict_diagnostics"
+                ]
             case_rows.append(row)
+            if "gradient_conflict_diagnostics" in trace:
+                diagnostic = trace["gradient_conflict_diagnostics"]
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    "gradient_conflict="
+                    f"cos_pe={diagnostic['cos_pseudo_entropy']} "
+                    f"cos_pc={diagnostic['cos_pseudo_cac']} "
+                    f"norms=({diagnostic['pseudo_gradient_norm']},"
+                    f"{diagnostic['entropy_gradient_norm']},"
+                    f"{diagnostic['cac_gradient_norm']}) "
+                    f"reconstruction_error={diagnostic['gradient_reconstruction_relative_error']}"
+                )
             if args.view_selection_metric == "tdc":
                 print(
                     f"case {case_index}/{len(entries)} {image_path.name} "
@@ -1177,6 +1251,15 @@ def main() -> None:
             f"post_sel-pre_sel={macro_differences['post_selected_minus_pre_selected']['Dice']:.4f} "
             f"post_orig-pre_orig={macro_differences['post_original_minus_pre_original']['Dice']:.4f} "
             f"post_sel-post_orig={macro_differences['post_selected_minus_post_original']['Dice']:.4f}"
+        )
+    if "gradient_conflict_diagnostics" in average:
+        print(
+            "Gradient-conflict summary: "
+            f"valid_cases={average['gradient_conflict_diagnostics']['valid_case_count']} "
+            f"cos_pe={average['gradient_conflict_diagnostics']['mean_cos_pseudo_entropy']} "
+            f"cos_pc={average['gradient_conflict_diagnostics']['mean_cos_pseudo_cac']} "
+            f"cos_ec={average['gradient_conflict_diagnostics']['mean_cos_entropy_cac']} "
+            f"conflicts={average['gradient_conflict_diagnostics']['conflict_case_count']}"
         )
     (output_dir / "results.json").write_text(
         json.dumps(output, indent=2, ensure_ascii=False),

@@ -43,6 +43,7 @@ from run_voxtell_cmtta import (
     save_prediction_nifti,
     selected_view_data,
     selector_only_case_report,
+    summarize_gradient_conflict_diagnostics,
     summarize_selector_only,
     zero_shot_diagnostic_fields,
 )
@@ -660,6 +661,146 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertNotIn("weighted_amb_loss", trace)
         finally:
             adapter.close()
+
+    def test_gradient_conflict_diagnostics_is_disabled_by_default(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(), torch.zeros(1, 1, 2), "cpu", make_args()
+        )
+        try:
+            self.assertFalse(adapter.gradient_conflict_diagnostics)
+            trace = adapter.adapt_case([torch.zeros(1, 1, 1, 2)])
+            self.assertNotIn("gradient_conflict_diagnostics", trace)
+        finally:
+            adapter.close()
+
+    def test_gradient_conflict_diagnostics_does_not_change_update(self):
+        torch.manual_seed(17)
+        base_model = TinyVoxTell()
+        patches = [
+            torch.tensor([[[[-1.0, -0.2], [0.3, 0.8]], [[0.1, -0.4], [0.6, -0.7]]]])
+        ]
+        valid = [torch.ones(2, 2, 2)]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+        ]
+
+        def build(enabled):
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    num_aug_views=1,
+                    w_entropy=0.1,
+                    w_cac=0.25,
+                    gradient_conflict_diagnostics=enabled,
+                ),
+            )
+
+        def prepared(adapter):
+            short = adapter.ctx.detach().clone()
+            return {
+                "patches": [patch.clone() for patch in patches],
+                "valid_masks": [mask.clone() for mask in valid],
+                "params": copy.deepcopy(params),
+                "short_ctx": short,
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "current_cac": 0.0,
+                "historical_cac": 0.0,
+                "weight_historical": 0.0,
+                "long_ctx": short.clone(),
+            }
+
+        disabled = build(False)
+        enabled = build(True)
+        try:
+            trace_disabled = disabled.adapt_case(
+                patches, valid, prepared_case=prepared(disabled)
+            )
+            trace_enabled = enabled.adapt_case(
+                patches, valid, prepared_case=prepared(enabled)
+            )
+            self.assertTrue(torch.equal(disabled.ctx.detach(), enabled.ctx.detach()))
+            self.assertEqual(
+                disabled.optimizer_step_count, enabled.optimizer_step_count
+            )
+            self.assertEqual(trace_disabled["selected_view"], trace_enabled["selected_view"])
+            self.assertAlmostEqual(trace_disabled["loss"], trace_enabled["loss"], places=7)
+            diagnostic = trace_enabled["gradient_conflict_diagnostics"]
+            self.assertTrue(diagnostic["enabled"])
+            self.assertIsNotNone(diagnostic["gradient_reconstruction_relative_error"])
+            self.assertLess(
+                diagnostic["gradient_reconstruction_relative_error"], 1e-6
+            )
+        finally:
+            disabled.close()
+            enabled.close()
+
+    def test_gradient_conflict_cosine_and_zero_gradient_are_safe(self):
+        same = torch.tensor([1.0, 2.0])
+        opposite = -same
+        zero = torch.zeros_like(same)
+        same_cosine = VoxTellCMTTA._gradient_cosine(same, same)
+        opposite_cosine = VoxTellCMTTA._gradient_cosine(same, opposite)
+        self.assertAlmostEqual(same_cosine, 1.0)
+        self.assertAlmostEqual(opposite_cosine, -1.0)
+        self.assertFalse(same_cosine < 0.0)
+        self.assertTrue(opposite_cosine < 0.0)
+        self.assertIsNone(VoxTellCMTTA._gradient_cosine(same, zero))
+
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                num_aug_views=1,
+                w_entropy=0.0,
+                w_cac=0.0,
+                gradient_conflict_diagnostics=True,
+            ),
+        )
+        try:
+            trace = adapter.adapt_case(
+                [torch.tensor([[[[-1.0, 0.5], [0.4, -0.7]], [[0.1, 0.2], [-0.3, 0.8]]]])]
+            )
+            diagnostic = trace["gradient_conflict_diagnostics"]
+            self.assertIsNone(diagnostic["cos_pseudo_entropy"])
+            self.assertIsNone(diagnostic["cos_pseudo_cac"])
+            self.assertIsNone(diagnostic["cos_entropy_cac"])
+            self.assertTrue(np.isfinite(diagnostic["pseudo_gradient_norm"]))
+        finally:
+            adapter.close()
+
+    def test_gradient_conflict_summary_reports_valid_and_conflicting_cases(self):
+        rows = [
+            {
+                "gradient_conflict_diagnostics": {
+                    "enabled": True,
+                    "cos_pseudo_entropy": 0.5,
+                    "cos_pseudo_cac": -0.2,
+                    "cos_entropy_cac": 0.1,
+                    "pseudo_entropy_conflict": False,
+                    "pseudo_cac_conflict": True,
+                }
+            },
+            {
+                "gradient_conflict_diagnostics": {
+                    "enabled": True,
+                    "cos_pseudo_entropy": None,
+                    "cos_pseudo_cac": 0.4,
+                    "cos_entropy_cac": None,
+                    "pseudo_entropy_conflict": None,
+                    "pseudo_cac_conflict": False,
+                }
+            },
+        ]
+        summary = summarize_gradient_conflict_diagnostics(rows)
+        self.assertEqual(summary["enabled_case_count"], 2)
+        self.assertEqual(summary["valid_case_count"], 1)
+        self.assertEqual(summary["conflict_case_count"]["pseudo_cac_conflict"], 1)
+        self.assertAlmostEqual(summary["mean_cos_pseudo_cac"], 0.1)
 
     def test_masked_balanced_bce_gives_equal_fg_bg_weight(self):
         fg_sum = torch.tensor(4.0, requires_grad=True)

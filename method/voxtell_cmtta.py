@@ -791,6 +791,9 @@ class VoxTellCMTTA:
         self.tversky_beta = float(getattr(args, "tversky_beta", 0.7))
         self.tversky_weight = float(getattr(args, "tversky_weight", 1.0))
         self.amb_weight = float(getattr(args, "amb_weight", 0.05))
+        self.gradient_conflict_diagnostics = bool(
+            getattr(args, "gradient_conflict_diagnostics", False)
+        )
         # Optional validation only.  It performs one additional ordinary
         # forward beside the decoder-output forward and is therefore off by
         # default for the normal low-memory adaptation path.
@@ -857,6 +860,7 @@ class VoxTellCMTTA:
         self.last_view_selection = {}
         self._last_pseudo_diagnostics = {}
         self._last_decoder_pseudo_cache = None
+        self._last_gradient_conflict_diagnostics = None
         self._print_trainable_parameters()
 
     def reset_case_adaptation_state(self) -> None:
@@ -871,6 +875,7 @@ class VoxTellCMTTA:
         self.optimizer_step_count = 0
         self.last_trace = {}
         self.last_view_selection = {}
+        self._last_gradient_conflict_diagnostics = None
 
     def _capture(self, name):
         def hook(_module, _inputs, output):
@@ -2199,6 +2204,338 @@ class VoxTellCMTTA:
         )
         return float(pseudo_loss.detach().cpu()), float(global_entropy.detach().cpu())
 
+    @staticmethod
+    def _gradient_cosine(
+        left: torch.Tensor, right: torch.Tensor
+    ) -> Optional[float]:
+        """Return a finite cosine, or ``None`` for an undefined pair."""
+        left = left.detach().float().reshape(-1)
+        right = right.detach().float().reshape(-1)
+        if left.numel() == 0 or right.numel() != left.numel():
+            return None
+        if not torch.isfinite(left).all() or not torch.isfinite(right).all():
+            return None
+        left_norm = torch.linalg.vector_norm(left)
+        right_norm = torch.linalg.vector_norm(right)
+        if not torch.isfinite(left_norm) or not torch.isfinite(right_norm):
+            return None
+        if float(left_norm) == 0.0 or float(right_norm) == 0.0:
+            return None
+        cosine = torch.dot(left, right) / (left_norm * right_norm)
+        if not torch.isfinite(cosine):
+            return None
+        return float(cosine.cpu())
+
+    def _gradient_conflict_diagnostics_original(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        params: list[dict[str, float]],
+        selected_view: int,
+        short_ctx_value: torch.Tensor,
+        short_current_weight: float,
+        long_ctx: torch.Tensor,
+        autocast_enabled: bool,
+        actual_total_gradient: torch.Tensor,
+        scale: float,
+    ) -> dict[str, object]:
+        """Recompute original-path component gradients without changing TTA.
+
+        The normal adaptation replay has already produced the actual scaled
+        total gradient.  This diagnostic repeats the same detached
+        case-statistics reduction and low-memory patch replay with
+        ``autograd.grad``.  Each replay gradient is obtained from
+        ``scaler.scale(objective)`` and divided by the same scale, which is
+        the non-mutating equivalent of GradScaler unscale for this observer.
+        No optimizer, model weight, or parameter ``.grad`` is modified.
+        """
+        if self.pseudo_update_mode != "original":
+            raise RuntimeError(
+                "Gradient conflict diagnostics are implemented only for original pseudo-update"
+            )
+        if scale <= 0.0 or not np.isfinite(scale):
+            raise RuntimeError(f"Invalid GradScaler scale for diagnostics: {scale}")
+
+        # Preserve every mutable observation point touched by a forward.  In
+        # particular, restoring RNG state makes the diagnostic an exact
+        # side-channel operation even if a future frozen model introduces stochastic
+        # evaluation behavior.
+        cpu_rng_state = torch.random.get_rng_state()
+        cuda_rng_state = (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        )
+        saved_gradients = []
+        for module in (self.model, self.qwen_text_encoder):
+            if module is None:
+                continue
+            for parameter in module.parameters():
+                saved_gradients.append(
+                    (parameter, None if parameter.grad is None else parameter.grad.detach().clone())
+                )
+        saved_ctx_gradient = (
+            None
+            if self.ctx_delta.grad is None
+            else self.ctx_delta.grad.detach().clone()
+        )
+        saved_ctx_value = self.ctx_delta.detach().clone()
+        saved_vision_features = self._vision_features
+        saved_text_features = self._text_features
+
+        zero = torch.zeros_like(self.ctx_delta, dtype=torch.float32)
+
+        def scaled_autograd_gradient(
+            objective: Optional[torch.Tensor], retain_graph: bool = False
+        ) -> torch.Tensor:
+            if objective is None or not objective.requires_grad:
+                return zero.clone()
+            scaled_objective = self.scaler.scale(objective)
+            gradient = torch.autograd.grad(
+                scaled_objective,
+                self.ctx_delta,
+                retain_graph=retain_graph,
+                allow_unused=True,
+            )[0]
+            if gradient is None:
+                return zero.clone()
+            return gradient.detach().float() / float(scale)
+
+        try:
+            # Derivatives of the exact global case reductions.  This mirrors
+            # _backward_case_supervision(), but does not attach the replay to
+            # ctx_delta.grad.
+            stats = self._forward_case_supervision_stats(
+                patches,
+                valid_masks,
+                params,
+                selected_view,
+                short_ctx_value,
+                short_current_weight,
+                long_ctx,
+                autocast_enabled,
+            )
+            dice_inputs = tuple(
+                stats[key].detach().requires_grad_(True)
+                for key in ("intersection", "prediction_mass", "pseudo_mass")
+            )
+            global_dice = (
+                1.0
+                - 2.0 * dice_inputs[0]
+                / (dice_inputs[1] + dice_inputs[2] + EPS)
+            ).mean()
+            dice_derivatives = torch.autograd.grad(global_dice, dice_inputs)
+            entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
+            entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
+            global_entropy = entropy_sum / entropy_mass.clamp_min(1.0)
+            entropy_derivatives = torch.autograd.grad(
+                global_entropy, (entropy_sum, entropy_mass)
+            )
+
+            pseudo_gradient = zero.clone()
+            entropy_gradient = zero.clone()
+            total_views = len(params)
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                input_mask = valid_mask.unsqueeze(0).to(
+                    self.device, non_blocking=True
+                )
+                with torch.no_grad(), torch.autocast(
+                    device_type=self.device.type, enabled=autocast_enabled
+                ):
+                    pseudo_logits = self._forward(selected, long_ctx)
+                    pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                for start in range(0, total_views, self.view_batch_size):
+                    end = min(total_views, start + self.view_batch_size)
+                    view_batch = self._make_view_batch(
+                        patch, params, valid_mask, start, end
+                    ).to(self.device, non_blocking=True)
+                    input_mask_batch = valid_mask.unsqueeze(0).to(
+                        self.device, non_blocking=True
+                    ).expand(end - start, -1, -1, -1)
+                    with torch.autocast(
+                        device_type=self.device.type, enabled=autocast_enabled
+                    ):
+                        student_ctx = short_ctx_value + short_current_weight * (
+                            self.ctx_delta - self.ctx_delta.detach()
+                        )
+                        student_logits = self._forward(view_batch, student_ctx)
+                        probabilities = torch.sigmoid(student_logits[:, :1])
+                        local_dice = masked_dice_components(
+                            probabilities,
+                            pseudo_label,
+                            input_mask_batch.unsqueeze(1),
+                        )
+                        pseudo_objective = (
+                            local_dice["intersection"]
+                            * dice_derivatives[0][start:end]
+                            + local_dice["prediction_mass"]
+                            * dice_derivatives[1][start:end]
+                        ).sum()
+                        entropy_objective = None
+                        if start <= selected_view < end and self.w_entropy != 0.0:
+                            selected_index = selected_view - start
+                            local_entropy_sum, _ = masked_entropy_components(
+                                probabilities[selected_index : selected_index + 1],
+                                input_mask_batch[selected_index : selected_index + 1],
+                            )
+                            entropy_objective = (
+                                local_entropy_sum[0]
+                                * entropy_derivatives[0]
+                                * self.w_entropy
+                            )
+                    pseudo_gradient += scaled_autograd_gradient(
+                        pseudo_objective,
+                        retain_graph=entropy_objective is not None
+                        and entropy_objective.requires_grad,
+                    )
+                    entropy_gradient += scaled_autograd_gradient(entropy_objective)
+
+            cac_gradient = zero.clone()
+            if self.w_cac != 0.0:
+                case_components = None
+                with torch.no_grad():
+                    for patch, valid_mask in zip(patches, valid_masks):
+                        selected = self._make_view_batch(
+                            patch, params, valid_mask, selected_view, selected_view + 1
+                        ).to(self.device, non_blocking=True)
+                        input_mask = valid_mask.unsqueeze(0).to(
+                            self.device, non_blocking=True
+                        )
+                        with torch.autocast(
+                            device_type=self.device.type, enabled=autocast_enabled
+                        ):
+                            student_ctx = short_ctx_value + short_current_weight * (
+                                self.ctx_delta - self.ctx_delta.detach()
+                            )
+                            selected_logits = self._forward(selected, student_ctx)
+                            local_components = self._cac_components(
+                                selected_logits, input_mask
+                            )
+                        case_components = self._add_components(
+                            case_components, local_components
+                        )
+                if case_components is None:
+                    raise RuntimeError(
+                        "Gradient diagnostics found no selected-view CAC statistics"
+                    )
+                cac_inputs = tuple(
+                    case_components[key].detach().requires_grad_(True)
+                    for key in (
+                        "foreground_sum",
+                        "foreground_mass",
+                        "background_sum",
+                        "background_mass",
+                    )
+                )
+                case_cac = cac_from_components(*cac_inputs)
+                cac_derivatives = torch.autograd.grad(case_cac[0], cac_inputs)
+                for patch, valid_mask in zip(patches, valid_masks):
+                    selected = self._make_view_batch(
+                        patch, params, valid_mask, selected_view, selected_view + 1
+                    ).to(self.device, non_blocking=True)
+                    input_mask = valid_mask.unsqueeze(0).to(
+                        self.device, non_blocking=True
+                    )
+                    with torch.autocast(
+                        device_type=self.device.type, enabled=autocast_enabled
+                    ):
+                        student_ctx = short_ctx_value + short_current_weight * (
+                            self.ctx_delta - self.ctx_delta.detach()
+                        )
+                        selected_logits = self._forward(selected, student_ctx)
+                        local_components = self._cac_components(
+                            selected_logits, input_mask
+                        )
+                    local_inputs = tuple(
+                        local_components[key]
+                        for key in (
+                            "foreground_sum",
+                            "foreground_mass",
+                            "background_sum",
+                            "background_mass",
+                        )
+                    )
+                    cac_objective = sum(
+                        (local * derivative * (-self.w_cac)).sum()
+                        for local, derivative in zip(local_inputs, cac_derivatives)
+                    )
+                    cac_gradient += scaled_autograd_gradient(cac_objective)
+
+            actual = actual_total_gradient.detach().float()
+            reconstructed = pseudo_gradient + entropy_gradient + cac_gradient
+            actual_norm = torch.linalg.vector_norm(actual)
+            reconstruction_difference = torch.linalg.vector_norm(reconstructed - actual)
+            if torch.isfinite(actual_norm) and torch.isfinite(reconstruction_difference):
+                reconstruction_error = float(
+                    (reconstruction_difference / actual_norm.clamp_min(EPS)).cpu()
+                )
+            else:
+                reconstruction_error = None
+
+            def finite_norm(value: torch.Tensor) -> Optional[float]:
+                norm = torch.linalg.vector_norm(value)
+                return float(norm.cpu()) if torch.isfinite(norm) else None
+
+            pseudo_entropy_cosine = self._gradient_cosine(
+                pseudo_gradient, entropy_gradient
+            )
+            pseudo_cac_cosine = self._gradient_cosine(pseudo_gradient, cac_gradient)
+            entropy_cac_cosine = self._gradient_cosine(
+                entropy_gradient, cac_gradient
+            )
+
+            result = {
+                "enabled": True,
+                "pseudo_gradient_norm": finite_norm(pseudo_gradient),
+                "entropy_gradient_norm": finite_norm(entropy_gradient),
+                "cac_gradient_norm": finite_norm(cac_gradient),
+                "total_gradient_norm": finite_norm(actual),
+                "reconstructed_gradient_norm": finite_norm(reconstructed),
+                "cos_pseudo_entropy": pseudo_entropy_cosine,
+                "cos_pseudo_cac": pseudo_cac_cosine,
+                "cos_entropy_cac": entropy_cac_cosine,
+                "pseudo_entropy_conflict": (
+                    None
+                    if pseudo_entropy_cosine is None
+                    else pseudo_entropy_cosine < 0.0
+                ),
+                "pseudo_cac_conflict": (
+                    None if pseudo_cac_cosine is None else pseudo_cac_cosine < 0.0
+                ),
+                "gradient_reconstruction_relative_error": reconstruction_error,
+                "gradient_scale": float(scale),
+                "w_entropy": float(self.w_entropy),
+                "w_cac": float(self.w_cac),
+            }
+            # Explicit g_* / cosine aliases make the JSON self-describing
+            # while retaining the longer field names used in diagnostics.
+            result.update(
+                {
+                    "g_pseudo_norm": result["pseudo_gradient_norm"],
+                    "g_entropy_norm": result["entropy_gradient_norm"],
+                    "g_cac_norm": result["cac_gradient_norm"],
+                    "g_total_norm": result["total_gradient_norm"],
+                    "cosine_pseudo_entropy": result["cos_pseudo_entropy"],
+                    "cosine_pseudo_cac": result["cos_pseudo_cac"],
+                    "cosine_entropy_cac": result["cos_entropy_cac"],
+                    "relative_reconstruction_error": result[
+                        "gradient_reconstruction_relative_error"
+                    ],
+                }
+            )
+            return result
+        finally:
+            self.ctx_delta.data.copy_(saved_ctx_value)
+            self.ctx_delta.grad = saved_ctx_gradient
+            for parameter, gradient in saved_gradients:
+                parameter.grad = gradient
+            self._vision_features = saved_vision_features
+            self._text_features = saved_text_features
+            torch.random.set_rng_state(cpu_rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_state)
+
     def _backward_case_supervision(
         self,
         patches: list[torch.Tensor],
@@ -2520,6 +2857,27 @@ class VoxTellCMTTA:
         sums["cac_loss"] = float(cac_loss)
         sums["loss"] += self.w_cac * sums["cac_loss"]
         sums["total_loss"] = sums["loss"]
+
+        if self.gradient_conflict_diagnostics and self.pseudo_update_mode == "original":
+            diagnostic_scale = float(self.scaler.get_scale())
+            actual_total_gradient = self.ctx_delta.grad.detach().float() / diagnostic_scale
+            self._last_gradient_conflict_diagnostics = (
+                self._gradient_conflict_diagnostics_original(
+                    patches,
+                    valid_masks,
+                    params,
+                    selected_view,
+                    short_ctx_value,
+                    short_current_weight,
+                    long_ctx,
+                    autocast_enabled,
+                    actual_total_gradient,
+                    diagnostic_scale,
+                )
+            )
+            sums["gradient_conflict_diagnostics"] = dict(
+                self._last_gradient_conflict_diagnostics
+            )
 
         # Check that backward produced a real ctx gradient before handing it
         # to GradScaler.  Non-finite values are allowed to reach the scaler:
