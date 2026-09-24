@@ -41,9 +41,13 @@ from run_voxtell_cmtta import (
     compute_tdc_sliding_comparisons,
     evaluate_case,
     macro_average_case_metrics,
+    patch_teacher_probability,
+    predict_case_soft_probability,
     save_prediction_nifti,
     selected_view_data,
     selector_only_case_report,
+    sliding_teacher_patch_labels,
+    stitch_patch_probabilities,
     summarize_gradient_conflict_diagnostics,
     summarize_selector_only,
     zero_shot_diagnostic_fields,
@@ -123,6 +127,18 @@ class TinyQwen(nn.Module):
         del attention_mask
         hidden = inputs_embeds + inputs_embeds.mean(dim=1, keepdim=True)
         return types.SimpleNamespace(last_hidden_state=hidden)
+
+
+class TinySlidingPredictor:
+    """Sliding-window double returning logits in the input D,H,W order."""
+
+    def __init__(self):
+        self.device = torch.device("cpu")
+        self.calls = []
+
+    def predict_sliding_window_return_logits(self, data, text_feature):
+        self.calls.append((tuple(data.shape), tuple(text_feature.shape)))
+        return data[0].unsqueeze(0)
 
 
 def make_args(**overrides):
@@ -980,6 +996,116 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             one.close()
             two.close()
+
+    def test_sliding_teacher_labels_preserve_non_cubic_coordinates_and_padding(self):
+        predictor = TinySlidingPredictor()
+        data = torch.arange(3 * 5 * 7, dtype=torch.float32).reshape(1, 3, 5, 7)
+        patch_size = (2, 3, 4)
+        patches, valid_masks, locations, _original_shape = make_case_patches(
+            data, patch_size
+        )
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.2, "offset": -0.3},
+        ]
+        labels, info = sliding_teacher_patch_labels(
+            predictor,
+            data,
+            torch.zeros(1, 1, 2),
+            params,
+            1,
+            patches,
+            valid_masks,
+            locations,
+        )
+        self.assertEqual(info["selected_view"], 1)
+        self.assertEqual(info["padded_shape"], (4, 6, 8))
+        self.assertEqual(info["alignment_max_abs_error"], 0.0)
+        self.assertEqual(info["alignment_mean_abs_error"], 0.0)
+        stitched, valid_crop = stitch_patch_probabilities(
+            labels, valid_masks, locations, data.shape[-3:]
+        )
+        expected = torch.sigmoid(data[0] * 1.2 - 0.3)
+        self.assertTrue(torch.equal(valid_crop, torch.ones(3, 5, 7, dtype=torch.bool)))
+        self.assertTrue(torch.allclose(stitched, expected, atol=1e-7, rtol=1e-7))
+        self.assertEqual(len(predictor.calls), 1)
+
+    def test_original_sliding_teacher_is_used_after_selected_view_and_one_step(self):
+        predictor = TinySlidingPredictor()
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_teacher_inference="sliding",
+                num_aug_views=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        data = torch.arange(2 * 2 * 4, dtype=torch.float32).reshape(1, 2, 2, 4) / 10.0
+        patch_size = (2, 2, 2)
+        patches, valid_masks, locations, _ = make_case_patches(data, patch_size)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+        ]
+        short = adapter.ctx.detach().clone()
+        prepared = {
+            "patches": patches,
+            "valid_masks": valid_masks,
+            "params": params,
+            "short_ctx": short,
+            "current_quality": 0.0,
+            "historical_quality": 0.0,
+            "current_cac": 0.0,
+            "historical_cac": 0.0,
+            "weight_historical": 0.0,
+            "long_ctx": short.clone(),
+        }
+        calls = []
+
+        def provider(selected_view, long_ctx):
+            calls.append((selected_view, long_ctx.detach().clone()))
+            labels, _ = sliding_teacher_patch_labels(
+                predictor,
+                data,
+                adapter._encode_ctx(long_ctx).detach(),
+                params,
+                selected_view,
+                patches,
+                valid_masks,
+                locations,
+            )
+            return labels
+
+        try:
+            trace = adapter.adapt_case(
+                patches,
+                valid_masks,
+                prepared_case=prepared,
+                teacher_pseudo_provider=provider,
+            )
+            self.assertEqual(trace["pseudo_teacher_inference"], "sliding")
+            self.assertEqual(trace["selected_view"], calls[0][0])
+            self.assertEqual(trace["pseudo_source_view"], trace["selected_view"])
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertEqual(adapter.optimizer_step_count, 1)
+            self.assertEqual(len(predictor.calls), 1)
+        finally:
+            adapter.close()
+
+    def test_sliding_teacher_option_is_rejected_for_decoder_masked(self):
+        with self.assertRaisesRegex(ValueError, "only with pseudo_update_mode='original'"):
+            VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    pseudo_update_mode="decoder_masked",
+                    pseudo_teacher_inference="sliding",
+                ),
+            )
 
     def test_masked_balanced_bce_gives_equal_fg_bg_weight(self):
         fg_sum = torch.tensor(4.0, requires_grad=True)

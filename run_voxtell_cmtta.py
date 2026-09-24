@@ -212,6 +212,45 @@ def macro_average_case_metrics(
     gradient_summary = summarize_gradient_conflict_diagnostics(case_rows)
     if gradient_summary["enabled_case_count"]:
         result["gradient_conflict_diagnostics"] = gradient_summary
+    teacher_rows = [
+        row["teacher_inference_diagnostics"]
+        for row in case_rows
+        if "teacher_inference_diagnostics" in row
+    ]
+    if teacher_rows and len(teacher_rows) == len(case_rows):
+        teacher_metric_groups = (
+            "patch_teacher",
+            "sliding_teacher",
+            "current_prompt_before_adaptation",
+            "adapted_after_update",
+        )
+        result["teacher_inference_diagnostics"] = {
+            group: {
+                metric: float(np.mean([float(row[group][metric]) for row in teacher_rows]))
+                for metric in ("Dice", "Precision", "Recall")
+            }
+            for group in teacher_metric_groups
+        }
+        result["teacher_inference_diagnostics"].update(
+            {
+                "soft_probability_alignment_max_abs_error": float(
+                    np.mean(
+                        [
+                            float(row["soft_probability_alignment_max_abs_error"])
+                            for row in teacher_rows
+                        ]
+                    )
+                ),
+                "soft_probability_alignment_mean_abs_error": float(
+                    np.mean(
+                        [
+                            float(row["soft_probability_alignment_mean_abs_error"])
+                            for row in teacher_rows
+                        ]
+                    )
+                ),
+            }
+        )
     return result
 
 
@@ -508,6 +547,182 @@ def predict_case(
     return prediction
 
 
+def predict_case_soft_probability(
+    predictor,
+    data: torch.Tensor,
+    text_feature: torch.Tensor,
+) -> torch.Tensor:
+    """Return fused sliding-window soft probability in preprocessed space."""
+    with torch.no_grad():
+        logits = predictor.predict_sliding_window_return_logits(
+            data, text_feature.to(predictor.device)
+        ).float()
+    if logits.ndim == 5 and logits.shape[0] == 1 and logits.shape[1] == 1:
+        logits = logits[0, 0]
+    elif logits.ndim == 4 and logits.shape[0] == 1:
+        logits = logits[0]
+    elif logits.ndim != 3:
+        raise ValueError(
+            "Sliding-window logits must have shape (1,1,D,H,W), (1,D,H,W), "
+            f"or (D,H,W), got {tuple(logits.shape)}"
+        )
+    expected_shape = tuple(int(size) for size in data.shape[-3:])
+    if tuple(logits.shape) != expected_shape:
+        raise ValueError(
+            "Sliding-window teacher logits are not aligned with preprocessed data: "
+            f"{tuple(logits.shape)} vs {expected_shape}"
+        )
+    return torch.sigmoid(logits).float().cpu()
+
+
+def _padded_case_shape(locations, patch_size) -> tuple[int, int, int]:
+    if not locations:
+        raise ValueError("A case must contain at least one patch location")
+    return tuple(
+        max(int(location[axis]) + int(patch_size[axis]) for location in locations)
+        for axis in range(3)
+    )
+
+
+def _patch_slices(location, patch_size):
+    return tuple(
+        slice(int(start), int(start) + int(size))
+        for start, size in zip(location, patch_size)
+    )
+
+
+def sliding_teacher_patch_labels(
+    predictor,
+    data: torch.Tensor,
+    text_feature: torch.Tensor,
+    view_params: list[dict[str, float]],
+    selected_view: int,
+    patches: list[torch.Tensor],
+    valid_masks: list[torch.Tensor],
+    locations,
+) -> tuple[list[torch.Tensor], dict[str, object]]:
+    """Build patch-aligned soft labels from one fused selected-view case pass."""
+    if len(patches) != len(valid_masks) or len(patches) != len(locations):
+        raise ValueError("patches, valid_masks, and locations must have equal lengths")
+    patch_size = tuple(int(size) for size in patches[0].shape[-3:])
+    padded_shape = _padded_case_shape(locations, patch_size)
+    selected_data, selected_param = selected_view_data(
+        data, view_params, selected_view
+    )
+    soft_probability = predict_case_soft_probability(
+        predictor, selected_data, text_feature
+    )
+    data_shape = tuple(int(size) for size in data.shape[-3:])
+    padded_probability = torch.zeros(padded_shape, dtype=torch.float32)
+    padded_probability[
+        tuple(slice(0, size) for size in data_shape)
+    ] = soft_probability
+    labels = []
+    reconstructed = torch.zeros_like(padded_probability)
+    write_count = torch.zeros(padded_shape, dtype=torch.int32)
+    for patch, valid_mask, location in zip(patches, valid_masks, locations):
+        slices = _patch_slices(location, patch_size)
+        patch_probability = padded_probability[slices].clone()
+        patch_probability *= valid_mask.detach().cpu().float()
+        labels.append(patch_probability.unsqueeze(0).unsqueeze(0))
+        reconstructed[slices] = patch_probability
+        write_count[slices] += 1
+    valid_padded = torch.zeros(padded_shape, dtype=torch.bool)
+    for valid_mask, location in zip(valid_masks, locations):
+        valid_padded[_patch_slices(location, patch_size)] = (
+            valid_mask.detach().cpu() > 0
+        )
+    aligned_difference = (reconstructed - padded_probability).abs()[valid_padded]
+    if not torch.all(write_count == 1):
+        raise RuntimeError(
+            "Sliding teacher patch coordinates do not cover the padded case exactly once"
+        )
+    return labels, {
+        "selected_param": dict(selected_param),
+        "selected_view": int(selected_view),
+        "padded_shape": padded_shape,
+        "soft_probability": soft_probability,
+        "padded_probability": padded_probability,
+        "alignment_max_abs_error": (
+            float(aligned_difference.max()) if aligned_difference.numel() else 0.0
+        ),
+        "alignment_mean_abs_error": (
+            float(aligned_difference.mean()) if aligned_difference.numel() else 0.0
+        ),
+    }
+
+
+def patch_teacher_probability(
+    adapter,
+    patches: list[torch.Tensor],
+    valid_masks: list[torch.Tensor],
+    view_params: list[dict[str, float]],
+    selected_view: int,
+    long_ctx: torch.Tensor,
+) -> list[torch.Tensor]:
+    """Recreate the original per-patch long-context teacher labels for diagnosis."""
+    labels = []
+    with torch.no_grad():
+        for patch, valid_mask in zip(patches, valid_masks):
+            view = adapter._make_view_batch(
+                patch, view_params, valid_mask, selected_view, selected_view + 1
+            ).to(adapter.device, non_blocking=True)
+            logits = adapter._forward(view, long_ctx)[:, :1]
+            labels.append(torch.sigmoid(logits).float().cpu())
+    return labels
+
+
+def stitch_patch_probabilities(
+    patch_probabilities: list[torch.Tensor],
+    valid_masks: list[torch.Tensor],
+    locations,
+    data_shape,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Stitch non-overlap patch probabilities and return valid model-space crop."""
+    if not patch_probabilities:
+        raise ValueError("Cannot stitch an empty patch probability list")
+    patch_size = tuple(int(size) for size in patch_probabilities[0].shape[-3:])
+    padded_shape = _padded_case_shape(locations, patch_size)
+    padded = torch.zeros(padded_shape, dtype=torch.float32)
+    write_count = torch.zeros(padded_shape, dtype=torch.int32)
+    valid_padded = torch.zeros(padded_shape, dtype=torch.bool)
+    for probability, valid_mask, location in zip(
+        patch_probabilities, valid_masks, locations
+    ):
+        if probability.ndim == 5:
+            probability = probability[0, 0]
+        elif probability.ndim == 4:
+            probability = probability[0]
+        if tuple(probability.shape) != patch_size:
+            raise ValueError("Patch teacher probability has an unexpected shape")
+        slices = _patch_slices(location, patch_size)
+        padded[slices] = probability.detach().cpu()
+        write_count[slices] += 1
+        valid_padded[slices] = valid_mask.detach().cpu() > 0
+    if not torch.all(write_count == 1):
+        raise RuntimeError("Patch coordinates do not form an exact non-overlap tiling")
+    crop = padded[tuple(slice(0, int(size)) for size in data_shape)]
+    valid_crop = valid_padded[tuple(slice(0, int(size)) for size in data_shape)]
+    return crop, valid_crop
+
+
+def teacher_diagnostic_metrics(
+    probability: torch.Tensor,
+    bbox,
+    original_shape,
+    target: np.ndarray,
+) -> dict[str, float | int]:
+    binary = (probability.detach().cpu().numpy() > 0.5).astype(np.uint8)
+    prediction = insert_crop_into_image(
+        np.zeros((1, *original_shape), dtype=np.uint8), binary[None], bbox
+    )[0]
+    metrics = binary_diagnostic_metrics(prediction, target)
+    return {
+        key: metrics[key]
+        for key in ("Dice", "Precision", "Recall", "TP", "FP", "FN", "TN")
+    }
+
+
 def predict_nonoverlap_case(
     adapter,
     patches: list[torch.Tensor],
@@ -792,6 +1007,15 @@ def parse_args() -> argparse.Namespace:
         default="original",
         help="Pseudo-label supervision; original preserves CM-TTA soft Dice.",
     )
+    parser.add_argument(
+        "--pseudo_teacher_inference",
+        choices=("patch", "sliding"),
+        default="patch",
+        help=(
+            "Original-path teacher pseudo-label source; patch preserves the "
+            "baseline and sliding uses one case-level fused inference."
+        ),
+    )
     parser.add_argument("--bg_threshold", type=float, default=0.1)
     parser.add_argument("--tversky_alpha", type=float, default=0.3)
     parser.add_argument("--tversky_beta", type=float, default=0.7)
@@ -1009,9 +1233,108 @@ def main() -> None:
                 prompt_embedding_before = adapter._encode_ctx(
                     adapter.ctx_delta.detach()
                 ).detach()
+            pre_adaptation_current_metrics = None
+            if args.pseudo_teacher_inference == "sliding":
+                pre_adaptation_prediction = predict_case(
+                    predictor,
+                    data,
+                    bbox,
+                    original_shape,
+                    prompt_embedding_before,
+                )
+                pre_adaptation_current_metrics = binary_diagnostic_metrics(
+                    pre_adaptation_prediction, zero_shot_target
+                )
+            teacher_context = {}
+            teacher_pseudo_provider = None
+            if args.pseudo_teacher_inference == "sliding":
+                def teacher_pseudo_provider(selected_view, long_ctx):
+                    with torch.no_grad():
+                        long_text_feature = adapter._encode_ctx(long_ctx).detach()
+                    labels, info = sliding_teacher_patch_labels(
+                        predictor,
+                        data,
+                        long_text_feature,
+                        prepared_case["params"],
+                        selected_view,
+                        patches,
+                        valid_masks,
+                        _locations,
+                    )
+                    teacher_context["labels"] = labels
+                    teacher_context["info"] = info
+                    teacher_context["long_text_feature"] = long_text_feature
+                    return labels
             trace = adapter.adapt_case(
-                patches, valid_masks, prepared_case=prepared_case
+                patches,
+                valid_masks,
+                prepared_case=prepared_case,
+                teacher_pseudo_provider=teacher_pseudo_provider,
             )
+            if args.pseudo_teacher_inference == "sliding":
+                info = teacher_context.get("info")
+                if info is None:
+                    raise RuntimeError("Sliding teacher diagnostics were not generated")
+                patch_labels = patch_teacher_probability(
+                    adapter,
+                    patches,
+                    valid_masks,
+                    prepared_case["params"],
+                    trace["selected_view"],
+                    prepared_case["long_ctx"],
+                )
+                patch_probability, valid_crop = stitch_patch_probabilities(
+                    patch_labels,
+                    valid_masks,
+                    _locations,
+                    data.shape[-3:],
+                )
+                sliding_probability = info["soft_probability"]
+                if tuple(patch_probability.shape) != tuple(sliding_probability.shape):
+                    raise RuntimeError(
+                        "Patch/sliding teacher probability shapes do not align: "
+                        f"{tuple(patch_probability.shape)} vs "
+                        f"{tuple(sliding_probability.shape)}"
+                    )
+                difference = (patch_probability - sliding_probability).abs()[valid_crop]
+                teacher_diagnostics = {
+                    "selected_view": int(trace["selected_view"]),
+                    "selected_param": dict(info["selected_param"]),
+                    "patch_teacher": teacher_diagnostic_metrics(
+                        patch_probability,
+                        bbox,
+                        original_shape,
+                        zero_shot_target,
+                    ),
+                    "sliding_teacher": teacher_diagnostic_metrics(
+                        sliding_probability,
+                        bbox,
+                        original_shape,
+                        zero_shot_target,
+                    ),
+                    "soft_probability_alignment_max_abs_error": (
+                        float(difference.max()) if difference.numel() else 0.0
+                    ),
+                    "soft_probability_alignment_mean_abs_error": (
+                        float(difference.mean()) if difference.numel() else 0.0
+                    ),
+                    "sliding_patch_crop_alignment_max_abs_error": info[
+                        "alignment_max_abs_error"
+                    ],
+                    "sliding_patch_crop_alignment_mean_abs_error": info[
+                        "alignment_mean_abs_error"
+                    ],
+                    "prompt_source": "long_ctx",
+                }
+                if pre_adaptation_current_metrics is None:
+                    raise RuntimeError(
+                        "Missing current-prompt pre-adaptation diagnostic metrics"
+                    )
+                teacher_diagnostics["current_prompt_before_adaptation"] = {
+                    metric: pre_adaptation_current_metrics[metric]
+                    for metric in ("Dice", "Precision", "Recall")
+                }
+                trace["teacher_inference_diagnostics"] = teacher_diagnostics
             if len(view_gt_metrics_before) != trace["num_views"]:
                 raise RuntimeError(
                     "Pre-adaptation GT view diagnostics do not match the case view count: "
@@ -1093,6 +1416,19 @@ def main() -> None:
             row["view_metrics"] = row_view_metrics
             row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
             row["zero_shot_patch_gap"] = zero_shot_patch_gap
+            if "teacher_inference_diagnostics" in trace:
+                teacher_diagnostics = trace["teacher_inference_diagnostics"]
+                teacher_diagnostics["zero_shot_before_adaptation"] = {
+                    metric: row[f"zero_shot_{metric}"]
+                    for metric in ("Dice", "Precision", "Recall")
+                }
+                teacher_diagnostics["adapted_after_update"] = {
+                    metric: row[metric]
+                    for metric in ("Dice", "Precision", "Recall")
+                }
+                row["teacher_inference_diagnostics"] = trace[
+                    "teacher_inference_diagnostics"
+                ]
             # Keep the patch-level values explicitly separate from the full
             # case prediction volumes recorded above.
             trace[
@@ -1121,6 +1457,29 @@ def main() -> None:
                     f"{diagnostic['entropy_gradient_norm']},"
                     f"{diagnostic['cac_gradient_norm']}) "
                     f"reconstruction_error={diagnostic['gradient_reconstruction_relative_error']}"
+                )
+            if "teacher_inference_diagnostics" in trace:
+                teacher_diag = trace["teacher_inference_diagnostics"]
+                patch_teacher = teacher_diag["patch_teacher"]
+                sliding_teacher = teacher_diag["sliding_teacher"]
+                current_before = teacher_diag["current_prompt_before_adaptation"]
+                current_after = teacher_diag["adapted_after_update"]
+                print(
+                    f"case {case_index}/{len(entries)} {image_path.name} "
+                    "teacher_alignment="
+                    f"max_abs={teacher_diag['soft_probability_alignment_max_abs_error']:.6e} "
+                    f"patch_Dice={patch_teacher['Dice']:.4f} "
+                    f"patch_Precision={patch_teacher['Precision']:.4f} "
+                    f"patch_Recall={patch_teacher['Recall']:.4f} "
+                    f"sliding_Dice={sliding_teacher['Dice']:.4f} "
+                    f"sliding_Precision={sliding_teacher['Precision']:.4f} "
+                    f"sliding_Recall={sliding_teacher['Recall']:.4f} "
+                    f"pre_current_Dice={current_before['Dice']:.4f} "
+                    f"pre_current_Precision={current_before['Precision']:.4f} "
+                    f"pre_current_Recall={current_before['Recall']:.4f} "
+                    f"post_Dice={current_after['Dice']:.4f} "
+                    f"post_Precision={current_after['Precision']:.4f} "
+                    f"post_Recall={current_after['Recall']:.4f}"
                 )
             if args.view_selection_metric == "tdc":
                 print(

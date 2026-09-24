@@ -822,6 +822,21 @@ class VoxTellCMTTA:
             raise ValueError(
                 "pseudo_view_weighting must be 'uniform' or 'tdc_softmax'"
             )
+        self.pseudo_teacher_inference = str(
+            getattr(args, "pseudo_teacher_inference", "patch")
+        )
+        if self.pseudo_teacher_inference not in ("patch", "sliding"):
+            raise ValueError(
+                "pseudo_teacher_inference must be 'patch' or 'sliding'"
+            )
+        if (
+            self.pseudo_teacher_inference == "sliding"
+            and self.pseudo_update_mode != "original"
+        ):
+            raise ValueError(
+                "pseudo_teacher_inference='sliding' is available only with "
+                "pseudo_update_mode='original'"
+            )
         self.tdc_softmax_temperature = float(
             getattr(args, "tdc_softmax_temperature", 0.02)
         )
@@ -1657,14 +1672,19 @@ class VoxTellCMTTA:
         short_current_weight: float,
         long_ctx: torch.Tensor,
         autocast_enabled: bool,
+        teacher_pseudo_labels: Optional[list[torch.Tensor]] = None,
     ) -> dict[str, torch.Tensor]:
         """Collect global Dice/entropy statistics without retaining graphs."""
         total_views = len(params)
         dice_stats = None
         entropy_sum = None
         entropy_mass = None
+        if teacher_pseudo_labels is not None and len(teacher_pseudo_labels) != len(patches):
+            raise ValueError(
+                "teacher_pseudo_labels must contain one soft label per case patch"
+            )
         with torch.no_grad():
-            for patch, valid_mask in zip(patches, valid_masks):
+            for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
                 selected = self._make_view_batch(
                     patch, params, valid_mask, selected_view, selected_view + 1
                 ).to(self.device, non_blocking=True)
@@ -1672,8 +1692,13 @@ class VoxTellCMTTA:
                     self.device, non_blocking=True
                 )
                 with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
-                    pseudo_logits = self._forward(selected, long_ctx)
-                    pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                    if teacher_pseudo_labels is None:
+                        pseudo_logits = self._forward(selected, long_ctx)
+                        pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                    else:
+                        pseudo_label = teacher_pseudo_labels[patch_index].to(
+                            self.device, non_blocking=True
+                        ).detach()
                 for start in range(0, total_views, self.view_batch_size):
                     end = min(total_views, start + self.view_batch_size)
                     view_batch = self._make_view_batch(
@@ -2346,6 +2371,7 @@ class VoxTellCMTTA:
         actual_total_gradient: torch.Tensor,
         scale: float,
         pseudo_view_weights: Optional[torch.Tensor],
+        teacher_pseudo_labels: Optional[list[torch.Tensor]] = None,
     ) -> dict[str, object]:
         """Recompute original-path component gradients without changing TTA.
 
@@ -2420,6 +2446,7 @@ class VoxTellCMTTA:
                 short_current_weight,
                 long_ctx,
                 autocast_enabled,
+                teacher_pseudo_labels,
             )
             dice_inputs = tuple(
                 stats[key].detach().requires_grad_(True)
@@ -2442,7 +2469,7 @@ class VoxTellCMTTA:
             pseudo_gradient = zero.clone()
             entropy_gradient = zero.clone()
             total_views = len(params)
-            for patch, valid_mask in zip(patches, valid_masks):
+            for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
                 selected = self._make_view_batch(
                     patch, params, valid_mask, selected_view, selected_view + 1
                 ).to(self.device, non_blocking=True)
@@ -2452,8 +2479,13 @@ class VoxTellCMTTA:
                 with torch.no_grad(), torch.autocast(
                     device_type=self.device.type, enabled=autocast_enabled
                 ):
-                    pseudo_logits = self._forward(selected, long_ctx)
-                    pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                    if teacher_pseudo_labels is None:
+                        pseudo_logits = self._forward(selected, long_ctx)
+                        pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                    else:
+                        pseudo_label = teacher_pseudo_labels[patch_index].to(
+                            self.device, non_blocking=True
+                        ).detach()
                 for start in range(0, total_views, self.view_batch_size):
                     end = min(total_views, start + self.view_batch_size)
                     view_batch = self._make_view_batch(
@@ -2657,6 +2689,7 @@ class VoxTellCMTTA:
         autocast_enabled: bool,
         ctx_delta_before: Optional[torch.Tensor] = None,
         pseudo_view_weights: Optional[torch.Tensor] = None,
+        teacher_pseudo_labels: Optional[list[torch.Tensor]] = None,
     ) -> tuple[float, float]:
         """Backpropagate case-level Dice and entropy with one patch graph."""
         if self.pseudo_update_mode == "decoder_masked":
@@ -2681,6 +2714,7 @@ class VoxTellCMTTA:
             short_current_weight,
             long_ctx,
             autocast_enabled,
+            teacher_pseudo_labels,
         )
         global_dice_inputs = tuple(
             stats[key].detach().requires_grad_(True)
@@ -2701,7 +2735,7 @@ class VoxTellCMTTA:
         )
 
         total_views = len(params)
-        for patch, valid_mask in zip(patches, valid_masks):
+        for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
             selected = self._make_view_batch(
                 patch, params, valid_mask, selected_view, selected_view + 1
             ).to(self.device, non_blocking=True)
@@ -2711,8 +2745,13 @@ class VoxTellCMTTA:
             with torch.no_grad(), torch.autocast(
                 device_type=self.device.type, enabled=autocast_enabled
             ):
-                pseudo_logits = self._forward(selected, long_ctx)
-                pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                if teacher_pseudo_labels is None:
+                    pseudo_logits = self._forward(selected, long_ctx)
+                    pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
+                else:
+                    pseudo_label = teacher_pseudo_labels[patch_index].to(
+                        self.device, non_blocking=True
+                    ).detach()
             for start in range(0, total_views, self.view_batch_size):
                 end = min(total_views, start + self.view_batch_size)
                 view_batch = self._make_view_batch(
@@ -2902,6 +2941,7 @@ class VoxTellCMTTA:
         patches: list[torch.Tensor],
         valid_masks: Optional[list[torch.Tensor]] = None,
         prepared_case: Optional[dict] = None,
+        teacher_pseudo_provider=None,
     ) -> dict:
         """Adapt once on one complete case, aggregating all patch gradients."""
         if prepared_case is None:
@@ -2928,6 +2968,46 @@ class VoxTellCMTTA:
             if self.pseudo_view_weighting == "uniform"
             else pseudo_view_weights
         )
+        teacher_pseudo_labels = None
+        if (
+            self.pseudo_update_mode == "original"
+            and self.pseudo_teacher_inference == "sliding"
+        ):
+            if teacher_pseudo_provider is None:
+                raise ValueError(
+                    "pseudo_teacher_inference='sliding' requires a case-level "
+                    "teacher_pseudo_provider"
+                )
+            provided_labels = teacher_pseudo_provider(
+                selected_view, long_ctx.detach()
+            )
+            if not isinstance(provided_labels, (list, tuple)):
+                raise ValueError(
+                    "teacher_pseudo_provider must return one soft label tensor per patch"
+                )
+            if len(provided_labels) != len(patches):
+                raise ValueError(
+                    "teacher_pseudo_provider returned the wrong number of patch labels"
+                )
+            teacher_pseudo_labels = []
+            for patch_index, (label, patch) in enumerate(
+                zip(provided_labels, patches)
+            ):
+                if not torch.is_tensor(label):
+                    label = torch.as_tensor(label)
+                if label.ndim == 4:
+                    label = label.unsqueeze(0)
+                expected_shape = (1, 1, *patch.shape[-3:])
+                if tuple(label.shape) != expected_shape:
+                    raise ValueError(
+                        "Sliding teacher patch label has the wrong shape at patch "
+                        f"{patch_index}: {tuple(label.shape)} vs {expected_shape}"
+                    )
+                if not torch.isfinite(label).all():
+                    raise ValueError(
+                        f"Sliding teacher patch label is non-finite at patch {patch_index}"
+                    )
+                teacher_pseudo_labels.append(label.detach().cpu())
         short_snapshot = short_ctx.detach().clone()
         short_ctx_value = short_snapshot
         short_current_weight = 1.0 - weight_historical
@@ -2948,6 +3028,7 @@ class VoxTellCMTTA:
             "selected_view_pseudo_weight": float(
                 pseudo_view_weights[selected_view].cpu()
             ),
+            "pseudo_teacher_inference": self.pseudo_teacher_inference,
         }
         autocast_enabled = self.device.type == "cuda"
         soft_dice, entropy_loss = self._backward_case_supervision(
@@ -2961,6 +3042,7 @@ class VoxTellCMTTA:
             autocast_enabled,
             ctx_delta_before,
             pseudo_loss_weights,
+            teacher_pseudo_labels,
         )
         sums["soft_dice"] = soft_dice
         if self.pseudo_update_mode == "decoder_masked":
@@ -3006,6 +3088,7 @@ class VoxTellCMTTA:
                     actual_total_gradient,
                     diagnostic_scale,
                     pseudo_loss_weights,
+                    teacher_pseudo_labels,
                 )
             )
             sums["gradient_conflict_diagnostics"] = dict(
