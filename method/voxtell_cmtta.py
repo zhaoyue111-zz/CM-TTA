@@ -103,6 +103,35 @@ def soft_dice_loss(
     return dice.mean()
 
 
+def case_soft_dice_from_components(
+    intersection: torch.Tensor,
+    prediction_mass: torch.Tensor,
+    pseudo_mass: torch.Tensor,
+    pseudo_view_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Reduce complete-case per-view Dice, optionally with fixed view weights."""
+    if not (
+        intersection.shape == prediction_mass.shape == pseudo_mass.shape
+        and intersection.ndim == 1
+    ):
+        raise ValueError(
+            "Case Dice components must be one-dimensional tensors with matching shapes"
+        )
+    per_view_loss = 1.0 - 2.0 * intersection / (
+        prediction_mass + pseudo_mass + EPS
+    )
+    if pseudo_view_weights is None:
+        return per_view_loss.mean()
+    weights = pseudo_view_weights.to(
+        device=per_view_loss.device, dtype=per_view_loss.dtype
+    )
+    if weights.shape != per_view_loss.shape:
+        raise ValueError(
+            "pseudo_view_weights must match the number of case views"
+        )
+    return (per_view_loss * weights).sum()
+
+
 def masked_entropy_components(
     probabilities: torch.Tensor,
     valid_mask: Optional[torch.Tensor] = None,
@@ -786,6 +815,18 @@ class VoxTellCMTTA:
             raise ValueError(
                 "pseudo_update_mode must be 'original' or 'decoder_masked'"
             )
+        self.pseudo_view_weighting = str(
+            getattr(args, "pseudo_view_weighting", "uniform")
+        )
+        if self.pseudo_view_weighting not in ("uniform", "tdc_softmax"):
+            raise ValueError(
+                "pseudo_view_weighting must be 'uniform' or 'tdc_softmax'"
+            )
+        self.tdc_softmax_temperature = float(
+            getattr(args, "tdc_softmax_temperature", 0.02)
+        )
+        if self.tdc_softmax_temperature <= 0.0:
+            raise ValueError("tdc_softmax_temperature must be greater than zero")
         self.bg_threshold = float(getattr(args, "bg_threshold", 0.1))
         self.tversky_alpha = float(getattr(args, "tversky_alpha", 0.3))
         self.tversky_beta = float(getattr(args, "tversky_beta", 0.7))
@@ -814,6 +855,17 @@ class VoxTellCMTTA:
         self.use_entropy_rank = bool(getattr(args, "use_entropy_rank", True))
         if self.view_selection_metric not in ("cac", "tdc"):
             raise ValueError("view_selection_metric must be 'cac' or 'tdc'")
+        if self.pseudo_view_weighting == "tdc_softmax":
+            if self.view_selection_metric != "tdc":
+                raise ValueError(
+                    "tdc_softmax pseudo view weighting requires "
+                    "view_selection_metric='tdc'"
+                )
+            if self.pseudo_update_mode != "original":
+                raise ValueError(
+                    "tdc_softmax pseudo view weighting requires "
+                    "pseudo_update_mode='original'"
+                )
         if self.num_aug_views < 1:
             raise ValueError("num_aug_views must be at least 1")
         if not 0.0 < self.selection_p <= 1.0:
@@ -1540,6 +1592,61 @@ class VoxTellCMTTA:
         # can independently use its primary quality.
         return selected, scores
 
+    def _pseudo_view_weights(
+        self, total_views: int, selected_view: int
+    ) -> torch.Tensor:
+        """Return one detached, case-level pseudo-Dice weight per view."""
+        if total_views < 1:
+            raise ValueError("A case must contain at least one view")
+        if not 0 <= int(selected_view) < total_views:
+            raise ValueError(
+                f"selected_view={selected_view} is outside {total_views} views"
+            )
+        if self.pseudo_view_weighting == "uniform":
+            return torch.full(
+                (total_views,),
+                1.0 / float(total_views),
+                device=self.device,
+                dtype=torch.float32,
+            )
+
+        tdc_values = self.last_view_selection.get("tdc")
+        if tdc_values is None:
+            raise ValueError(
+                "tdc_softmax pseudo view weighting requires TDC scores from "
+                "the same view-selection pass"
+            )
+        try:
+            scores = torch.as_tensor(
+                tdc_values, device=self.device, dtype=torch.float32
+            ).detach()
+        except (TypeError, ValueError, RuntimeError) as error:
+            raise ValueError(
+                "tdc_softmax pseudo view weighting received invalid TDC scores"
+            ) from error
+        if scores.ndim != 1 or scores.numel() != total_views:
+            raise ValueError(
+                "tdc_softmax pseudo view weighting requires one TDC score per view"
+            )
+        if not torch.isfinite(scores).all():
+            raise ValueError(
+                "tdc_softmax pseudo view weighting requires finite TDC scores"
+            )
+        centered = (scores - scores.max()) / self.tdc_softmax_temperature
+        weights = torch.softmax(centered, dim=0).detach()
+        weight_sum = weights.sum()
+        if (
+            not torch.isfinite(weights).all()
+            or (weights < 0.0).any()
+            or not torch.isfinite(weight_sum)
+            or not torch.isclose(weight_sum, torch.ones_like(weight_sum), atol=1e-6, rtol=1e-6)
+        ):
+            raise ValueError(
+                "tdc_softmax pseudo view weights must be finite, non-negative, "
+                "and sum to one"
+            )
+        return weights
+
     def _forward_case_supervision_stats(
         self,
         patches: list[torch.Tensor],
@@ -2238,6 +2345,7 @@ class VoxTellCMTTA:
         autocast_enabled: bool,
         actual_total_gradient: torch.Tensor,
         scale: float,
+        pseudo_view_weights: Optional[torch.Tensor],
     ) -> dict[str, object]:
         """Recompute original-path component gradients without changing TTA.
 
@@ -2317,11 +2425,12 @@ class VoxTellCMTTA:
                 stats[key].detach().requires_grad_(True)
                 for key in ("intersection", "prediction_mass", "pseudo_mass")
             )
-            global_dice = (
-                1.0
-                - 2.0 * dice_inputs[0]
-                / (dice_inputs[1] + dice_inputs[2] + EPS)
-            ).mean()
+            global_dice = case_soft_dice_from_components(
+                dice_inputs[0],
+                dice_inputs[1],
+                dice_inputs[2],
+                pseudo_view_weights,
+            )
             dice_derivatives = torch.autograd.grad(global_dice, dice_inputs)
             entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
             entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
@@ -2547,6 +2656,7 @@ class VoxTellCMTTA:
         long_ctx: torch.Tensor,
         autocast_enabled: bool,
         ctx_delta_before: Optional[torch.Tensor] = None,
+        pseudo_view_weights: Optional[torch.Tensor] = None,
     ) -> tuple[float, float]:
         """Backpropagate case-level Dice and entropy with one patch graph."""
         if self.pseudo_update_mode == "decoder_masked":
@@ -2576,11 +2686,12 @@ class VoxTellCMTTA:
             stats[key].detach().requires_grad_(True)
             for key in ("intersection", "prediction_mass", "pseudo_mass")
         )
-        global_dice = (
-            1.0
-            - 2.0 * global_dice_inputs[0]
-            / (global_dice_inputs[1] + global_dice_inputs[2] + EPS)
-        ).mean()
+        global_dice = case_soft_dice_from_components(
+            global_dice_inputs[0],
+            global_dice_inputs[1],
+            global_dice_inputs[2],
+            pseudo_view_weights,
+        )
         dice_derivatives = torch.autograd.grad(global_dice, global_dice_inputs)
         global_entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
         global_entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
@@ -2809,6 +2920,14 @@ class VoxTellCMTTA:
         selected_view, selection_scores = self._select_case_view(
             patches, params, short_ctx, valid_masks
         )
+        pseudo_view_weights = self._pseudo_view_weights(
+            len(params), selected_view
+        )
+        pseudo_loss_weights = (
+            None
+            if self.pseudo_view_weighting == "uniform"
+            else pseudo_view_weights
+        )
         short_snapshot = short_ctx.detach().clone()
         short_ctx_value = short_snapshot
         short_current_weight = 1.0 - weight_historical
@@ -2817,7 +2936,19 @@ class VoxTellCMTTA:
         # not use the short-context bridge used by the training objective.
         ctx_delta_before = self.ctx_delta.detach().clone()
         self.optimizer.zero_grad(set_to_none=True)
-        sums = {"soft_dice": 0.0, "cac_loss": 0.0, "entropy_loss": 0.0, "loss": 0.0}
+        sums = {
+            "soft_dice": 0.0,
+            "cac_loss": 0.0,
+            "entropy_loss": 0.0,
+            "loss": 0.0,
+            "pseudo_view_weighting": self.pseudo_view_weighting,
+            "tdc_softmax_temperature": self.tdc_softmax_temperature,
+            "pseudo_view_weights": pseudo_view_weights.detach().cpu().tolist(),
+            "pseudo_view_weight_sum": float(pseudo_view_weights.sum().cpu()),
+            "selected_view_pseudo_weight": float(
+                pseudo_view_weights[selected_view].cpu()
+            ),
+        }
         autocast_enabled = self.device.type == "cuda"
         soft_dice, entropy_loss = self._backward_case_supervision(
             patches,
@@ -2829,6 +2960,7 @@ class VoxTellCMTTA:
             long_ctx,
             autocast_enabled,
             ctx_delta_before,
+            pseudo_loss_weights,
         )
         sums["soft_dice"] = soft_dice
         if self.pseudo_update_mode == "decoder_masked":
@@ -2873,6 +3005,7 @@ class VoxTellCMTTA:
                     autocast_enabled,
                     actual_total_gradient,
                     diagnostic_scale,
+                    pseudo_loss_weights,
                 )
             )
             sums["gradient_conflict_diagnostics"] = dict(

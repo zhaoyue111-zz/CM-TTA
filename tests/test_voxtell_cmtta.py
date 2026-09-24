@@ -18,6 +18,7 @@ from method.voxtell_cmtta import (
     ShortPromptMemory,
     VoxTellCMTTA,
     avg_entropy,
+    case_soft_dice_from_components,
     cac_from_features,
     cac_from_components,
     cac_components_from_features,
@@ -801,6 +802,184 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(summary["valid_case_count"], 1)
         self.assertEqual(summary["conflict_case_count"]["pseudo_cac_conflict"], 1)
         self.assertAlmostEqual(summary["mean_cos_pseudo_cac"], 0.1)
+
+    def test_tdc_softmax_view_weights_follow_formula_and_are_normalized(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_view_weighting="tdc_softmax",
+                tdc_softmax_temperature=0.02,
+            ),
+        )
+        try:
+            adapter.last_view_selection = {"tdc": [0.1, 0.4, 0.2]}
+            weights = adapter._pseudo_view_weights(3, 1)
+            scores = torch.tensor([0.1, 0.4, 0.2])
+            expected = torch.softmax((scores - scores.max()) / 0.02, dim=0)
+            self.assertTrue(torch.allclose(weights, expected, atol=1e-7, rtol=1e-7))
+            self.assertTrue(torch.isfinite(weights).all())
+            self.assertTrue((weights >= 0).all())
+            self.assertAlmostEqual(float(weights.sum()), 1.0, places=6)
+            self.assertGreater(float(weights[1]), float(weights[0]))
+            self.assertGreater(float(weights[1]), float(weights[2]))
+            adapter.last_view_selection = {"tdc": [0.2, 0.2, 0.2]}
+            equal_weights = adapter._pseudo_view_weights(3, 0)
+            self.assertTrue(torch.allclose(equal_weights, torch.full((3,), 1 / 3)))
+        finally:
+            adapter.close()
+
+    def test_tdc_softmax_configuration_and_scores_fail_explicitly(self):
+        with self.assertRaisesRegex(ValueError, "requires view_selection_metric"):
+            VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(pseudo_view_weighting="tdc_softmax"),
+            )
+        with self.assertRaisesRegex(ValueError, "requires pseudo_update_mode"):
+            VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_view_weighting="tdc_softmax",
+                    pseudo_update_mode="decoder_masked",
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "temperature"):
+            VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_view_weighting="tdc_softmax",
+                    tdc_softmax_temperature=0.0,
+                ),
+            )
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(view_selection_metric="tdc", pseudo_view_weighting="tdc_softmax"),
+        )
+        try:
+            with self.assertRaisesRegex(ValueError, "requires TDC scores"):
+                adapter._pseudo_view_weights(2, 0)
+            adapter.last_view_selection = {"tdc": [0.1, float("nan")]}
+            with self.assertRaisesRegex(ValueError, "finite TDC scores"):
+                adapter._pseudo_view_weights(2, 0)
+        finally:
+            adapter.close()
+
+    def test_case_soft_dice_weighting_is_view_level_not_patch_level(self):
+        intersection = torch.tensor([2.0, 1.0])
+        prediction_mass = torch.tensor([4.0, 2.0])
+        pseudo_mass = torch.tensor([2.0, 4.0])
+        weights = torch.tensor([0.8, 0.2])
+        per_view = 1.0 - 2.0 * intersection / (
+            prediction_mass + pseudo_mass + 1e-8
+        )
+        expected = (weights * per_view).sum()
+        self.assertAlmostEqual(
+            float(
+                case_soft_dice_from_components(
+                    intersection, prediction_mass, pseudo_mass, weights
+                )
+            ),
+            float(expected),
+            places=7,
+        )
+        self.assertAlmostEqual(
+            float(case_soft_dice_from_components(
+                intersection, prediction_mass, pseudo_mass
+            )),
+            float(per_view.mean()),
+            places=7,
+        )
+
+    def test_tdc_softmax_case_is_chunk_invariant_and_keeps_teacher_selection(self):
+        torch.manual_seed(23)
+        base_model = TinyVoxTell()
+        patches = [
+            torch.tensor([[[[-1.0, -0.2], [0.3, 0.8]], [[0.1, -0.4], [0.6, -0.7]]]]),
+            torch.tensor([[[[0.2, -0.5], [0.7, 0.1]], [[-0.6, 0.4], [0.9, -0.3]]]]),
+        ]
+        masks = [torch.ones(2, 2, 2) for _ in patches]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+            {"scale": 0.9, "offset": 0.04},
+        ]
+
+        def build(view_batch_size):
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    pseudo_view_weighting="tdc_softmax",
+                    tdc_softmax_temperature=0.02,
+                    view_batch_size=view_batch_size,
+                    num_aug_views=2,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                    gradient_conflict_diagnostics=True,
+                ),
+            )
+
+        def prepared(adapter):
+            short = adapter.ctx.detach().clone()
+            return {
+                "patches": [patch.clone() for patch in patches],
+                "valid_masks": [mask.clone() for mask in masks],
+                "params": copy.deepcopy(params),
+                "short_ctx": short,
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "current_cac": 0.0,
+                "historical_cac": 0.0,
+                "weight_historical": 0.0,
+                "long_ctx": short.clone(),
+            }
+
+        one = build(1)
+        two = build(2)
+        try:
+            trace_one = one.adapt_case(patches, masks, prepared_case=prepared(one))
+            trace_two = two.adapt_case(patches, masks, prepared_case=prepared(two))
+            for trace in (trace_one, trace_two):
+                self.assertEqual(trace["optimizer_steps_for_case"], 1)
+                self.assertEqual(trace["selected_view"], trace["pseudo_source_view"])
+                self.assertEqual(trace["pseudo_view_weighting"], "tdc_softmax")
+                self.assertAlmostEqual(trace["pseudo_view_weight_sum"], 1.0, places=6)
+                self.assertTrue(np.isfinite(trace["soft_dice"]))
+                self.assertLess(
+                    trace["gradient_conflict_diagnostics"][
+                        "gradient_reconstruction_relative_error"
+                    ],
+                    1e-6,
+                )
+            self.assertEqual(trace_one["selected_view"], trace_two["selected_view"])
+            self.assertTrue(
+                np.allclose(
+                    trace_one["pseudo_view_weights"],
+                    trace_two["pseudo_view_weights"],
+                    atol=1e-7,
+                    rtol=1e-7,
+                )
+            )
+            self.assertAlmostEqual(trace_one["soft_dice"], trace_two["soft_dice"], places=6)
+            self.assertTrue(torch.allclose(one.ctx.detach(), two.ctx.detach(), atol=1e-6))
+        finally:
+            one.close()
+            two.close()
 
     def test_masked_balanced_bce_gives_equal_fg_bg_weight(self):
         fg_sum = torch.tensor(4.0, requires_grad=True)

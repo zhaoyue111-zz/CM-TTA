@@ -775,6 +775,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--pseudo_view_weighting",
+        choices=("uniform", "tdc_softmax"),
+        default="uniform",
+        help="Case-level pseudo-Dice view weighting; uniform preserves the baseline.",
+    )
+    parser.add_argument(
+        "--tdc_softmax_temperature",
+        type=float,
+        default=0.02,
+        help="Temperature for tdc_softmax pseudo view weighting; must be positive.",
+    )
+    parser.add_argument(
         "--pseudo_update_mode",
         choices=("original", "decoder_masked"),
         default="original",
