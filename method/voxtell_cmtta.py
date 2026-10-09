@@ -198,7 +198,7 @@ def case_weighted_mean_from_components(
     if value_sum.ndim != 1 or value_sum.shape != valid_mass.shape:
         raise ValueError("Case mean components must be matching one-dimensional tensors")
     valid = valid_mass > 0
-    per_view = value_sum / valid_mass.clamp_min(1.0)
+    per_view = value_sum / valid_mass.clamp_min(EPS)
     per_view = torch.where(valid, per_view, torch.zeros_like(per_view))
     if view_weights is None:
         return per_view.mean()
