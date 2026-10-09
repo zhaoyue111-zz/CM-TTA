@@ -1003,9 +1003,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--pseudo_update_mode",
-        choices=("original", "decoder_masked"),
+        choices=("original", "decoder_masked", "multiscale_d5"),
         default="original",
-        help="Pseudo-label supervision; original preserves CM-TTA soft Dice.",
+        help=(
+            "Pseudo-label supervision; original preserves CM-TTA soft Dice and "
+            "multiscale_d5 applies selected-view teacher D5 targets to student D5--D2."
+        ),
     )
     parser.add_argument(
         "--pseudo_teacher_inference",

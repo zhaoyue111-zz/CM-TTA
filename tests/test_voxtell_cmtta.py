@@ -24,6 +24,7 @@ from method.voxtell_cmtta import (
     cac_components_from_features,
     decoder_consistency_probabilities,
     decoder_grid_to_input_order,
+    downsample_soft_label_and_valid_mask,
     check_voxtell_decoder_d5_alignment,
     masked_balanced_bce_from_components,
     masked_tversky_loss_from_components,
@@ -33,6 +34,7 @@ from method.voxtell_cmtta import (
     soft_dice_loss,
     tdc_from_components,
     tdc_patch_components,
+    weighted_masked_dice_components,
 )
 from run_voxtell_cmtta import (
     binary_diagnostic_metrics,
@@ -79,6 +81,19 @@ class TinyVoxTell(nn.Module):
         if return_decoder_outputs:
             return [logits, logits, logits, logits, logits]
         return logits
+
+
+class TinyMultiscaleVoxTell(TinyVoxTell):
+    """Tiny decoder with native, non-equal D5--D2 spatial grids."""
+
+    def forward(self, image, text_embedding, return_decoder_outputs=False):
+        logits = super().forward(image, text_embedding, return_decoder_outputs=False)
+        if not return_decoder_outputs:
+            return logits
+        d4 = F.adaptive_avg_pool3d(logits, (2, 2, 2))
+        d3 = F.adaptive_avg_pool3d(logits, (1, 1, 1))
+        d2 = logits.mean(dim=(2, 3, 4), keepdim=True)
+        return [logits, d4, d3, d2, d2]
 
 
 class TinyQwenTokenizer:
@@ -917,6 +932,73 @@ class VoxTellCMTTATest(unittest.TestCase):
             float(per_view.mean()),
             places=7,
         )
+
+    def test_multiscale_soft_target_downsampling_excludes_padding(self):
+        pseudo = torch.zeros(1, 1, 4, 4, 4)
+        pseudo[:, :, :2] = 0.25
+        pseudo[:, :, 2:] = 1.0  # Deliberately hostile values in padding.
+        valid = torch.zeros(1, 1, 4, 4, 4)
+        valid[:, :, :2] = 1.0
+        target, scale_valid = downsample_soft_label_and_valid_mask(
+            pseudo, valid, (2, 2, 2)
+        )
+        self.assertTrue(torch.allclose(target[:, :, 0], torch.full((1, 1, 2, 2), 0.25)))
+        self.assertTrue(torch.equal(target[:, :, 1], torch.zeros(1, 1, 2, 2)))
+        self.assertTrue(torch.equal(scale_valid[:, :, 1], torch.zeros(1, 1, 2, 2)))
+        components = weighted_masked_dice_components(
+            torch.full_like(target, 0.5), target, scale_valid
+        )
+        self.assertAlmostEqual(float(components["pseudo_mass"]), 0.25 * 4.0)
+
+    def test_multiscale_d5_backpropagates_one_case_loss_patch_by_patch(self):
+        adapter = VoxTellCMTTA(
+            TinyMultiscaleVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="multiscale_d5",
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        patch_tensor = torch.linspace(-1.0, 1.0, 64).reshape(1, 4, 4, 4)
+        valid = torch.ones(4, 4, 4)
+        valid[3] = 0.0
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.9, "offset": 0.1},
+        ]
+        try:
+            adapter.optimizer.zero_grad(set_to_none=True)
+            dice, entropy = adapter._backward_case_supervision(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            self.assertTrue(np.isfinite(dice))
+            self.assertTrue(np.isfinite(entropy))
+            self.assertIsNotNone(adapter.ctx.grad)
+            self.assertTrue(torch.isfinite(adapter.ctx.grad).all())
+            self.assertGreater(float(adapter.ctx.grad.norm()), 0.0)
+            self.assertEqual(
+                adapter._last_pseudo_diagnostics["pseudo_scale_names"],
+                ["D5", "D4", "D3", "D2"],
+            )
+            self.assertAlmostEqual(
+                sum(adapter._last_pseudo_diagnostics["pseudo_scale_weights"]),
+                1.0,
+                places=6,
+            )
+        finally:
+            adapter.close()
 
     def test_tdc_softmax_case_is_chunk_invariant_and_keeps_teacher_selection(self):
         torch.manual_seed(23)

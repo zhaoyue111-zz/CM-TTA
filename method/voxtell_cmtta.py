@@ -21,6 +21,8 @@ from torch import nn
 
 EPS = 1e-8
 TDC_DECODER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+MULTISCALE_D5_NAMES = ("D5", "D4", "D3", "D2")
+MULTISCALE_D5_WEIGHTS = (1.0, 0.5, 0.25, 0.125)
 
 
 def avg_entropy(
@@ -87,6 +89,74 @@ def masked_dice_components(
         "intersection": (pred_flat * target_flat).sum(dim=1),
         "prediction_mass": pred_flat.sum(dim=1),
         "pseudo_mass": target_flat.sum(dim=1),
+    }
+
+
+def downsample_soft_label_and_valid_mask(
+    pseudo_label: torch.Tensor,
+    valid_mask: torch.Tensor,
+    target_spatial_shape: tuple[int, int, int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Downsample D5 probabilities without allowing padding into the target."""
+    if pseudo_label.ndim != 5 or pseudo_label.shape[1] != 1:
+        raise ValueError(
+            "pseudo_label must have shape (B,1,D,H,W), "
+            f"got {tuple(pseudo_label.shape)}"
+        )
+    valid = valid_mask
+    if valid.ndim == 4:
+        valid = valid.unsqueeze(1)
+    if valid.ndim != 5 or valid.shape[:2] != pseudo_label.shape[:2]:
+        raise ValueError(
+            "valid_mask must have shape (B,D,H,W) or (B,1,D,H,W) "
+            "and match the pseudo-label batch"
+        )
+    valid = valid.to(device=pseudo_label.device, dtype=torch.float32).clamp(0.0, 1.0)
+    if tuple(valid.shape[2:]) != tuple(pseudo_label.shape[2:]):
+        valid = F.interpolate(valid, size=pseudo_label.shape[2:], mode="nearest")
+    target_shape = tuple(int(size) for size in target_spatial_shape)
+    source_shape = tuple(int(size) for size in pseudo_label.shape[2:])
+    if any(target > source for target, source in zip(target_shape, source_shape)):
+        raise ValueError(
+            "multiscale_d5 expects D5 to be the highest-resolution output, "
+            f"got D5={source_shape} and target={target_shape}"
+        )
+    if target_shape == source_shape:
+        valid_mass = valid
+        target = pseudo_label.float() * (valid_mass > 0).to(pseudo_label.dtype)
+    else:
+        valid_mass = F.adaptive_avg_pool3d(valid, target_shape)
+        numerator = F.adaptive_avg_pool3d(pseudo_label.float() * valid, target_shape)
+        target = numerator / valid_mass.clamp_min(EPS)
+        target = torch.where(valid_mass > 0, target, torch.zeros_like(target))
+    return target.detach(), valid_mass.detach()
+
+
+def weighted_masked_dice_components(
+    predictions: torch.Tensor,
+    pseudo_label: torch.Tensor,
+    valid_weight: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Per-view soft-Dice statistics with one application of a soft mask."""
+    if predictions.ndim != 5 or pseudo_label.ndim != 5:
+        raise ValueError("Expected 5-D predictions and pseudo-label tensors")
+    target = pseudo_label.expand(predictions.shape[0], *pseudo_label.shape[1:]).float()
+    weight = valid_weight
+    if weight.ndim == 4:
+        weight = weight.unsqueeze(1)
+    if weight.shape[0] == 1 and predictions.shape[0] != 1:
+        weight = weight.expand(predictions.shape[0], *weight.shape[1:])
+    if tuple(weight.shape) != tuple(predictions.shape):
+        raise ValueError(
+            "valid_weight must broadcast to prediction shape, "
+            f"got {tuple(weight.shape)} vs {tuple(predictions.shape)}"
+        )
+    weight = weight.to(device=predictions.device, dtype=torch.float32)
+    prediction = predictions.float()
+    return {
+        "intersection": (prediction * target * weight).flatten(start_dim=1).sum(dim=1),
+        "prediction_mass": (prediction * weight).flatten(start_dim=1).sum(dim=1),
+        "pseudo_mass": (target * weight).flatten(start_dim=1).sum(dim=1),
     }
 
 
@@ -811,9 +881,9 @@ class VoxTellCMTTA:
         self.w_cac = float(args.w_cac)
         self.w_entropy = float(args.w_entropy)
         self.pseudo_update_mode = str(getattr(args, "pseudo_update_mode", "original"))
-        if self.pseudo_update_mode not in ("original", "decoder_masked"):
+        if self.pseudo_update_mode not in ("original", "decoder_masked", "multiscale_d5"):
             raise ValueError(
-                "pseudo_update_mode must be 'original' or 'decoder_masked'"
+                "pseudo_update_mode must be 'original', 'decoder_masked', or 'multiscale_d5'"
             )
         self.pseudo_view_weighting = str(
             getattr(args, "pseudo_view_weighting", "uniform")
@@ -870,6 +940,10 @@ class VoxTellCMTTA:
         self.use_entropy_rank = bool(getattr(args, "use_entropy_rank", True))
         if self.view_selection_metric not in ("cac", "tdc"):
             raise ValueError("view_selection_metric must be 'cac' or 'tdc'")
+        if self.pseudo_update_mode == "multiscale_d5" and self.view_selection_metric != "tdc":
+            raise ValueError(
+                "pseudo_update_mode='multiscale_d5' requires view_selection_metric='tdc'"
+            )
         if self.pseudo_view_weighting == "tdc_softmax":
             if self.view_selection_metric != "tdc":
                 raise ValueError(
@@ -1755,6 +1829,81 @@ class VoxTellCMTTA:
             raise RuntimeError("Case supervision accumulation produced no statistics")
         return {
             **dice_stats,
+            "entropy_sum": entropy_sum,
+            "entropy_mass": entropy_mass,
+        }
+
+    def _forward_multiscale_d5_stats(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        params: list[dict[str, float]],
+        selected_view: int,
+        short_ctx_value: torch.Tensor,
+        short_current_weight: float,
+        long_ctx: torch.Tensor,
+        autocast_enabled: bool,
+    ) -> dict[str, object]:
+        """Collect D5--D2 case statistics while retaining no patch graph."""
+        total_views = len(params)
+        scale_stats: list[Optional[dict[str, torch.Tensor]]] = [None] * 4
+        entropy_sum = None
+        entropy_mass = None
+        with torch.no_grad():
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                input_valid = valid_mask.unsqueeze(0).unsqueeze(1).to(
+                    self.device, non_blocking=True
+                )
+                with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                    teacher_outputs = self._forward_decoder_outputs(selected, long_ctx)
+                    pseudo_label = torch.sigmoid(teacher_outputs[0][:, :1]).detach()
+                for start in range(0, total_views, self.view_batch_size):
+                    end = min(total_views, start + self.view_batch_size)
+                    view_batch = self._make_view_batch(
+                        patch, params, valid_mask, start, end
+                    ).to(self.device, non_blocking=True)
+                    with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                        student_ctx = short_ctx_value + short_current_weight * (
+                            self.ctx_delta - self.ctx_delta.detach()
+                        )
+                        student_outputs = self._forward_decoder_outputs(view_batch, student_ctx)
+                        for scale_index, logits in enumerate(student_outputs[:4]):
+                            target, scale_valid = downsample_soft_label_and_valid_mask(
+                                pseudo_label, input_valid, tuple(logits.shape[2:])
+                            )
+                            probabilities = torch.sigmoid(logits[:, :1])
+                            local = weighted_masked_dice_components(
+                                probabilities, target, scale_valid
+                            )
+                            if scale_stats[scale_index] is None:
+                                scale_stats[scale_index] = {
+                                    key: torch.zeros(
+                                        total_views, device=value.device, dtype=value.dtype
+                                    )
+                                    for key, value in local.items()
+                                }
+                            for key, value in local.items():
+                                scale_stats[scale_index][key][start:end].add_(value)
+                        if start <= selected_view < end:
+                            selected_index = selected_view - start
+                            d5_probabilities = torch.sigmoid(student_outputs[0][:, :1])
+                            local_entropy, local_mass = masked_entropy_components(
+                                d5_probabilities[selected_index:selected_index + 1],
+                                input_valid,
+                            )
+                    if start <= selected_view < end:
+                        if entropy_sum is None:
+                            entropy_sum = torch.zeros_like(local_entropy[0])
+                            entropy_mass = torch.zeros_like(local_mass[0])
+                        entropy_sum.add_(local_entropy[0])
+                        entropy_mass.add_(local_mass[0])
+        if any(scale is None for scale in scale_stats) or entropy_sum is None:
+            raise RuntimeError("Multiscale case supervision produced no statistics")
+        return {
+            "scale_stats": scale_stats,
             "entropy_sum": entropy_sum,
             "entropy_mass": entropy_mass,
         }
@@ -2704,6 +2853,18 @@ class VoxTellCMTTA:
                 autocast_enabled,
                 ctx_delta_before,
             )
+        if self.pseudo_update_mode == "multiscale_d5":
+            return self._backward_case_multiscale_d5_supervision(
+                patches,
+                valid_masks,
+                params,
+                selected_view,
+                short_ctx_value,
+                short_current_weight,
+                long_ctx,
+                autocast_enabled,
+                pseudo_view_weights,
+            )
         self._last_pseudo_diagnostics = {"pseudo_update_mode": "original"}
         stats = self._forward_case_supervision_stats(
             patches,
@@ -2801,6 +2962,124 @@ class VoxTellCMTTA:
                         (tensor * gradient).sum() for tensor, gradient in differentiable
                     )
                     self.scaler.scale(local_objective).backward()
+        return float(global_dice.detach().cpu()), float(global_entropy.detach().cpu())
+
+    def _backward_case_multiscale_d5_supervision(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        params: list[dict[str, float]],
+        selected_view: int,
+        short_ctx_value: torch.Tensor,
+        short_current_weight: float,
+        long_ctx: torch.Tensor,
+        autocast_enabled: bool,
+        pseudo_view_weights: Optional[torch.Tensor],
+    ) -> tuple[float, float]:
+        """Backpropagate normalized D5--D2 case Dice one patch at a time."""
+        stats = self._forward_multiscale_d5_stats(
+            patches,
+            valid_masks,
+            params,
+            selected_view,
+            short_ctx_value,
+            short_current_weight,
+            long_ctx,
+            autocast_enabled,
+        )
+        scale_weights = torch.tensor(
+            MULTISCALE_D5_WEIGHTS, device=self.device, dtype=torch.float32
+        )
+        scale_weights /= scale_weights.sum()
+        scale_derivatives = []
+        weighted_scale_losses = []
+        for scale_weight, scale_stats in zip(scale_weights, stats["scale_stats"]):
+            inputs = tuple(
+                scale_stats[key].detach().requires_grad_(True)
+                for key in ("intersection", "prediction_mass", "pseudo_mass")
+            )
+            scale_loss = case_soft_dice_from_components(
+                *inputs, pseudo_view_weights
+            )
+            weighted_loss = scale_weight * scale_loss
+            weighted_scale_losses.append(weighted_loss)
+            scale_derivatives.append(torch.autograd.grad(weighted_loss, inputs))
+        global_dice = torch.stack(weighted_scale_losses).sum()
+        entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
+        entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
+        global_entropy = entropy_sum / entropy_mass.clamp_min(1.0)
+        entropy_derivatives = torch.autograd.grad(
+            global_entropy, (entropy_sum, entropy_mass)
+        )
+
+        total_views = len(params)
+        for patch, valid_mask in zip(patches, valid_masks):
+            selected = self._make_view_batch(
+                patch, params, valid_mask, selected_view, selected_view + 1
+            ).to(self.device, non_blocking=True)
+            input_valid = valid_mask.unsqueeze(0).unsqueeze(1).to(
+                self.device, non_blocking=True
+            )
+            with torch.no_grad(), torch.autocast(
+                device_type=self.device.type, enabled=autocast_enabled
+            ):
+                teacher_outputs = self._forward_decoder_outputs(selected, long_ctx)
+                pseudo_label = torch.sigmoid(teacher_outputs[0][:, :1]).detach()
+            for start in range(0, total_views, self.view_batch_size):
+                end = min(total_views, start + self.view_batch_size)
+                view_batch = self._make_view_batch(
+                    patch, params, valid_mask, start, end
+                ).to(self.device, non_blocking=True)
+                with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                    student_ctx = short_ctx_value + short_current_weight * (
+                        self.ctx_delta - self.ctx_delta.detach()
+                    )
+                    student_outputs = self._forward_decoder_outputs(view_batch, student_ctx)
+                    local_tensors = []
+                    local_gradients = []
+                    for scale_index, logits in enumerate(student_outputs[:4]):
+                        target, scale_valid = downsample_soft_label_and_valid_mask(
+                            pseudo_label, input_valid, tuple(logits.shape[2:])
+                        )
+                        probabilities = torch.sigmoid(logits[:, :1])
+                        local = weighted_masked_dice_components(
+                            probabilities, target, scale_valid
+                        )
+                        local_tensors.extend(
+                            (local["intersection"], local["prediction_mass"])
+                        )
+                        local_gradients.extend(
+                            (
+                                scale_derivatives[scale_index][0][start:end],
+                                scale_derivatives[scale_index][1][start:end],
+                            )
+                        )
+                    if start <= selected_view < end:
+                        selected_index = selected_view - start
+                        d5_probabilities = torch.sigmoid(student_outputs[0][:, :1])
+                        local_entropy_sum, _ = masked_entropy_components(
+                            d5_probabilities[selected_index:selected_index + 1],
+                            input_valid,
+                        )
+                        local_tensors.append(local_entropy_sum)
+                        local_gradients.append(entropy_derivatives[0] * self.w_entropy)
+                differentiable = [
+                    (tensor, gradient)
+                    for tensor, gradient in zip(local_tensors, local_gradients)
+                    if tensor.requires_grad
+                ]
+                if differentiable:
+                    objective = sum(
+                        (tensor * gradient).sum()
+                        for tensor, gradient in differentiable
+                    )
+                    self.scaler.scale(objective).backward()
+
+        self._last_pseudo_diagnostics = {
+            "pseudo_update_mode": "multiscale_d5",
+            "pseudo_scale_names": list(MULTISCALE_D5_NAMES),
+            "pseudo_scale_weights": scale_weights.detach().cpu().tolist(),
+        }
         return float(global_dice.detach().cpu()), float(global_entropy.detach().cpu())
 
     def _backward_case_cac(
@@ -3021,6 +3300,7 @@ class VoxTellCMTTA:
             "cac_loss": 0.0,
             "entropy_loss": 0.0,
             "loss": 0.0,
+            "pseudo_update_mode": self.pseudo_update_mode,
             "pseudo_view_weighting": self.pseudo_view_weighting,
             "tdc_softmax_temperature": self.tdc_softmax_temperature,
             "pseudo_view_weights": pseudo_view_weights.detach().cpu().tolist(),
@@ -3056,6 +3336,10 @@ class VoxTellCMTTA:
                 else "masked_balanced_bce_tversky"
             )
             sums["legacy_soft_dice_field_is_pseudo_loss"] = True
+        elif self.pseudo_update_mode == "multiscale_d5":
+            sums["pseudo_loss"] = soft_dice
+            sums.update(self._last_pseudo_diagnostics)
+            sums["pseudo_loss_type"] = "multiscale_d5_soft_dice"
         sums["entropy_loss"] = entropy_loss
         sums["loss"] = soft_dice + self.w_entropy * entropy_loss
 
