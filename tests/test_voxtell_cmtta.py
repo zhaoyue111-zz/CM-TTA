@@ -1388,6 +1388,99 @@ class VoxTellCMTTATest(unittest.TestCase):
             zero_weight.close()
             enabled.close()
 
+    def test_original_d5_only_supports_optional_d4_local_distillation(self):
+        torch.manual_seed(47)
+        base_model = TinyD4FusionVoxTell()
+        patch_tensor = torch.full((1, 10, 10, 10), 5.0)
+        patch_tensor[:, :, :, :3] = -5.0
+        valid = torch.ones(10, 10, 10)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+
+        def build(enabled, weight):
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    use_d4_local_distill=enabled,
+                    w_d4_local=weight,
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                ),
+            )
+
+        def run(adapter):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            result = adapter._backward_case_supervision(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            return result, adapter.ctx.grad.detach().clone()
+
+        disabled = build(False, 0.01)
+        zero_weight = build(True, 0.0)
+        enabled = build(True, 0.01)
+        try:
+            base_result, base_gradient = run(disabled)
+            zero_result, zero_gradient = run(zero_weight)
+            local_result, local_gradient = run(enabled)
+            self.assertTrue(np.allclose(base_result, zero_result, atol=1e-7))
+            self.assertTrue(torch.allclose(base_gradient, zero_gradient, atol=1e-6))
+            # The returned segmentation/entropy losses remain original D5-only.
+            self.assertTrue(np.allclose(base_result, local_result, atol=1e-7))
+            self.assertGreater(enabled._last_pseudo_diagnostics["L_local"], 0.0)
+            self.assertTrue(torch.isfinite(local_gradient).all())
+            self.assertGreater(float((local_gradient - base_gradient).norm()), 0.0)
+            self.assertTrue(
+                all(parameter.grad is None for parameter in enabled.model.parameters())
+            )
+
+            short = enabled.ctx.detach().clone()
+            prepared = {
+                "patches": [patch_tensor],
+                "valid_masks": [valid],
+                "params": params,
+                "short_ctx": short,
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "current_cac": 0.0,
+                "historical_cac": 0.0,
+                "weight_historical": 0.0,
+                "long_ctx": short.clone(),
+            }
+            with patch.object(
+                enabled,
+                "_select_case_view",
+                return_value=(1, torch.tensor([0.0, 1.0])),
+            ), patch.object(enabled, "_backward_case_cac", return_value=0.0):
+                trace = enabled.adapt_case(
+                    [patch_tensor], [valid], prepared_case=prepared
+                )
+            self.assertEqual(trace["pseudo_update_mode"], "original")
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertAlmostEqual(
+                trace["loss"],
+                trace["soft_dice"] + trace["weighted_L_local"],
+                places=6,
+            )
+        finally:
+            disabled.close()
+            zero_weight.close()
+            enabled.close()
+
     def test_tdc_softmax_case_is_chunk_invariant_and_keeps_teacher_selection(self):
         torch.manual_seed(23)
         base_model = TinyVoxTell()

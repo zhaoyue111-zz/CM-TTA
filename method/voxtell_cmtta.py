@@ -1134,12 +1134,13 @@ class VoxTellCMTTA:
                 "view_selection_metric='tdc'"
             )
         if self.use_d4_local_distill and self.pseudo_update_mode not in (
+            "original",
             "multiscale_d5",
             "multiscale_d5_bce",
         ):
             raise ValueError(
-                "D4 local distillation requires pseudo_update_mode='multiscale_d5' "
-                "or 'multiscale_d5_bce'"
+                "D4 local distillation requires pseudo_update_mode='original', "
+                "'multiscale_d5', or 'multiscale_d5_bce'"
             )
         if self.pseudo_view_weighting == "tdc_softmax":
             if self.view_selection_metric != "tdc":
@@ -1554,7 +1555,7 @@ class VoxTellCMTTA:
 
     def _cac_components(
         self, logits: torch.Tensor, valid_mask: Optional[torch.Tensor] = None
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, object]:
         if self._vision_features is None or self._text_features is None:
             raise RuntimeError("VoxTell CAC feature hooks did not capture a forward pass")
         return cac_components_from_features(
@@ -2017,6 +2018,10 @@ class VoxTellCMTTA:
         dice_stats = None
         entropy_sum = None
         entropy_mass = None
+        local_loss_sum = None
+        local_element_count = 0
+        local_valid_windows = 0
+        local_teacher_caches: list[dict[str, torch.Tensor]] = []
         if teacher_pseudo_labels is not None and len(teacher_pseudo_labels) != len(patches):
             raise ValueError(
                 "teacher_pseudo_labels must contain one soft label per case patch"
@@ -2037,6 +2042,27 @@ class VoxTellCMTTA:
                         pseudo_label = teacher_pseudo_labels[patch_index].to(
                             self.device, non_blocking=True
                         ).detach()
+                    if self.use_d4_local_distill:
+                        _, teacher_fusion = (
+                            self._forward_decoder_outputs_with_d4_fusion(
+                                selected, long_ctx
+                            )
+                        )
+                if self.use_d4_local_distill:
+                    d4_target, d4_valid = downsample_soft_label_and_valid_mask(
+                        pseudo_label,
+                        input_mask.unsqueeze(1),
+                        tuple(teacher_fusion.shape[2:]),
+                    )
+                    teacher_cache = build_d4_local_teacher_cache(
+                        teacher_fusion.detach(), d4_target, d4_valid
+                    )
+                    local_valid_windows += int(
+                        teacher_cache["window_indices"].numel()
+                    )
+                    local_teacher_caches.append(
+                        {key: value.detach().cpu() for key, value in teacher_cache.items()}
+                    )
                 for start in range(0, total_views, self.view_batch_size):
                     end = min(total_views, start + self.view_batch_size)
                     view_batch = self._make_view_batch(
@@ -2072,6 +2098,17 @@ class VoxTellCMTTA:
                             if start <= selected_view < end
                             else input_mask_batch[:1],
                         )
+                        if self.use_d4_local_distill:
+                            _, student_fusion = (
+                                self._forward_decoder_outputs_with_d4_fusion(
+                                    view_batch, student_ctx
+                                )
+                            )
+                            patch_local_sum, patch_local_count = (
+                                d4_local_relation_squared_sum(
+                                    student_fusion, teacher_cache
+                                )
+                            )
                     if dice_stats is None:
                         dice_stats = {
                             key: torch.zeros(
@@ -2083,6 +2120,11 @@ class VoxTellCMTTA:
                         }
                     for key, value in local_dice.items():
                         dice_stats[key][start:end].add_(value)
+                    if self.use_d4_local_distill:
+                        if local_loss_sum is None:
+                            local_loss_sum = torch.zeros_like(patch_local_sum)
+                        local_loss_sum.add_(patch_local_sum)
+                        local_element_count += patch_local_count
                     if start <= selected_view < end:
                         if entropy_sum is None:
                             entropy_sum = torch.zeros_like(local_entropy[0])
@@ -2091,10 +2133,18 @@ class VoxTellCMTTA:
                         entropy_mass.add_(local_mass[0])
         if dice_stats is None or entropy_sum is None or entropy_mass is None:
             raise RuntimeError("Case supervision accumulation produced no statistics")
+        if self.use_d4_local_distill and len(local_teacher_caches) != len(patches):
+            raise RuntimeError("D4 local teacher cache is incomplete")
+        if local_loss_sum is None:
+            local_loss_sum = entropy_sum.new_zeros(())
         return {
             **dice_stats,
             "entropy_sum": entropy_sum,
             "entropy_mass": entropy_mass,
+            "d4_local_loss_sum": local_loss_sum,
+            "d4_local_element_count": local_element_count,
+            "d4_local_valid_windows": local_valid_windows,
+            "d4_local_teacher_caches": local_teacher_caches,
         }
 
     def _forward_multiscale_d5_stats(
@@ -3232,6 +3282,14 @@ class VoxTellCMTTA:
         entropy_derivatives = torch.autograd.grad(
             global_entropy, (global_entropy_sum, global_entropy_mass)
         )
+        local_element_count = int(stats["d4_local_element_count"])
+        if self.use_d4_local_distill and local_element_count > 0:
+            global_local_loss = stats["d4_local_loss_sum"] / float(
+                local_element_count
+            )
+        else:
+            global_local_loss = global_dice.new_zeros(())
+        weighted_local_loss = self.w_d4_local * global_local_loss
 
         total_views = len(params)
         for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
@@ -3280,6 +3338,22 @@ class VoxTellCMTTA:
                         dice_derivatives[0][start:end],
                         dice_derivatives[1][start:end],
                     ]
+                    if self.use_d4_local_distill and local_element_count > 0:
+                        _, student_fusion = (
+                            self._forward_decoder_outputs_with_d4_fusion(
+                                view_batch, student_ctx
+                            )
+                        )
+                        patch_local_sum, _ = d4_local_relation_squared_sum(
+                            student_fusion,
+                            stats["d4_local_teacher_caches"][patch_index],
+                        )
+                        local_tensors.append(patch_local_sum)
+                        local_gradients.append(
+                            patch_local_sum.new_tensor(
+                                self.w_d4_local / float(local_element_count)
+                            )
+                        )
                     if start <= selected_view < end:
                         selected_index = selected_view - start
                         local_entropy_sum, local_entropy_mass = masked_entropy_components(
@@ -3300,6 +3374,15 @@ class VoxTellCMTTA:
                         (tensor * gradient).sum() for tensor, gradient in differentiable
                     )
                     self.scaler.scale(local_objective).backward()
+        self._last_pseudo_diagnostics = {
+            "pseudo_update_mode": "original",
+            "d4_local_loss": float(global_local_loss.detach().cpu()),
+            "d4_local_weighted_loss": float(weighted_local_loss.detach().cpu()),
+            "d4_local_valid_windows": int(stats["d4_local_valid_windows"]),
+            "L_local": float(global_local_loss.detach().cpu()),
+            "weighted_L_local": float(weighted_local_loss.detach().cpu()),
+            "d4_local_valid_window_count": int(stats["d4_local_valid_windows"]),
+        }
         return float(global_dice.detach().cpu()), float(global_entropy.detach().cpu())
 
     def _backward_case_multiscale_d5_supervision(
@@ -3768,6 +3851,8 @@ class VoxTellCMTTA:
                 "multiscale_bce_loss"
             ]
             sums["pseudo_loss_type"] = "multiscale_d5_soft_dice_plus_soft_bce"
+        elif self.pseudo_update_mode == "original" and self.use_d4_local_distill:
+            sums.update(self._last_pseudo_diagnostics)
         sums["entropy_loss"] = entropy_loss
         local_contribution = float(
             self._last_pseudo_diagnostics.get("d4_local_weighted_loss", 0.0)
@@ -3789,7 +3874,11 @@ class VoxTellCMTTA:
         sums["loss"] += self.w_cac * sums["cac_loss"]
         sums["total_loss"] = sums["loss"]
 
-        if self.gradient_conflict_diagnostics and self.pseudo_update_mode == "original":
+        if (
+            self.gradient_conflict_diagnostics
+            and self.pseudo_update_mode == "original"
+            and not self.use_d4_local_distill
+        ):
             diagnostic_scale = float(self.scaler.get_scale())
             actual_total_gradient = self.ctx_delta.grad.detach().float() / diagnostic_scale
             self._last_gradient_conflict_diagnostics = (
