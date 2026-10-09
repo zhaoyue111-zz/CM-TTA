@@ -1532,26 +1532,53 @@ class VoxTellCMTTA:
         self._capture_d4_fusion_enabled = True
         try:
             outputs = self._forward_decoder_outputs(images, ctx)
+            fusion = self._d4_fusion_features
+            if fusion is None:
+                raise RuntimeError("D4 fusion hook did not observe the decoder forward")
+            if fusion.ndim != 5 or fusion.shape[:2] != (
+                images.shape[0],
+                D4_FUSION_CHANNELS,
+            ):
+                raise RuntimeError(
+                    "Captured D4 fusion must have shape (B,32,D,H,W), "
+                    f"got {tuple(fusion.shape)}"
+                )
+            if tuple(fusion.shape[2:]) != tuple(outputs[1].shape[2:]):
+                raise RuntimeError(
+                    "Captured fusion is not aligned with decoder output index 1 (D4): "
+                    f"fusion={tuple(fusion.shape)}, D4={tuple(outputs[1].shape)}"
+                )
+            return outputs, fusion
         finally:
             self._capture_d4_fusion_enabled = False
-        fusion = self._d4_fusion_features
+            self._d4_fusion_features = None
+
+    def _forward_with_d4_fusion(
+        self, images: torch.Tensor, ctx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the original forward once and also return its native D4 fusion."""
+        if not self.use_d4_local_distill:
+            raise RuntimeError("D4 fusion capture is disabled")
         self._d4_fusion_features = None
-        if fusion is None:
-            raise RuntimeError("D4 fusion hook did not observe the decoder forward")
-        if fusion.ndim != 5 or fusion.shape[:2] != (
-            images.shape[0],
-            D4_FUSION_CHANNELS,
-        ):
-            raise RuntimeError(
-                "Captured D4 fusion must have shape (B,32,D,H,W), "
-                f"got {tuple(fusion.shape)}"
-            )
-        if tuple(fusion.shape[2:]) != tuple(outputs[1].shape[2:]):
-            raise RuntimeError(
-                "Captured fusion is not aligned with decoder output index 1 (D4): "
-                f"fusion={tuple(fusion.shape)}, D4={tuple(outputs[1].shape)}"
-            )
-        return outputs, fusion
+        self._capture_d4_fusion_enabled = True
+        try:
+            logits = self._forward(images, ctx)
+            fusion = self._d4_fusion_features
+            if fusion is None:
+                raise RuntimeError("D4 fusion hook did not observe the original forward")
+            if fusion.ndim != 5 or fusion.shape[:2] != (
+                images.shape[0],
+                D4_FUSION_CHANNELS,
+            ):
+                raise RuntimeError(
+                    "Captured D4 fusion must have shape (B,32,D,H,W), "
+                    f"got {tuple(fusion.shape)}"
+                )
+            return logits, fusion
+        finally:
+            # Never leave capture enabled or retain a graph after success/failure.
+            self._capture_d4_fusion_enabled = False
+            self._d4_fusion_features = None
 
     def _cac_components(
         self, logits: torch.Tensor, valid_mask: Optional[torch.Tensor] = None
@@ -2035,19 +2062,18 @@ class VoxTellCMTTA:
                     self.device, non_blocking=True
                 )
                 with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
-                    if teacher_pseudo_labels is None:
+                    if self.use_d4_local_distill:
+                        pseudo_logits, teacher_fusion = self._forward_with_d4_fusion(
+                            selected, long_ctx
+                        )
+                    elif teacher_pseudo_labels is None:
                         pseudo_logits = self._forward(selected, long_ctx)
+                    if teacher_pseudo_labels is None:
                         pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
                     else:
                         pseudo_label = teacher_pseudo_labels[patch_index].to(
                             self.device, non_blocking=True
                         ).detach()
-                    if self.use_d4_local_distill:
-                        _, teacher_fusion = (
-                            self._forward_decoder_outputs_with_d4_fusion(
-                                selected, long_ctx
-                            )
-                        )
                 if self.use_d4_local_distill:
                     d4_target, d4_valid = downsample_soft_label_and_valid_mask(
                         pseudo_label,
@@ -2077,7 +2103,12 @@ class VoxTellCMTTA:
                         student_ctx = short_ctx_value + short_current_weight * (
                             self.ctx_delta - self.ctx_delta.detach()
                         )
-                        student_logits = self._forward(view_batch, student_ctx)
+                        if self.use_d4_local_distill:
+                            student_logits, student_fusion = self._forward_with_d4_fusion(
+                                view_batch, student_ctx
+                            )
+                        else:
+                            student_logits = self._forward(view_batch, student_ctx)
                         probabilities = torch.sigmoid(student_logits[:, :1])
                         local_dice = masked_dice_components(
                             probabilities,
@@ -2099,11 +2130,6 @@ class VoxTellCMTTA:
                             else input_mask_batch[:1],
                         )
                         if self.use_d4_local_distill:
-                            _, student_fusion = (
-                                self._forward_decoder_outputs_with_d4_fusion(
-                                    view_batch, student_ctx
-                                )
-                            )
                             patch_local_sum, patch_local_count = (
                                 d4_local_relation_squared_sum(
                                     student_fusion, teacher_cache
@@ -3323,7 +3349,12 @@ class VoxTellCMTTA:
                     student_ctx = short_ctx_value + short_current_weight * (
                         self.ctx_delta - self.ctx_delta.detach()
                     )
-                    student_logits = self._forward(view_batch, student_ctx)
+                    if self.use_d4_local_distill and local_element_count > 0:
+                        student_logits, student_fusion = self._forward_with_d4_fusion(
+                            view_batch, student_ctx
+                        )
+                    else:
+                        student_logits = self._forward(view_batch, student_ctx)
                     probabilities = torch.sigmoid(student_logits[:, :1])
                     local_dice = masked_dice_components(
                         probabilities,
@@ -3339,11 +3370,6 @@ class VoxTellCMTTA:
                         dice_derivatives[1][start:end],
                     ]
                     if self.use_d4_local_distill and local_element_count > 0:
-                        _, student_fusion = (
-                            self._forward_decoder_outputs_with_d4_fusion(
-                                view_batch, student_ctx
-                            )
-                        )
                         patch_local_sum, _ = d4_local_relation_squared_sum(
                             student_fusion,
                             stats["d4_local_teacher_caches"][patch_index],

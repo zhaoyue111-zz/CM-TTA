@@ -115,8 +115,10 @@ class TinyD4FusionVoxTell(TinyVoxTell):
     def __init__(self):
         super().__init__()
         self.decoder = TinyFusionDecoderShell()
+        self.forward_call_count = 0
 
     def forward(self, image, text_embedding, return_decoder_outputs=False):
+        self.forward_call_count += 1
         batch, _, depth, height, width = image.shape
         visual = image[:, 0].permute(1, 2, 3, 0).reshape(
             depth * height * width, batch, 1
@@ -1187,6 +1189,14 @@ class VoxTellCMTTATest(unittest.TestCase):
         )
         image = torch.randn(1, 1, 10, 10, 10)
         try:
+            original_d5 = adapter._forward(image, adapter.ctx)
+            captured_d5, original_fusion = adapter._forward_with_d4_fusion(
+                image, adapter.ctx
+            )
+            self.assertTrue(torch.equal(original_d5, captured_d5))
+            self.assertEqual(tuple(original_fusion.shape), (1, 32, 10, 10, 10))
+            self.assertFalse(adapter._capture_d4_fusion_enabled)
+            self.assertIsNone(adapter._d4_fusion_features)
             ordinary = adapter._forward_decoder_outputs(image, adapter.ctx)
             captured, fusion = adapter._forward_decoder_outputs_with_d4_fusion(
                 image, adapter.ctx
@@ -1196,6 +1206,152 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertEqual(tuple(fusion.shape), (1, 32, 10, 10, 10))
             self.assertEqual(tuple(fusion.shape[2:]), tuple(captured[1].shape[2:]))
             self.assertTrue(fusion.requires_grad)
+        finally:
+            adapter.close()
+
+    def test_original_d4_local_merges_forward_and_matches_legacy_loss_gradient(self):
+        torch.manual_seed(53)
+        base_model = TinyD4FusionVoxTell()
+        patch_tensor = torch.full((1, 10, 10, 10), 5.0)
+        patch_tensor[:, :, :, :3] = -5.0
+        valid = torch.ones(10, 10, 10)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+
+        def build():
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    use_d4_local_distill=True,
+                    w_d4_local=0.01,
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_cac=0.0,
+                    w_entropy=0.1,
+                ),
+            )
+
+        def run(adapter):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            adapter.model.forward_call_count = 0
+            result = adapter._backward_case_supervision(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            diagnostics = adapter._last_pseudo_diagnostics
+            total = (
+                result[0]
+                + adapter.w_entropy * result[1]
+                + diagnostics["weighted_L_local"]
+            )
+            return (
+                result,
+                total,
+                adapter.ctx.grad.detach().clone(),
+                adapter.model.forward_call_count,
+            )
+
+        merged = build()
+        legacy = build()
+
+        def legacy_double_forward(self, images, ctx):
+            logits = self._forward(images, ctx)
+            _, fusion = self._forward_decoder_outputs_with_d4_fusion(images, ctx)
+            return logits, fusion
+
+        legacy._forward_with_d4_fusion = types.MethodType(
+            legacy_double_forward, legacy
+        )
+        try:
+            merged_result, merged_total, merged_gradient, merged_calls = run(merged)
+            legacy_result, legacy_total, legacy_gradient, legacy_calls = run(legacy)
+            # One patch has one teacher batch and two student batches in each
+            # of the statistics and replay passes: 2 * (1 + 2) forwards.
+            self.assertEqual(merged_calls, 6)
+            self.assertEqual(legacy_calls, 11)
+            self.assertTrue(np.allclose(merged_result, legacy_result, atol=1e-7))
+            self.assertAlmostEqual(merged_total, legacy_total, places=7)
+            self.assertTrue(
+                torch.allclose(merged_gradient, legacy_gradient, atol=1e-6)
+            )
+        finally:
+            merged.close()
+            legacy.close()
+
+    def test_original_d4_capture_cleans_state_when_forward_fails(self):
+        adapter = VoxTellCMTTA(
+            TinyD4FusionVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                use_d4_local_distill=True,
+            ),
+        )
+        image = torch.randn(1, 1, 10, 10, 10)
+        try:
+            with patch.object(adapter, "_forward", side_effect=RuntimeError("boom")):
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    adapter._forward_with_d4_fusion(image, adapter.ctx)
+            self.assertFalse(adapter._capture_d4_fusion_enabled)
+            self.assertIsNone(adapter._d4_fusion_features)
+        finally:
+            adapter.close()
+
+    def test_original_d4_stats_keep_external_teacher_labels(self):
+        adapter = VoxTellCMTTA(
+            TinyD4FusionVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                use_d4_local_distill=True,
+                num_aug_views=1,
+                view_batch_size=1,
+            ),
+        )
+        patch_tensor = torch.full((1, 10, 10, 10), 2.0)
+        valid = torch.ones(10, 10, 10)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+        supplied = torch.zeros(1, 1, 10, 10, 10)
+        try:
+            adapter.model.forward_call_count = 0
+            stats = adapter._forward_case_supervision_stats(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+                [supplied],
+            )
+            self.assertTrue(
+                torch.equal(
+                    stats["pseudo_mass"], torch.zeros_like(stats["pseudo_mass"])
+                )
+            )
+            # The supplied label replaces D5, while the same single teacher
+            # forward still captures D4 for local-region construction.
+            self.assertEqual(adapter.model.forward_call_count, 3)
         finally:
             adapter.close()
 
