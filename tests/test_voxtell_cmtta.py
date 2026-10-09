@@ -18,6 +18,7 @@ from method.voxtell_cmtta import (
     ShortPromptMemory,
     VoxTellCMTTA,
     avg_entropy,
+    build_d4_local_teacher_cache,
     case_weighted_mean_from_components,
     case_soft_dice_from_components,
     cac_from_features,
@@ -25,6 +26,7 @@ from method.voxtell_cmtta import (
     cac_components_from_features,
     decoder_consistency_probabilities,
     decoder_grid_to_input_order,
+    d4_local_relation_squared_sum,
     downsample_soft_label_and_valid_mask,
     check_voxtell_decoder_d5_alignment,
     masked_balanced_bce_from_components,
@@ -1041,6 +1043,13 @@ class VoxTellCMTTATest(unittest.TestCase):
                 1.0,
                 places=6,
             )
+            self.assertTrue(
+                np.allclose(
+                    adapter._last_pseudo_diagnostics["pseudo_scale_weights"],
+                    [0.8, 0.09, 0.06, 0.05],
+                    atol=1e-7,
+                )
+            )
         finally:
             adapter.close()
 
@@ -1189,6 +1198,96 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertTrue(fusion.requires_grad)
         finally:
             adapter.close()
+
+    def test_d4_tail_window_keeps_last_layer_and_zeroes_padding_weights(self):
+        teacher_fusion = torch.zeros(1, 32, 6, 5, 5)
+        teacher_fusion[:, :, 5, :, :2] = 1.0
+        teacher_fusion[:, :, 5, :, 2:] = 3.0
+        pseudo = torch.full((1, 1, 6, 5, 5), 0.1)
+        pseudo[:, :, 5, :, 2:] = 0.9
+        valid = torch.ones_like(pseudo)
+        cache = build_d4_local_teacher_cache(
+            teacher_fusion, pseudo, valid
+        )
+        self.assertIn(1, cache["window_indices"].tolist())
+        self.assertEqual(cache["foreground_weight"].shape[-1], 125)
+        self.assertEqual(cache["background_weight"].shape[-1], 125)
+        self.assertTrue(
+            torch.equal(
+                cache["foreground_weight"][:, 25:],
+                torch.zeros_like(cache["foreground_weight"][:, 25:]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                cache["background_weight"][:, 25:],
+                torch.zeros_like(cache["background_weight"][:, 25:]),
+            )
+        )
+        squared_sum, count = d4_local_relation_squared_sum(
+            teacher_fusion * 2.0, cache
+        )
+        self.assertEqual(count, 32 * cache["window_indices"].numel())
+        self.assertGreater(float(squared_sum), 0.0)
+
+    def test_d4_local_case_loss_and_gradient_are_view_batch_invariant(self):
+        torch.manual_seed(43)
+        base_model = TinyD4FusionVoxTell()
+        patch_tensor = torch.full((1, 10, 10, 10), 5.0)
+        patch_tensor[:, :, :, :3] = -5.0
+        valid = torch.ones(10, 10, 10)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+            {"scale": 1.1, "offset": -0.2},
+        ]
+
+        def build(view_batch_size):
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="multiscale_d5",
+                    use_d4_local_distill=True,
+                    w_d4_local=0.01,
+                    num_aug_views=2,
+                    view_batch_size=view_batch_size,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                ),
+            )
+
+        def run(adapter):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            result = adapter._backward_case_supervision(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            return (
+                result,
+                adapter._last_pseudo_diagnostics["L_local"],
+                adapter.ctx.grad.detach().clone(),
+            )
+
+        one = build(1)
+        all_views = build(3)
+        try:
+            one_result, one_local, one_gradient = run(one)
+            all_result, all_local, all_gradient = run(all_views)
+            self.assertTrue(np.allclose(one_result, all_result, atol=1e-7))
+            self.assertAlmostEqual(one_local, all_local, places=7)
+            self.assertTrue(torch.allclose(one_gradient, all_gradient, atol=1e-6))
+        finally:
+            one.close()
+            all_views.close()
 
     def test_d4_local_distillation_is_optional_finite_and_ctx_only(self):
         torch.manual_seed(41)

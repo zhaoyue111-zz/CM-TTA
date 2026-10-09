@@ -22,7 +22,7 @@ from torch import nn
 EPS = 1e-8
 TDC_DECODER_PAIRS = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
 MULTISCALE_D5_NAMES = ("D5", "D4", "D3", "D2")
-MULTISCALE_D5_WEIGHTS = (1.0, 0.5, 0.25, 0.125)
+MULTISCALE_D5_WEIGHTS = (0.8, 0.09, 0.06, 0.05)
 D4_FUSION_CHANNELS = 32
 D4_LOCAL_WINDOW_SIZE = 5
 
@@ -211,12 +211,19 @@ def case_weighted_mean_from_components(
 
 
 def _nonoverlap_3d_windows(tensor: torch.Tensor, window_size: int) -> torch.Tensor:
-    """Return fixed, non-overlapping 3-D windows as ``(B,N,C,K)``."""
+    """Return zero-padded non-overlapping windows as ``(B,N,C,K)``."""
     if tensor.ndim != 5:
         raise ValueError(f"Expected (B,C,D,H,W), got {tuple(tensor.shape)}")
-    if any(size < window_size for size in tensor.shape[2:]):
-        return tensor.new_empty(
-            (tensor.shape[0], 0, tensor.shape[1], window_size ** 3)
+    depth, height, width = tensor.shape[2:]
+    pad_depth = (-depth) % window_size
+    pad_height = (-height) % window_size
+    pad_width = (-width) % window_size
+    if pad_depth or pad_height or pad_width:
+        tensor = F.pad(
+            tensor,
+            (0, pad_width, 0, pad_height, 0, pad_depth),
+            mode="constant",
+            value=0.0,
         )
     windows = (
         tensor.unfold(2, window_size, window_size)
