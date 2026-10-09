@@ -18,6 +18,7 @@ from method.voxtell_cmtta import (
     ShortPromptMemory,
     VoxTellCMTTA,
     avg_entropy,
+    case_weighted_mean_from_components,
     case_soft_dice_from_components,
     cac_from_features,
     cac_from_components,
@@ -997,6 +998,126 @@ class VoxTellCMTTATest(unittest.TestCase):
                 1.0,
                 places=6,
             )
+        finally:
+            adapter.close()
+
+    def test_case_bce_uses_global_valid_mean_before_view_aggregation(self):
+        first_sum = torch.tensor([2.0, 9.0])
+        first_mass = torch.tensor([2.0, 3.0])
+        second_sum = torch.tensor([8.0, 1.0])
+        second_mass = torch.tensor([8.0, 1.0])
+        case_bce = case_weighted_mean_from_components(
+            first_sum + second_sum, first_mass + second_mass
+        )
+        patch_mean = 0.5 * (
+            case_weighted_mean_from_components(first_sum, first_mass)
+            + case_weighted_mean_from_components(second_sum, second_mass)
+        )
+        self.assertAlmostEqual(float(case_bce), 1.75)
+        self.assertAlmostEqual(float(patch_mean), 1.5)
+
+    def test_multiscale_d5_bce_records_the_exact_backpropagated_components(self):
+        adapter = VoxTellCMTTA(
+            TinyMultiscaleVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="multiscale_d5_bce",
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        patches = [
+            torch.linspace(-1.0, 1.0, 64).reshape(1, 4, 4, 4),
+            torch.linspace(0.8, -0.6, 64).reshape(1, 4, 4, 4),
+        ]
+        masks = [torch.ones(4, 4, 4), torch.ones(4, 4, 4)]
+        masks[1][3] = 0.0
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.9, "offset": 0.1},
+        ]
+        try:
+            adapter.optimizer.zero_grad(set_to_none=True)
+            pseudo_loss, entropy = adapter._backward_case_supervision(
+                patches,
+                masks,
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            recorded = adapter._last_pseudo_diagnostics
+            self.assertTrue(np.isfinite(entropy))
+            self.assertGreater(recorded["multiscale_bce_loss"], 0.0)
+            self.assertAlmostEqual(
+                pseudo_loss,
+                recorded["multiscale_dice_loss"]
+                + recorded["multiscale_bce_loss"],
+                places=6,
+            )
+            self.assertAlmostEqual(pseudo_loss, recorded["pseudo_loss"], places=7)
+            self.assertIsNotNone(adapter.ctx.grad)
+            self.assertTrue(torch.isfinite(adapter.ctx.grad).all())
+            self.assertGreater(float(adapter.ctx.grad.norm()), 0.0)
+        finally:
+            adapter.close()
+
+    def test_multiscale_d5_bce_adapt_trace_records_one_consistent_update(self):
+        adapter = VoxTellCMTTA(
+            TinyMultiscaleVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="multiscale_d5_bce",
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        patch_tensor = torch.linspace(-0.8, 0.9, 64).reshape(1, 4, 4, 4)
+        valid = torch.ones(4, 4, 4)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.95, "offset": 0.02},
+        ]
+        short = adapter.ctx.detach().clone()
+        prepared = {
+            "patches": [patch_tensor],
+            "valid_masks": [valid],
+            "params": params,
+            "short_ctx": short,
+            "current_quality": 0.0,
+            "historical_quality": 0.0,
+            "current_cac": 0.0,
+            "historical_cac": 0.0,
+            "weight_historical": 0.0,
+            "long_ctx": short.clone(),
+        }
+        try:
+            with patch.object(
+                adapter,
+                "_select_case_view",
+                return_value=(1, torch.tensor([0.0, 1.0])),
+            ), patch.object(adapter, "_backward_case_cac", return_value=0.0):
+                trace = adapter.adapt_case(
+                    [patch_tensor], [valid], prepared_case=prepared
+                )
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertEqual(trace["pseudo_update_mode"], "multiscale_d5_bce")
+            self.assertAlmostEqual(
+                trace["pseudo_loss"],
+                trace["soft_dice"] + trace["soft_bce"],
+                places=6,
+            )
+            self.assertAlmostEqual(trace["loss"], trace["pseudo_loss"], places=6)
         finally:
             adapter.close()
 
