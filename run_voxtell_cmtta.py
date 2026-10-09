@@ -6,6 +6,7 @@ import argparse
 import json
 import random
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -465,6 +466,8 @@ def compute_tdc_sliding_comparisons(
     post_text_feature: torch.Tensor,
     params: list[dict[str, float]],
     selected_view: int,
+    lora_adapter=None,
+    pre_lora_state: dict[str, torch.Tensor] | None = None,
 ) -> dict[str, object]:
     """Run the four TDC-only full-case sliding-window comparisons.
 
@@ -485,9 +488,22 @@ def compute_tdc_sliding_comparisons(
     predictions = {}
     metrics = {}
     for name, (view_data, text_feature) in inputs.items():
-        prediction = predict_case(
-            predictor, view_data, bbox, original_shape, text_feature
-        )
+        if lora_adapter is None:
+            lora_context = nullcontext()
+        elif name.startswith("pre_"):
+            if pre_lora_state is None:
+                raise ValueError(
+                    "pre_lora_state is required for LoRA pre-update comparisons"
+                )
+            lora_context = lora_adapter.temporary_lora_state(
+                pre_lora_state, enabled=True
+            )
+        else:
+            lora_context = lora_adapter.lora_mode(True)
+        with lora_context:
+            prediction = predict_case(
+                predictor, view_data, bbox, original_shape, text_feature
+            )
         predictions[name] = prediction
         metrics[name] = binary_diagnostic_metrics(prediction, target)
 
@@ -522,6 +538,10 @@ def compute_tdc_sliding_comparisons(
         "prompt_sources": {
             "pre": "current_prompt_embedding_before_case_update",
             "post": "current_prompt_embedding_after_case_update",
+        },
+        "lora_sources": {
+            "pre": "current_case_lora_snapshot_before_update",
+            "post": "current_lora_after_update",
         },
     }
 
@@ -982,6 +1002,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w_cac", type=float, default=1.0)
     parser.add_argument("--w_entropy", type=float, default=0.1)
     parser.add_argument(
+        "--use_lora",
+        action="store_true",
+        help=(
+            "Adapt packed Q/K/V projections of executed VoxTell transformer "
+            "decoder cross-attention layers."
+        ),
+    )
+    parser.add_argument("--lora_rank", type=int, default=1)
+    parser.add_argument("--lora_alpha", type=float, default=1.0)
+    parser.add_argument(
+        "--lora_dropout",
+        type=float,
+        default=0.0,
+        help="Packed nn.MultiheadAttention LoRA currently requires zero.",
+    )
+    parser.add_argument(
         "--use_d4_local_distill",
         action="store_true",
         help=(
@@ -1134,23 +1170,24 @@ def main() -> None:
             with torch.no_grad():
                 zero_ctx = torch.zeros_like(adapter.ctx_delta.detach())
                 zero_shot_text = adapter._encode_ctx(zero_ctx).detach()
-            zero_shot_sliding_prediction = predict_case(
-                predictor,
-                data,
-                bbox,
-                original_shape,
-                zero_shot_text,
-            )
-            zero_shot_nonoverlap_prediction = predict_nonoverlap_case(
-                adapter,
-                patches,
-                valid_masks,
-                _locations,
-                data.shape[-3:],
-                bbox,
-                original_shape,
-                zero_shot_text,
-            )
+            with adapter.lora_mode(False):
+                zero_shot_sliding_prediction = predict_case(
+                    predictor,
+                    data,
+                    bbox,
+                    original_shape,
+                    zero_shot_text,
+                )
+                zero_shot_nonoverlap_prediction = predict_nonoverlap_case(
+                    adapter,
+                    patches,
+                    valid_masks,
+                    _locations,
+                    data.shape[-3:],
+                    bbox,
+                    original_shape,
+                    zero_shot_text,
+                )
             zero_shot_target = np.squeeze(load_ras_label(str(label_path)))
             zero_shot_metrics = binary_diagnostic_metrics(
                 zero_shot_sliding_prediction, zero_shot_target
@@ -1177,15 +1214,16 @@ def main() -> None:
                 selection_text_feature_before = adapter._encode_ctx(
                     prepared_case["short_ctx"].detach()
                 ).detach()
-            view_gt_metrics_before = evaluate_view_gt_metrics_before_adaptation(
-                predictor,
-                label_path,
-                data,
-                bbox,
-                original_shape,
-                selection_text_feature_before,
-                prepared_case["params"],
-            )
+            with adapter.lora_mode(True):
+                view_gt_metrics_before = evaluate_view_gt_metrics_before_adaptation(
+                    predictor,
+                    label_path,
+                    data,
+                    bbox,
+                    original_shape,
+                    selection_text_feature_before,
+                    prepared_case["params"],
+                )
 
             if args.selector_only_eval:
                 # Compute both quality families from this one shared frozen
@@ -1262,19 +1300,21 @@ def main() -> None:
 
             # One complete case is one adaptation time step.  adapt_case sums
             # all patch losses and performs exactly one optimizer/LSPM update.
+            lora_state_before = adapter.lora_state_dict()
             with torch.no_grad():
                 prompt_embedding_before = adapter._encode_ctx(
                     adapter.ctx_delta.detach()
                 ).detach()
             pre_adaptation_current_metrics = None
             if args.pseudo_teacher_inference == "sliding":
-                pre_adaptation_prediction = predict_case(
-                    predictor,
-                    data,
-                    bbox,
-                    original_shape,
-                    prompt_embedding_before,
-                )
+                with adapter.lora_mode(True):
+                    pre_adaptation_prediction = predict_case(
+                        predictor,
+                        data,
+                        bbox,
+                        original_shape,
+                        prompt_embedding_before,
+                    )
                 pre_adaptation_current_metrics = binary_diagnostic_metrics(
                     pre_adaptation_prediction, zero_shot_target
                 )
@@ -1284,16 +1324,17 @@ def main() -> None:
                 def teacher_pseudo_provider(selected_view, long_ctx):
                     with torch.no_grad():
                         long_text_feature = adapter._encode_ctx(long_ctx).detach()
-                    labels, info = sliding_teacher_patch_labels(
-                        predictor,
-                        data,
-                        long_text_feature,
-                        prepared_case["params"],
-                        selected_view,
-                        patches,
-                        valid_masks,
-                        _locations,
-                    )
+                    with adapter.lora_mode(False):
+                        labels, info = sliding_teacher_patch_labels(
+                            predictor,
+                            data,
+                            long_text_feature,
+                            prepared_case["params"],
+                            selected_view,
+                            patches,
+                            valid_masks,
+                            _locations,
+                        )
                     teacher_context["labels"] = labels
                     teacher_context["info"] = info
                     teacher_context["long_text_feature"] = long_text_feature
@@ -1308,14 +1349,15 @@ def main() -> None:
                 info = teacher_context.get("info")
                 if info is None:
                     raise RuntimeError("Sliding teacher diagnostics were not generated")
-                patch_labels = patch_teacher_probability(
-                    adapter,
-                    patches,
-                    valid_masks,
-                    prepared_case["params"],
-                    trace["selected_view"],
-                    prepared_case["long_ctx"],
-                )
+                with adapter.lora_mode(False):
+                    patch_labels = patch_teacher_probability(
+                        adapter,
+                        patches,
+                        valid_masks,
+                        prepared_case["params"],
+                        trace["selected_view"],
+                        prepared_case["long_ctx"],
+                    )
                 patch_probability, valid_crop = stitch_patch_probabilities(
                     patch_labels,
                     valid_masks,
@@ -1404,6 +1446,8 @@ def main() -> None:
                     text_feature,
                     prepared_case["params"],
                     trace["selected_view"],
+                    lora_adapter=adapter if adapter.use_lora else None,
+                    pre_lora_state=lora_state_before if adapter.use_lora else None,
                 )
                 row = evaluate_prediction_case(
                     tdc_sliding["predictions"]["post_original_sliding"],
@@ -1426,19 +1470,21 @@ def main() -> None:
                 ]
                 row["tdc_sliding_differences"] = tdc_sliding["differences"]
                 row["tdc_sliding_prompt_sources"] = tdc_sliding["prompt_sources"]
+                row["tdc_sliding_lora_sources"] = tdc_sliding["lora_sources"]
                 row["tdc_selected_view"] = tdc_sliding["selected_view"]
                 row["tdc_selected_param"] = tdc_sliding["selected_param"]
             else:
-                row = evaluate_case(
-                    predictor,
-                    image_path,
-                    label_path,
-                    data,
-                    bbox,
-                    original_shape,
-                    text_feature,
-                    predictions_dir,
-                )
+                with adapter.lora_mode(True):
+                    row = evaluate_case(
+                        predictor,
+                        image_path,
+                        label_path,
+                        data,
+                        bbox,
+                        original_shape,
+                        text_feature,
+                        predictions_dir,
+                    )
             row.update(zero_shot_diagnostic_fields(zero_shot_metrics))
             row["adaptation_quality"] = trace["selected_cac"]
             row["selected_view"] = trace["selected_view"]

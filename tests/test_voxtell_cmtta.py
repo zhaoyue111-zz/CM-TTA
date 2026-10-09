@@ -15,6 +15,7 @@ from torch.nn import functional as F
 
 from data.voxtell_p0 import make_case_patches, pad_to_patch_grid
 from method.voxtell_cmtta import (
+    LoRAPackedQKVMultiheadAttention,
     ShortPromptMemory,
     VoxTellCMTTA,
     avg_entropy,
@@ -39,6 +40,8 @@ from method.voxtell_cmtta import (
     tdc_from_components,
     tdc_patch_components,
     weighted_masked_dice_components,
+    load_cmtta_checkpoint,
+    save_cmtta_checkpoint,
 )
 from run_voxtell_cmtta import (
     binary_diagnostic_metrics,
@@ -98,6 +101,50 @@ class TinyMultiscaleVoxTell(TinyVoxTell):
         d3 = F.adaptive_avg_pool3d(logits, (1, 1, 1))
         d2 = logits.mean(dim=(2, 3, 4), keepdim=True)
         return [logits, d4, d3, d2, d2]
+
+
+class TinyCrossAttentionLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.normalize_before = True
+        self.self_attn = nn.MultiheadAttention(2, 1, dropout=0.0)
+        self.multihead_attn = nn.MultiheadAttention(2, 1, dropout=0.0)
+
+
+class TinyCrossAttentionDecoder(nn.Module):
+    def __init__(self, num_layers=2):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [TinyCrossAttentionLayer() for _ in range(num_layers)]
+        )
+
+
+class TinyLoRAVoxTell(TinyVoxTell):
+    """Tiny VoxTell graph that executes cross-attention but not self-attention."""
+
+    def __init__(self):
+        super().__init__()
+        self.transformer_decoder = TinyCrossAttentionDecoder()
+
+    def forward(self, image, text_embedding, return_decoder_outputs=False):
+        batch, _, depth, height, width = image.shape
+        visual = image[:, 0].permute(1, 2, 3, 0).reshape(
+            depth * height * width, batch, 1
+        )
+        memory = self.project_bottleneck_embed(visual)
+        text = text_embedding.squeeze(2).permute(1, 0, 2)
+        query = self.project_text_embed(text)
+        for layer in self.transformer_decoder.layers:
+            query = query + layer.multihead_attn(
+                query=query, key=memory, value=memory, need_weights=False
+            )[0]
+        prompt_bias = query.mean(dim=-1).transpose(0, 1).view(
+            batch, 1, 1, 1, 1
+        )
+        logits = image[:, :1] + prompt_bias
+        if return_decoder_outputs:
+            return [logits, logits, logits, logits, logits]
+        return logits
 
 
 class TinyFusionDecoderShell(nn.Module):
@@ -223,6 +270,261 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
+    def test_lora_initial_zero_delta_matches_baseline_and_targets_cross_attention(self):
+        torch.manual_seed(67)
+        base_model = TinyLoRAVoxTell()
+        baseline = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(pseudo_update_mode="original", use_lora=False),
+        )
+        lora = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_update_mode="original",
+                use_lora=True,
+                lora_rank=1,
+                lora_alpha=1.0,
+                lora_dropout=0.0,
+            ),
+        )
+        image = torch.randn(2, 1, 3, 3, 3)
+        try:
+            baseline_logits = baseline._forward(image, baseline.ctx)
+            lora_logits = lora._forward(image, lora.ctx)
+            self.assertTrue(torch.equal(baseline_logits, lora_logits))
+            self.assertEqual(len(lora._lora_modules), 2)
+            for layer, (_, module) in zip(
+                lora.model.transformer_decoder.layers, lora._lora_modules
+            ):
+                self.assertIsInstance(
+                    module, LoRAPackedQKVMultiheadAttention
+                )
+                self.assertIs(layer.multihead_attn, module)
+                self.assertIsInstance(layer.self_attn, nn.MultiheadAttention)
+                for letter in "qkv":
+                    self.assertGreater(
+                        float(
+                            getattr(module, f"lora_{letter}_A")
+                            .detach()
+                            .abs()
+                            .sum()
+                        ),
+                        0.0,
+                    )
+                    self.assertEqual(
+                        float(
+                            getattr(module, f"lora_{letter}_B")
+                            .detach()
+                            .abs()
+                            .sum()
+                        ),
+                        0.0,
+                    )
+            self.assertEqual(len(lora.lora_named_parameters), 12)
+            self.assertEqual(
+                sum(parameter.numel() for _, parameter in lora.lora_named_parameters),
+                24,
+            )
+        finally:
+            baseline.close()
+            lora.close()
+
+    def test_lora_update_receives_gradient_changes_and_restores_teacher_mode(self):
+        torch.manual_seed(71)
+        adapter = VoxTellCMTTA(
+            TinyLoRAVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                use_lora=True,
+                lora_rank=1,
+                lora_alpha=1.0,
+                lora_dropout=0.0,
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        patch_tensor = torch.linspace(-1.0, 1.0, 64).reshape(1, 4, 4, 4)
+        valid = torch.ones(4, 4, 4)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.75, "offset": 0.15},
+        ]
+        observed_modes = []
+        handles = [
+            module.register_forward_pre_hook(
+                lambda current, _inputs: observed_modes.append(current.enabled)
+            )
+            for _, module in adapter._lora_modules
+        ]
+        try:
+            adapter._select_case_view(
+                [patch_tensor], params, adapter.ctx.detach(), [valid]
+            )
+            self.assertTrue(observed_modes)
+            self.assertTrue(all(mode is False for mode in observed_modes))
+            self.assertTrue(all(module.enabled for _, module in adapter._lora_modules))
+
+            observed_modes.clear()
+            before = adapter.lora_state_dict()
+            short = adapter.ctx.detach().clone()
+            prepared = {
+                "patches": [patch_tensor],
+                "valid_masks": [valid],
+                "params": params,
+                "short_ctx": short,
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "current_cac": 0.0,
+                "historical_cac": 0.0,
+                "weight_historical": 0.0,
+                "long_ctx": short.clone(),
+            }
+            with patch.object(
+                adapter,
+                "_select_case_view",
+                return_value=(1, torch.tensor([0.0, 1.0])),
+            ), patch.object(adapter, "_backward_case_cac", return_value=0.0):
+                trace = adapter.adapt_case(
+                    [patch_tensor], [valid], prepared_case=prepared
+                )
+            after = adapter.lora_state_dict()
+            self.assertIn(False, observed_modes)
+            self.assertIn(True, observed_modes)
+            self.assertTrue(all(module.enabled for _, module in adapter._lora_modules))
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertEqual(adapter.optimizer_step_count, 1)
+            b_parameters = [
+                parameter
+                for name, parameter in adapter.lora_named_parameters
+                if name.endswith("_B")
+            ]
+            self.assertTrue(any(parameter.grad is not None for parameter in b_parameters))
+            self.assertTrue(
+                any(
+                    not torch.equal(before[name], after[name])
+                    for name in before
+                )
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+            adapter.close()
+
+    def test_lora_checkpoint_restore_preserves_prediction(self):
+        torch.manual_seed(73)
+        base_model = TinyLoRAVoxTell()
+
+        def build():
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    pseudo_update_mode="original",
+                    use_lora=True,
+                    lora_rank=1,
+                    lora_alpha=1.0,
+                    lora_dropout=0.0,
+                ),
+            )
+
+        source = build()
+        restored = build()
+        image = torch.randn(1, 1, 3, 3, 3)
+        try:
+            source.optimizer.zero_grad(set_to_none=True)
+            for parameter in source.trainable_parameters:
+                parameter.grad = torch.full_like(parameter, 0.01)
+            source.optimizer.step()
+            self.assertEqual(
+                len(source.optimizer.state), len(source.trainable_parameters)
+            )
+            expected = source._forward(image, source.ctx_delta).detach()
+            with TemporaryDirectory() as directory:
+                checkpoint = Path(directory) / "cmtta_lora.pt"
+                save_cmtta_checkpoint(
+                    str(checkpoint), source, make_args(), [{"case": "tiny"}]
+                )
+                load_cmtta_checkpoint(str(checkpoint), restored)
+            actual = restored._forward(image, restored.ctx_delta).detach()
+            self.assertTrue(torch.equal(expected, actual))
+            self.assertEqual(source.lora_state_dict().keys(), restored.lora_state_dict().keys())
+            for name, value in source.lora_state_dict().items():
+                self.assertTrue(torch.equal(value, restored.lora_state_dict()[name]))
+            self.assertEqual(
+                len(source.optimizer.state), len(restored.optimizer.state)
+            )
+        finally:
+            source.close()
+            restored.close()
+
+    def test_tdc_sliding_comparison_uses_pre_and_post_lora_states(self):
+        adapter = VoxTellCMTTA(
+            TinyLoRAVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_update_mode="original",
+                use_lora=True,
+                lora_rank=1,
+                lora_alpha=1.0,
+                lora_dropout=0.0,
+            ),
+        )
+        pre_state = adapter.lora_state_dict()
+        with torch.no_grad():
+            for name, parameter in adapter.lora_named_parameters:
+                if name.endswith("_B"):
+                    parameter.add_(0.25)
+        post_state = adapter.lora_state_dict()
+        calls = []
+
+        def fake_predict(_predictor, _data, _bbox, original_shape, _text):
+            calls.append(
+                (
+                    sum(float(value.sum()) for value in adapter.lora_state_dict().values()),
+                    all(module.enabled for _, module in adapter._lora_modules),
+                )
+            )
+            return np.zeros(original_shape, dtype=np.uint8)
+
+        try:
+            with patch("run_voxtell_cmtta.predict_case", side_effect=fake_predict):
+                compute_tdc_sliding_comparisons(
+                    object(),
+                    torch.zeros(1, 2, 2, 2),
+                    None,
+                    (2, 2, 2),
+                    np.zeros((2, 2, 2), dtype=np.uint8),
+                    torch.zeros(1, 1, 2),
+                    torch.zeros(1, 1, 2),
+                    [{"scale": 1.0, "offset": 0.0}],
+                    0,
+                    lora_adapter=adapter,
+                    pre_lora_state=pre_state,
+                )
+            pre_sum = sum(float(value.sum()) for value in pre_state.values())
+            post_sum = sum(float(value.sum()) for value in post_state.values())
+            self.assertEqual(len(calls), 4)
+            self.assertTrue(all(enabled for _, enabled in calls))
+            self.assertAlmostEqual(calls[0][0], pre_sum, places=6)
+            self.assertAlmostEqual(calls[1][0], pre_sum, places=6)
+            self.assertAlmostEqual(calls[2][0], post_sum, places=6)
+            self.assertAlmostEqual(calls[3][0], post_sum, places=6)
+            for name, value in post_state.items():
+                self.assertTrue(torch.equal(value, adapter.lora_state_dict()[name]))
+        finally:
+            adapter.close()
+
     def test_binary_diagnostic_metrics_returns_confusion_and_all_scores(self):
         prediction = np.array([1, 1, 0, 0], dtype=np.uint8)
         target = np.array([1, 0, 1, 0], dtype=np.uint8)

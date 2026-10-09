@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import warnings
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -26,6 +27,128 @@ MULTISCALE_D5_WEIGHTS = (0.8, 0.09, 0.06, 0.05)
 D4_FUSION_CHANNELS = 32
 D4_LOCAL_WINDOW_SIZE = 5
 D4_LOCAL_COSINE_EPS = 1e-6
+
+
+class LoRAPackedQKVMultiheadAttention(nn.Module):
+    """Q/K/V LoRA for a packed ``nn.MultiheadAttention.in_proj_weight``."""
+
+    def __init__(
+        self,
+        base: nn.MultiheadAttention,
+        rank: int,
+        alpha: float,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        if rank <= 0:
+            raise ValueError("LoRA rank must be positive")
+        if not base._qkv_same_embed_dim or base.in_proj_weight is None:
+            raise ValueError("Cross-attention LoRA requires packed Q/K/V weights")
+        if dropout != 0.0:
+            raise ValueError(
+                "Packed nn.MultiheadAttention LoRA requires lora_dropout=0"
+            )
+        self.base = base
+        self.rank = int(rank)
+        self.alpha = float(alpha)
+        self.dropout = float(dropout)
+        self.scaling = self.alpha / self.rank
+        self.enabled = True
+        embed_dim = int(base.embed_dim)
+        for parameter in self.base.parameters():
+            parameter.requires_grad_(False)
+        for letter in "qkv":
+            self.register_parameter(
+                f"lora_{letter}_A",
+                nn.Parameter(base.in_proj_weight.new_empty((self.rank, embed_dim))),
+            )
+            self.register_parameter(
+                f"lora_{letter}_B",
+                nn.Parameter(base.in_proj_weight.new_zeros((embed_dim, self.rank))),
+            )
+            nn.init.kaiming_uniform_(
+                getattr(self, f"lora_{letter}_A"), a=5 ** 0.5
+            )
+        self.train(base.training)
+
+    def lora_parameters(self) -> Iterable[nn.Parameter]:
+        for letter in "qkv":
+            yield getattr(self, f"lora_{letter}_A")
+            yield getattr(self, f"lora_{letter}_B")
+
+    def _merged_in_proj_weight(self) -> torch.Tensor:
+        weight = self.base.in_proj_weight
+        if not self.enabled:
+            return weight
+        embed_dim = int(self.base.embed_dim)
+        deltas = []
+        for letter in "qkv":
+            lora_a = getattr(self, f"lora_{letter}_A")
+            lora_b = getattr(self, f"lora_{letter}_B")
+            deltas.append((lora_b @ lora_a) * self.scaling)
+        delta = torch.cat(deltas, dim=0).to(
+            device=weight.device, dtype=weight.dtype
+        )
+        return weight + delta
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = True,
+        attn_mask: Optional[torch.Tensor] = None,
+        average_attn_weights: bool = True,
+        is_causal: bool = False,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if not self.enabled:
+            return self.base(
+                query=query,
+                key=key,
+                value=value,
+                key_padding_mask=key_padding_mask,
+                need_weights=need_weights,
+                attn_mask=attn_mask,
+                average_attn_weights=average_attn_weights,
+                is_causal=is_causal,
+            )
+        is_batched = query.dim() == 3
+        if self.base.batch_first and is_batched:
+            query, key, value = (
+                tensor.transpose(1, 0) for tensor in (query, key, value)
+            )
+        output, weights = F.multi_head_attention_forward(
+            query=query,
+            key=key,
+            value=value,
+            embed_dim_to_check=self.base.embed_dim,
+            num_heads=self.base.num_heads,
+            in_proj_weight=self._merged_in_proj_weight(),
+            in_proj_bias=self.base.in_proj_bias,
+            bias_k=self.base.bias_k,
+            bias_v=self.base.bias_v,
+            add_zero_attn=self.base.add_zero_attn,
+            dropout_p=self.base.dropout if self.training else 0.0,
+            out_proj_weight=self.base.out_proj.weight,
+            out_proj_bias=self.base.out_proj.bias,
+            training=self.training,
+            key_padding_mask=key_padding_mask,
+            need_weights=need_weights,
+            attn_mask=attn_mask,
+            average_attn_weights=average_attn_weights,
+            is_causal=is_causal,
+        )
+        if self.base.batch_first and is_batched:
+            output = output.transpose(1, 0)
+        return output, weights
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            base = super().__getattr__("base")
+            return getattr(base, name)
 
 
 def avg_entropy(
@@ -1107,7 +1230,7 @@ class ShortPromptMemory:
 
 
 class VoxTellCMTTA:
-    """CM-TTA/LSPM/DSPU with one trainable FP32 token-tuning delta."""
+    """CM-TTA with trainable FP32 ctx delta and optional cross-attention LoRA."""
 
     def __init__(
         self,
@@ -1198,6 +1321,16 @@ class VoxTellCMTTA:
             raise ValueError(
                 "d4_local_diagnostics requires use_d4_local_distill"
             )
+        self.use_lora = bool(getattr(args, "use_lora", False))
+        self.lora_rank = int(getattr(args, "lora_rank", 1))
+        self.lora_alpha = float(getattr(args, "lora_alpha", 1.0))
+        self.lora_dropout = float(getattr(args, "lora_dropout", 0.0))
+        if self.lora_rank <= 0:
+            raise ValueError("lora_rank must be positive")
+        if self.lora_alpha <= 0.0:
+            raise ValueError("lora_alpha must be positive")
+        if not 0.0 <= self.lora_dropout < 1.0:
+            raise ValueError("lora_dropout must be in [0, 1)")
         self.pseudo_update_mode = str(getattr(args, "pseudo_update_mode", "original"))
         if self.pseudo_update_mode not in (
             "original",
@@ -1296,8 +1429,19 @@ class VoxTellCMTTA:
             raise ValueError("num_aug_views must be at least 1")
         if not 0.0 < self.selection_p <= 1.0:
             raise ValueError("selection_p must be in (0, 1]")
+        if self.use_lora:
+            if self.pseudo_update_mode != "original":
+                raise ValueError("LoRA adaptation requires pseudo_update_mode='original'")
+            if self.use_d4_local_distill:
+                raise ValueError("LoRA adaptation requires D4 local distillation off")
 
-        self.optimizer = torch.optim.Adam([self.ctx_delta], lr=self.lr)
+        self._lora_modules: list[
+            tuple[str, LoRAPackedQKVMultiheadAttention]
+        ] = []
+        if self.use_lora:
+            self._inject_cross_attention_lora()
+        self._initial_lora_state = self.lora_state_dict()
+        self.optimizer = torch.optim.Adam(self.trainable_parameters, lr=self.lr)
         amp_enabled = self.device.type == "cuda"
         if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
             self.scaler = torch.amp.GradScaler(
@@ -1370,6 +1514,10 @@ class VoxTellCMTTA:
         """Reset prompt/memory/optimizer state for selector-only evaluation."""
         self.ctx_delta.data.copy_(self.initial_ctx_delta)
         self.ctx_delta.grad = None
+        if self.use_lora:
+            self.load_lora_state_dict(self._initial_lora_state)
+            for _, parameter in self.lora_named_parameters:
+                parameter.grad = None
         self.short_delta = None
         self.long_delta = None
         self.short_memory = ShortPromptMemory(self.short_memory.max_length)
@@ -1553,7 +1701,7 @@ class VoxTellCMTTA:
 
     @property
     def ctx(self) -> torch.Tensor:
-        """Compatibility alias for the sole trainable prompt delta."""
+        """Compatibility alias for the trainable prompt delta."""
         return self.ctx_delta
 
     @property
@@ -1583,21 +1731,153 @@ class VoxTellCMTTA:
     def optimizer_parameters(self):
         return [parameter for group in self.optimizer.param_groups for parameter in group["params"]]
 
+    @property
+    def lora_named_parameters(self) -> list[tuple[str, nn.Parameter]]:
+        result = []
+        for module_name, module in self._lora_modules:
+            for parameter_name, parameter in module.named_parameters(recurse=False):
+                if parameter_name.startswith("lora_"):
+                    result.append((f"{module_name}.{parameter_name}", parameter))
+        return result
+
+    @property
+    def trainable_parameters(self) -> list[nn.Parameter]:
+        return [self.ctx_delta, *(parameter for _, parameter in self.lora_named_parameters)]
+
+    def _inject_cross_attention_lora(self) -> None:
+        base_model = getattr(self.model, "_orig_mod", self.model)
+        decoder = getattr(base_model, "transformer_decoder", None)
+        layers = getattr(decoder, "layers", None)
+        if layers is None or len(layers) == 0:
+            raise RuntimeError(
+                "LoRA requires VoxTell transformer_decoder.layers cross-attention"
+            )
+        # LoRA initialization must not perturb the case augmentation RNG stream.
+        cpu_rng_state = torch.random.get_rng_state()
+        cuda_rng_state = (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        )
+        try:
+            for layer_index, layer in enumerate(layers):
+                if getattr(layer, "normalize_before", None) is not True:
+                    raise RuntimeError(
+                        "LoRA mapping expects VoxTell forward_pre(), where only "
+                        "cross-attention executes"
+                    )
+                attention = getattr(layer, "multihead_attn", None)
+                if not isinstance(attention, nn.MultiheadAttention):
+                    raise RuntimeError(
+                        "Expected nn.MultiheadAttention at "
+                        f"transformer_decoder.layers.{layer_index}.multihead_attn"
+                    )
+                wrapped = LoRAPackedQKVMultiheadAttention(
+                    attention,
+                    rank=self.lora_rank,
+                    alpha=self.lora_alpha,
+                    dropout=self.lora_dropout,
+                )
+                layer.multihead_attn = wrapped
+                self._lora_modules.append(
+                    (
+                        f"transformer_decoder.layers.{layer_index}.multihead_attn",
+                        wrapped,
+                    )
+                )
+        finally:
+            torch.random.set_rng_state(cpu_rng_state)
+            if cuda_rng_state is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_state)
+
+    @contextmanager
+    def lora_mode(self, enabled: bool):
+        previous = [module.enabled for _, module in self._lora_modules]
+        try:
+            for _, module in self._lora_modules:
+                module.enabled = bool(enabled)
+            yield
+        finally:
+            for (_, module), was_enabled in zip(self._lora_modules, previous):
+                module.enabled = was_enabled
+
+    def lora_state_dict(self) -> dict[str, torch.Tensor]:
+        return {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in self.lora_named_parameters
+        }
+
+    def load_lora_state_dict(self, state: dict[str, torch.Tensor]) -> None:
+        expected = {name for name, _ in self.lora_named_parameters}
+        supplied = set(state)
+        if expected != supplied:
+            raise ValueError(
+                "LoRA state keys do not match injected modules: "
+                f"missing={sorted(expected - supplied)}, "
+                f"unexpected={sorted(supplied - expected)}"
+            )
+        with torch.no_grad():
+            for name, parameter in self.lora_named_parameters:
+                value = state[name].to(device=parameter.device, dtype=parameter.dtype)
+                if value.shape != parameter.shape:
+                    raise ValueError(
+                        f"LoRA parameter shape mismatch for {name}: "
+                        f"{tuple(value.shape)} vs {tuple(parameter.shape)}"
+                    )
+                parameter.copy_(value)
+
+    @contextmanager
+    def temporary_lora_state(
+        self, state: dict[str, torch.Tensor], enabled: bool = True
+    ):
+        current = self.lora_state_dict()
+        try:
+            self.load_lora_state_dict(state)
+            with self.lora_mode(enabled):
+                yield
+        finally:
+            self.load_lora_state_dict(current)
+
     def _print_trainable_parameters(self) -> None:
-        trainable = [("ctx_delta", self.ctx_delta)]
+        trainable = [("ctx_delta", self.ctx_delta), *self.lora_named_parameters]
         unexpected = [
             name
             for name, parameter in trainable
             if not parameter.requires_grad
         ]
         optimizer_parameters = self.optimizer_parameters
-        if unexpected or len(optimizer_parameters) != 1 or optimizer_parameters[0] is not self.ctx_delta:
-            raise RuntimeError("Only ctx_delta may be trainable and optimized")
+        if unexpected or [id(parameter) for parameter in optimizer_parameters] != [
+            id(parameter) for _, parameter in trainable
+        ]:
+            raise RuntimeError("Optimizer parameters do not match ctx_delta plus LoRA")
+        allowed = {id(parameter) for _, parameter in trainable}
+        leaked_trainable = [
+            name
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad and id(parameter) not in allowed
+        ]
+        if leaked_trainable:
+            raise RuntimeError(
+                f"Unexpected trainable VoxTell parameters: {leaked_trainable[:5]}"
+            )
         print(
             "[VoxTell-CM-TTA] trainable parameters: "
             f"ctx_delta shape={tuple(self.ctx_delta.shape)}, dtype={self.ctx_delta.dtype}, "
             f"numel={self.ctx_delta.numel()}"
         )
+        if self.use_lora:
+            lora_numel = sum(
+                parameter.numel() for _, parameter in self.lora_named_parameters
+            )
+            for module_name, _ in self._lora_modules:
+                print(
+                    "[VoxTell-CM-TTA] LoRA injection: "
+                    f"module={module_name}, matrices=qkv, rank={self.lora_rank}, "
+                    f"alpha={self.lora_alpha}, dropout={self.lora_dropout}"
+                )
+            print(
+                "[VoxTell-CM-TTA] LoRA trainable parameters: "
+                f"modules={len(self._lora_modules)}, numel={lora_numel}, "
+                f"total_with_ctx={lora_numel + self.ctx_delta.numel()}"
+            )
 
     def _check_case_gradients(self, allow_nonfinite: bool = False) -> None:
         if self.ctx_delta.grad is None:
@@ -1606,6 +1886,28 @@ class VoxTellCMTTA:
             raise RuntimeError("ctx_delta gradient is zero during case adaptation")
         if not allow_nonfinite and not torch.isfinite(self.ctx_delta.grad).all():
             raise RuntimeError("ctx_delta gradient is zero or non-finite during case adaptation")
+        if self.use_lora:
+            lora_gradients = [
+                parameter.grad
+                for _, parameter in self.lora_named_parameters
+                if parameter.grad is not None
+            ]
+            if not lora_gradients:
+                raise RuntimeError("LoRA did not receive a gradient during case adaptation")
+            if not allow_nonfinite and not all(
+                torch.isfinite(gradient).all() for gradient in lora_gradients
+            ):
+                raise RuntimeError("LoRA gradient is non-finite during case adaptation")
+            all_lora_finite = all(
+                torch.isfinite(gradient).all() for gradient in lora_gradients
+            )
+            if all_lora_finite and not any(
+                float(gradient.norm()) > 0.0 for gradient in lora_gradients
+            ):
+                raise RuntimeError("All LoRA gradients are zero during case adaptation")
+        allowed_gradient_ids = {
+            id(parameter) for _, parameter in self.lora_named_parameters
+        }
         frozen_modules = [("VoxTell", self.model)]
         if self.qwen_text_encoder is not None:
             frozen_modules.append(("Qwen", self.qwen_text_encoder))
@@ -1613,7 +1915,7 @@ class VoxTellCMTTA:
             f"{module_name}.{name}"
             for module_name, module in frozen_modules
             for name, parameter in module.named_parameters()
-            if parameter.grad is not None
+            if parameter.grad is not None and id(parameter) not in allowed_gradient_ids
         ]
         if leaked:
             raise RuntimeError(f"Frozen model parameters received gradients: {leaked[:5]}")
@@ -1930,6 +2232,24 @@ class VoxTellCMTTA:
         valid_masks: Optional[list[torch.Tensor]] = None,
         collect_tdc: bool = False,
     ) -> tuple[int, torch.Tensor]:
+        """Select a view with student LoRA disabled, restoring prior state."""
+        with self.lora_mode(False):
+            return self._select_case_view_without_lora(
+                patches,
+                params,
+                short_ctx,
+                valid_masks,
+                collect_tdc,
+            )
+
+    def _select_case_view_without_lora(
+        self,
+        patches: list[torch.Tensor],
+        params: list[dict[str, float]],
+        short_ctx: torch.Tensor,
+        valid_masks: Optional[list[torch.Tensor]] = None,
+        collect_tdc: bool = False,
+    ) -> tuple[int, torch.Tensor]:
         if valid_masks is None:
             valid_masks = [None] * len(patches)
         if len(valid_masks) != len(patches):
@@ -2211,7 +2531,8 @@ class VoxTellCMTTA:
                             selected, long_ctx
                         )
                     elif teacher_pseudo_labels is None:
-                        pseudo_logits = self._forward(selected, long_ctx)
+                        with self.lora_mode(False):
+                            pseudo_logits = self._forward(selected, long_ctx)
                     if teacher_pseudo_labels is None:
                         pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
                     else:
@@ -3551,7 +3872,8 @@ class VoxTellCMTTA:
                 device_type=self.device.type, enabled=autocast_enabled
             ):
                 if teacher_pseudo_labels is None:
-                    pseudo_logits = self._forward(selected, long_ctx)
+                    with self.lora_mode(False):
+                        pseudo_logits = self._forward(selected, long_ctx)
                     pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
                 else:
                     pseudo_label = teacher_pseudo_labels[patch_index].to(
@@ -4003,9 +4325,10 @@ class VoxTellCMTTA:
             normalized_masks.append(mask.float().contiguous())
         valid_masks = normalized_masks
         params = self._sample_intensity_params(self.num_aug_views)
-        short_ctx, current_quality, historical_quality, weight_historical = self._dynamic_short_ctx(
-            patches, valid_masks
-        )
+        with self.lora_mode(False):
+            short_ctx, current_quality, historical_quality, weight_historical = self._dynamic_short_ctx(
+                patches, valid_masks
+            )
 
         if self.long_delta is None:
             long_ctx = short_ctx.detach().clone()
@@ -4120,6 +4443,13 @@ class VoxTellCMTTA:
                 pseudo_view_weights[selected_view].cpu()
             ),
             "pseudo_teacher_inference": self.pseudo_teacher_inference,
+            "use_lora": self.use_lora,
+            "lora_rank": self.lora_rank if self.use_lora else None,
+            "lora_alpha": self.lora_alpha if self.use_lora else None,
+            "lora_dropout": self.lora_dropout if self.use_lora else None,
+            "lora_trainable_parameter_count": sum(
+                parameter.numel() for _, parameter in self.lora_named_parameters
+            ),
         }
         autocast_enabled = self.device.type == "cuda"
         pseudo_loss, entropy_loss = self._backward_case_supervision(
@@ -4233,7 +4563,9 @@ class VoxTellCMTTA:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        torch.nn.utils.clip_grad_norm_([self.ctx_delta], float(self.args.grad_clip))
+        torch.nn.utils.clip_grad_norm_(
+            self.trainable_parameters, float(self.args.grad_clip)
+        )
         self.scaler.step(self.optimizer)
         self.scaler.update()
         scale_after_step = float(self.scaler.get_scale())
@@ -4347,6 +4679,12 @@ class VoxTellCMTTA:
             "optimizer": self.optimizer.state_dict(),
             "scaler": self.scaler.state_dict(),
             "optimizer_step_count": self.optimizer_step_count,
+            "use_lora": self.use_lora,
+            "lora_rank": self.lora_rank,
+            "lora_alpha": self.lora_alpha,
+            "lora_dropout": self.lora_dropout,
+            "lora_modules": [name for name, _ in self._lora_modules],
+            "lora_state": self.lora_state_dict(),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -4376,6 +4714,29 @@ class VoxTellCMTTA:
                 "ctx_delta checkpoint prompt/token count does not match the current "
                 "fixed VoxTell tokenizer"
             )
+        checkpoint_uses_lora = bool(state.get("use_lora", False))
+        if checkpoint_uses_lora != self.use_lora:
+            raise ValueError(
+                "Checkpoint LoRA setting does not match the current adapter"
+            )
+        if self.use_lora:
+            configuration = (
+                int(state.get("lora_rank", -1)),
+                float(state.get("lora_alpha", -1.0)),
+                float(state.get("lora_dropout", -1.0)),
+                list(state.get("lora_modules", [])),
+            )
+            expected_configuration = (
+                self.lora_rank,
+                self.lora_alpha,
+                self.lora_dropout,
+                [name for name, _ in self._lora_modules],
+            )
+            if configuration != expected_configuration:
+                raise ValueError(
+                    "Checkpoint LoRA configuration does not match the current adapter"
+                )
+            self.load_lora_state_dict(state.get("lora_state", {}))
         delta = state["ctx_delta"].to(self.device)
         if tuple(delta.shape) != tuple(self.ctx_delta.shape):
             raise ValueError(
