@@ -25,6 +25,7 @@ MULTISCALE_D5_NAMES = ("D5", "D4", "D3", "D2")
 MULTISCALE_D5_WEIGHTS = (0.8, 0.09, 0.06, 0.05)
 D4_FUSION_CHANNELS = 32
 D4_LOCAL_WINDOW_SIZE = 5
+D4_LOCAL_COSINE_EPS = 1e-6
 
 
 def avg_entropy(
@@ -240,8 +241,11 @@ def build_d4_local_teacher_cache(
     pseudo_label: torch.Tensor,
     valid_weight: torch.Tensor,
     window_size: int = D4_LOCAL_WINDOW_SIZE,
+    loss_type: str = "mse",
 ) -> dict[str, torch.Tensor]:
     """Build teacher-defined D4 boundary windows and detached relation vectors."""
+    if loss_type not in ("mse", "cosine"):
+        raise ValueError("D4 local loss_type must be 'mse' or 'cosine'")
     if teacher_fusion.ndim != 5 or teacher_fusion.shape[0] != 1:
         raise ValueError("D4 teacher fusion must have shape (1,C,D,H,W)")
     if teacher_fusion.shape[1] != D4_FUSION_CHANNELS:
@@ -289,6 +293,12 @@ def build_d4_local_teacher_cache(
             "teacher_relation": teacher_fusion.new_empty(
                 (0, teacher_fusion.shape[1]), dtype=torch.float32
             ).detach(),
+            "teacher_small_norm_skipped_count": torch.zeros(
+                (), device=teacher_fusion.device, dtype=torch.long
+            ),
+            "teacher_nonfinite_count": torch.zeros(
+                (), device=teacher_fusion.device, dtype=torch.long
+            ),
         }
     fg_selected = fg_windows[0, indices]
     bg_selected = bg_windows[0, indices]
@@ -299,24 +309,58 @@ def build_d4_local_teacher_cache(
     background_mean = (
         teacher_selected * bg_selected.unsqueeze(1)
     ).sum(dim=-1) / bg_selected.sum(dim=-1, keepdim=True).clamp_min(EPS)
+    teacher_relation = foreground_mean - background_mean
+    skipped_count = torch.zeros(
+        (), device=teacher_fusion.device, dtype=torch.long
+    )
+    teacher_nonfinite_count = torch.zeros(
+        (), device=teacher_fusion.device, dtype=torch.long
+    )
+    if loss_type == "cosine":
+        teacher_norm = torch.linalg.vector_norm(teacher_relation.float(), dim=-1)
+        finite_relation = torch.isfinite(teacher_relation).all(dim=-1)
+        finite_norm = torch.isfinite(teacher_norm)
+        finite_direction = finite_relation & finite_norm
+        direction_valid = finite_direction & (teacher_norm > D4_LOCAL_COSINE_EPS)
+        skipped_count = (
+            finite_direction & (teacher_norm <= D4_LOCAL_COSINE_EPS)
+        ).sum()
+        teacher_nonfinite_count = (~torch.isfinite(teacher_relation)).sum()
+        indices = indices[direction_valid]
+        fg_selected = fg_selected[direction_valid]
+        bg_selected = bg_selected[direction_valid]
+        teacher_relation = teacher_relation[direction_valid]
     return {
         "window_indices": indices.detach(),
         "foreground_weight": fg_selected.detach(),
         "background_weight": bg_selected.detach(),
-        "teacher_relation": (foreground_mean - background_mean).detach(),
+        "teacher_relation": teacher_relation.detach(),
+        "teacher_small_norm_skipped_count": skipped_count.detach(),
+        "teacher_nonfinite_count": teacher_nonfinite_count.detach(),
     }
 
 
-def d4_local_relation_squared_sum(
+def d4_local_relation_loss_components(
     student_fusion: torch.Tensor,
     teacher_cache: dict[str, torch.Tensor],
     window_size: int = D4_LOCAL_WINDOW_SIZE,
-) -> tuple[torch.Tensor, int]:
-    """Return squared relation error sum and number of averaged elements."""
+    loss_type: str = "mse",
+) -> dict[str, object]:
+    """Return an additive local loss and detached direction diagnostics."""
+    if loss_type not in ("mse", "cosine"):
+        raise ValueError("D4 local loss_type must be 'mse' or 'cosine'")
     feature_windows = _nonoverlap_3d_windows(student_fusion.float(), window_size)
     indices = teacher_cache["window_indices"].to(student_fusion.device)
     if indices.numel() == 0:
-        return student_fusion.sum() * 0.0, 0
+        empty = student_fusion.new_empty((0,), dtype=torch.float32)
+        return {
+            "loss_sum": student_fusion.float().sum() * 0.0,
+            "count": 0,
+            "cosine": empty,
+            "teacher_norm": empty,
+            "student_norm": empty,
+            "nonfinite_count": 0,
+        }
     selected = feature_windows[:, indices]
     fg_weight = teacher_cache["foreground_weight"].to(student_fusion.device)
     bg_weight = teacher_cache["background_weight"].to(student_fusion.device)
@@ -327,10 +371,93 @@ def d4_local_relation_squared_sum(
     background_mean = (
         selected * bg_weight.unsqueeze(0).unsqueeze(2)
     ).sum(dim=-1) / bg_weight.sum(dim=-1).view(1, -1, 1).clamp_min(EPS)
-    relation = foreground_mean - background_mean
-    squared_sum = (relation - teacher_relation.unsqueeze(0)).square().sum()
-    count = int(relation.numel())
-    return squared_sum, count
+    relation = (foreground_mean - background_mean).float()
+    teacher_relation = teacher_relation.float().detach()
+    student_norm = torch.linalg.vector_norm(relation, dim=-1)
+    teacher_norm = torch.linalg.vector_norm(teacher_relation, dim=-1)
+    student_direction = relation / student_norm.clamp_min(
+        D4_LOCAL_COSINE_EPS
+    ).unsqueeze(-1)
+    teacher_direction = teacher_relation / teacher_norm.clamp_min(
+        D4_LOCAL_COSINE_EPS
+    ).unsqueeze(-1)
+    cosine = (student_direction * teacher_direction.unsqueeze(0)).sum(dim=-1)
+    cosine = cosine.clamp(-1.0, 1.0)
+    if loss_type == "cosine":
+        loss_sum = (1.0 - cosine).sum()
+        count = int(cosine.numel())
+    else:
+        loss_sum = (relation - teacher_relation.unsqueeze(0)).square().sum()
+        count = int(relation.numel())
+    expanded_teacher_norm = teacher_norm.unsqueeze(0).expand_as(student_norm)
+    nonfinite_count = sum(
+        int((~torch.isfinite(value)).sum().detach().cpu())
+        for value in (cosine, expanded_teacher_norm, student_norm)
+    )
+    return {
+        "loss_sum": loss_sum,
+        "count": count,
+        "cosine": cosine.detach(),
+        "teacher_norm": expanded_teacher_norm.detach(),
+        "student_norm": student_norm.detach(),
+        "nonfinite_count": nonfinite_count,
+    }
+
+
+def d4_local_relation_squared_sum(
+    student_fusion: torch.Tensor,
+    teacher_cache: dict[str, torch.Tensor],
+    window_size: int = D4_LOCAL_WINDOW_SIZE,
+) -> tuple[torch.Tensor, int]:
+    """Compatibility wrapper for the original channel-averaged MSE loss."""
+    components = d4_local_relation_loss_components(
+        student_fusion, teacher_cache, window_size, loss_type="mse"
+    )
+    return components["loss_sum"], components["count"]
+
+
+def summarize_d4_local_diagnostics(
+    cosine_values: list[torch.Tensor],
+    teacher_norm_values: list[torch.Tensor],
+    student_norm_values: list[torch.Tensor],
+    nonfinite_count: int,
+) -> dict[str, Optional[float] | int]:
+    """Summarize already-computed local relation values without new forwards."""
+    def concatenate(values: list[torch.Tensor]) -> torch.Tensor:
+        finite = [value.detach().float().cpu().flatten() for value in values]
+        return torch.cat(finite) if finite else torch.empty(0, dtype=torch.float32)
+
+    cosine = concatenate(cosine_values)
+    teacher_norm = concatenate(teacher_norm_values)
+    student_norm = concatenate(student_norm_values)
+    finite_cosine = cosine[torch.isfinite(cosine)]
+    finite_teacher = teacher_norm[torch.isfinite(teacher_norm)]
+    finite_student = student_norm[torch.isfinite(student_norm)]
+
+    def mean_or_none(value: torch.Tensor) -> Optional[float]:
+        return None if value.numel() == 0 else float(value.mean())
+
+    def min_or_none(value: torch.Tensor) -> Optional[float]:
+        return None if value.numel() == 0 else float(value.min())
+
+    if finite_cosine.numel() == 0:
+        percentiles = (None, None, None)
+    else:
+        quantiles = torch.quantile(
+            finite_cosine, torch.tensor([0.1, 0.5, 0.9])
+        ).tolist()
+        percentiles = tuple(float(value) for value in quantiles)
+    return {
+        "d4_local_cosine_mean": mean_or_none(finite_cosine),
+        "d4_local_cosine_p10": percentiles[0],
+        "d4_local_cosine_p50": percentiles[1],
+        "d4_local_cosine_p90": percentiles[2],
+        "d4_local_teacher_relation_norm_mean": mean_or_none(finite_teacher),
+        "d4_local_teacher_relation_norm_min": min_or_none(finite_teacher),
+        "d4_local_student_relation_norm_mean": mean_or_none(finite_student),
+        "d4_local_student_relation_norm_min": min_or_none(finite_student),
+        "d4_local_nonfinite_count": int(nonfinite_count),
+    }
 
 
 def soft_dice_loss(
@@ -1059,6 +1186,18 @@ class VoxTellCMTTA:
         self.w_d4_local = float(getattr(args, "w_d4_local", 0.01))
         if self.w_d4_local < 0.0:
             raise ValueError("w_d4_local must be non-negative")
+        self.d4_local_loss_type = str(
+            getattr(args, "d4_local_loss_type", "mse")
+        )
+        if self.d4_local_loss_type not in ("mse", "cosine"):
+            raise ValueError("d4_local_loss_type must be 'mse' or 'cosine'")
+        self.d4_local_diagnostics = bool(
+            getattr(args, "d4_local_diagnostics", False)
+        )
+        if self.d4_local_diagnostics and not self.use_d4_local_distill:
+            raise ValueError(
+                "d4_local_diagnostics requires use_d4_local_distill"
+            )
         self.pseudo_update_mode = str(getattr(args, "pseudo_update_mode", "original"))
         if self.pseudo_update_mode not in (
             "original",
@@ -2048,6 +2187,11 @@ class VoxTellCMTTA:
         local_loss_sum = None
         local_element_count = 0
         local_valid_windows = 0
+        local_teacher_small_norm_skipped = 0
+        local_nonfinite_count = 0
+        local_cosine_values: list[torch.Tensor] = []
+        local_teacher_norm_values: list[torch.Tensor] = []
+        local_student_norm_values: list[torch.Tensor] = []
         local_teacher_caches: list[dict[str, torch.Tensor]] = []
         if teacher_pseudo_labels is not None and len(teacher_pseudo_labels) != len(patches):
             raise ValueError(
@@ -2081,10 +2225,21 @@ class VoxTellCMTTA:
                         tuple(teacher_fusion.shape[2:]),
                     )
                     teacher_cache = build_d4_local_teacher_cache(
-                        teacher_fusion.detach(), d4_target, d4_valid
+                        teacher_fusion.detach(),
+                        d4_target,
+                        d4_valid,
+                        loss_type=self.d4_local_loss_type,
                     )
                     local_valid_windows += int(
                         teacher_cache["window_indices"].numel()
+                    )
+                    local_teacher_small_norm_skipped += int(
+                        teacher_cache[
+                            "teacher_small_norm_skipped_count"
+                        ].detach().cpu()
+                    )
+                    local_nonfinite_count += int(
+                        teacher_cache["teacher_nonfinite_count"].detach().cpu()
                     )
                     local_teacher_caches.append(
                         {key: value.detach().cpu() for key, value in teacher_cache.items()}
@@ -2130,11 +2285,24 @@ class VoxTellCMTTA:
                             else input_mask_batch[:1],
                         )
                         if self.use_d4_local_distill:
-                            patch_local_sum, patch_local_count = (
-                                d4_local_relation_squared_sum(
-                                    student_fusion, teacher_cache
-                                )
+                            local_components = d4_local_relation_loss_components(
+                                student_fusion,
+                                teacher_cache,
+                                loss_type=self.d4_local_loss_type,
                             )
+                            patch_local_sum = local_components["loss_sum"]
+                            patch_local_count = int(local_components["count"])
+                            if self.d4_local_diagnostics:
+                                local_cosine_values.append(local_components["cosine"])
+                                local_teacher_norm_values.append(
+                                    local_components["teacher_norm"]
+                                )
+                                local_student_norm_values.append(
+                                    local_components["student_norm"]
+                                )
+                                local_nonfinite_count += int(
+                                    local_components["nonfinite_count"]
+                                )
                     if dice_stats is None:
                         dice_stats = {
                             key: torch.zeros(
@@ -2163,6 +2331,12 @@ class VoxTellCMTTA:
             raise RuntimeError("D4 local teacher cache is incomplete")
         if local_loss_sum is None:
             local_loss_sum = entropy_sum.new_zeros(())
+        local_diagnostics = summarize_d4_local_diagnostics(
+            local_cosine_values,
+            local_teacher_norm_values,
+            local_student_norm_values,
+            local_nonfinite_count,
+        )
         return {
             **dice_stats,
             "entropy_sum": entropy_sum,
@@ -2170,7 +2344,11 @@ class VoxTellCMTTA:
             "d4_local_loss_sum": local_loss_sum,
             "d4_local_element_count": local_element_count,
             "d4_local_valid_windows": local_valid_windows,
+            "d4_local_teacher_small_norm_skipped_count": (
+                local_teacher_small_norm_skipped
+            ),
             "d4_local_teacher_caches": local_teacher_caches,
+            "d4_local_relation_diagnostics": local_diagnostics,
         }
 
     def _forward_multiscale_d5_stats(
@@ -2194,6 +2372,11 @@ class VoxTellCMTTA:
         local_loss_sum = None
         local_element_count = 0
         local_valid_windows = 0
+        local_teacher_small_norm_skipped = 0
+        local_nonfinite_count = 0
+        local_cosine_values: list[torch.Tensor] = []
+        local_teacher_norm_values: list[torch.Tensor] = []
+        local_student_norm_values: list[torch.Tensor] = []
         local_teacher_caches: list[dict[str, torch.Tensor]] = []
         with torch.no_grad():
             for patch, valid_mask in zip(patches, valid_masks):
@@ -2220,13 +2403,24 @@ class VoxTellCMTTA:
                         tuple(teacher_outputs[1].shape[2:]),
                     )
                     teacher_cache = build_d4_local_teacher_cache(
-                        teacher_fusion.detach(), d4_target, d4_valid
+                        teacher_fusion.detach(),
+                        d4_target,
+                        d4_valid,
+                        loss_type=self.d4_local_loss_type,
                     )
                     local_valid_windows += int(
                         teacher_cache["window_indices"].numel()
                     )
                     local_teacher_caches.append(
                         {key: value.detach().cpu() for key, value in teacher_cache.items()}
+                    )
+                    local_teacher_small_norm_skipped += int(
+                        teacher_cache[
+                            "teacher_small_norm_skipped_count"
+                        ].detach().cpu()
+                    )
+                    local_nonfinite_count += int(
+                        teacher_cache["teacher_nonfinite_count"].detach().cpu()
                     )
                 for start in range(0, total_views, self.view_batch_size):
                     end = min(total_views, start + self.view_batch_size)
@@ -2280,15 +2474,28 @@ class VoxTellCMTTA:
                                 for key, value in local_bce.items():
                                     bce_stats[scale_index][key][start:end].add_(value)
                         if self.use_d4_local_distill:
-                            patch_local_sum, patch_local_count = (
-                                d4_local_relation_squared_sum(
-                                    student_fusion, teacher_cache
-                                )
+                            local_components = d4_local_relation_loss_components(
+                                student_fusion,
+                                teacher_cache,
+                                loss_type=self.d4_local_loss_type,
                             )
+                            patch_local_sum = local_components["loss_sum"]
+                            patch_local_count = int(local_components["count"])
                             if local_loss_sum is None:
                                 local_loss_sum = torch.zeros_like(patch_local_sum)
                             local_loss_sum.add_(patch_local_sum)
                             local_element_count += patch_local_count
+                            if self.d4_local_diagnostics:
+                                local_cosine_values.append(local_components["cosine"])
+                                local_teacher_norm_values.append(
+                                    local_components["teacher_norm"]
+                                )
+                                local_student_norm_values.append(
+                                    local_components["student_norm"]
+                                )
+                                local_nonfinite_count += int(
+                                    local_components["nonfinite_count"]
+                                )
                         if start <= selected_view < end:
                             selected_index = selected_view - start
                             d5_probabilities = torch.sigmoid(student_outputs[0][:, :1])
@@ -2310,6 +2517,12 @@ class VoxTellCMTTA:
             raise RuntimeError("D4 local teacher cache is incomplete")
         if local_loss_sum is None:
             local_loss_sum = entropy_sum.new_zeros(())
+        local_diagnostics = summarize_d4_local_diagnostics(
+            local_cosine_values,
+            local_teacher_norm_values,
+            local_student_norm_values,
+            local_nonfinite_count,
+        )
         return {
             "scale_stats": scale_stats,
             "bce_stats": bce_stats if include_bce else None,
@@ -2318,7 +2531,11 @@ class VoxTellCMTTA:
             "d4_local_loss_sum": local_loss_sum,
             "d4_local_element_count": local_element_count,
             "d4_local_valid_windows": local_valid_windows,
+            "d4_local_teacher_small_norm_skipped_count": (
+                local_teacher_small_norm_skipped
+            ),
             "d4_local_teacher_caches": local_teacher_caches,
+            "d4_local_relation_diagnostics": local_diagnostics,
         }
 
     def _selected_prompt_region_diagnostics(
@@ -3316,6 +3533,11 @@ class VoxTellCMTTA:
         else:
             global_local_loss = global_dice.new_zeros(())
         weighted_local_loss = self.w_d4_local * global_local_loss
+        local_gradient = (
+            torch.zeros_like(self.ctx_delta, dtype=torch.float32)
+            if self.d4_local_diagnostics
+            else None
+        )
 
         total_views = len(params)
         for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
@@ -3370,10 +3592,28 @@ class VoxTellCMTTA:
                         dice_derivatives[1][start:end],
                     ]
                     if self.use_d4_local_distill and local_element_count > 0:
-                        patch_local_sum, _ = d4_local_relation_squared_sum(
+                        local_components = d4_local_relation_loss_components(
                             student_fusion,
                             stats["d4_local_teacher_caches"][patch_index],
+                            loss_type=self.d4_local_loss_type,
                         )
+                        patch_local_sum = local_components["loss_sum"]
+                        local_weighted_objective = (
+                            patch_local_sum
+                            * self.w_d4_local
+                            / float(local_element_count)
+                        )
+                        if self.d4_local_diagnostics:
+                            patch_local_gradient = torch.autograd.grad(
+                                local_weighted_objective,
+                                self.ctx_delta,
+                                retain_graph=True,
+                                allow_unused=True,
+                            )[0]
+                            if patch_local_gradient is not None:
+                                local_gradient.add_(
+                                    patch_local_gradient.detach().float()
+                                )
                         local_tensors.append(patch_local_sum)
                         local_gradients.append(
                             patch_local_sum.new_tensor(
@@ -3402,13 +3642,24 @@ class VoxTellCMTTA:
                     self.scaler.scale(local_objective).backward()
         self._last_pseudo_diagnostics = {
             "pseudo_update_mode": "original",
+            "d4_local_loss_type": self.d4_local_loss_type,
             "d4_local_loss": float(global_local_loss.detach().cpu()),
             "d4_local_weighted_loss": float(weighted_local_loss.detach().cpu()),
             "d4_local_valid_windows": int(stats["d4_local_valid_windows"]),
             "L_local": float(global_local_loss.detach().cpu()),
             "weighted_L_local": float(weighted_local_loss.detach().cpu()),
             "d4_local_valid_window_count": int(stats["d4_local_valid_windows"]),
+            "d4_local_teacher_small_norm_skipped_count": int(
+                stats["d4_local_teacher_small_norm_skipped_count"]
+            ),
         }
+        if self.d4_local_diagnostics:
+            self._last_pseudo_diagnostics.update(
+                stats["d4_local_relation_diagnostics"]
+            )
+            self._last_pseudo_diagnostics["d4_local_gradient_norm"] = float(
+                torch.linalg.vector_norm(local_gradient).detach().cpu()
+            )
         return float(global_dice.detach().cpu()), float(global_entropy.detach().cpu())
 
     def _backward_case_multiscale_d5_supervision(
@@ -3489,6 +3740,11 @@ class VoxTellCMTTA:
         else:
             global_local_loss = global_pseudo_loss.new_zeros(())
         weighted_local_loss = self.w_d4_local * global_local_loss
+        local_gradient = (
+            torch.zeros_like(self.ctx_delta, dtype=torch.float32)
+            if self.d4_local_diagnostics
+            else None
+        )
         entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
         entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
         global_entropy = entropy_sum / entropy_mass.clamp_min(1.0)
@@ -3556,10 +3812,28 @@ class VoxTellCMTTA:
                                 scale_derivatives[scale_index][3][start:end]
                             )
                     if self.use_d4_local_distill and local_element_count > 0:
-                        patch_local_sum, _ = d4_local_relation_squared_sum(
+                        local_components = d4_local_relation_loss_components(
                             student_fusion,
                             stats["d4_local_teacher_caches"][patch_index],
+                            loss_type=self.d4_local_loss_type,
                         )
+                        patch_local_sum = local_components["loss_sum"]
+                        local_weighted_objective = (
+                            patch_local_sum
+                            * self.w_d4_local
+                            / float(local_element_count)
+                        )
+                        if self.d4_local_diagnostics:
+                            patch_local_gradient = torch.autograd.grad(
+                                local_weighted_objective,
+                                self.ctx_delta,
+                                retain_graph=True,
+                                allow_unused=True,
+                            )[0]
+                            if patch_local_gradient is not None:
+                                local_gradient.add_(
+                                    patch_local_gradient.detach().float()
+                                )
                         local_tensors.append(patch_local_sum)
                         local_gradients.append(
                             patch_local_sum.new_tensor(
@@ -3591,6 +3865,7 @@ class VoxTellCMTTA:
             "pseudo_update_mode": (
                 "multiscale_d5_bce" if include_bce else "multiscale_d5"
             ),
+            "d4_local_loss_type": self.d4_local_loss_type,
             "pseudo_scale_names": list(MULTISCALE_D5_NAMES),
             "pseudo_scale_weights": scale_weights.detach().cpu().tolist(),
             "multiscale_dice_loss": float(global_dice.detach().cpu()),
@@ -3602,7 +3877,17 @@ class VoxTellCMTTA:
             "L_local": float(global_local_loss.detach().cpu()),
             "weighted_L_local": float(weighted_local_loss.detach().cpu()),
             "d4_local_valid_window_count": int(stats["d4_local_valid_windows"]),
+            "d4_local_teacher_small_norm_skipped_count": int(
+                stats["d4_local_teacher_small_norm_skipped_count"]
+            ),
         }
+        if self.d4_local_diagnostics:
+            self._last_pseudo_diagnostics.update(
+                stats["d4_local_relation_diagnostics"]
+            )
+            self._last_pseudo_diagnostics["d4_local_gradient_norm"] = float(
+                torch.linalg.vector_norm(local_gradient).detach().cpu()
+            )
         return (
             float(global_pseudo_loss.detach().cpu()),
             float(global_entropy.detach().cpu()),
@@ -3933,6 +4218,12 @@ class VoxTellCMTTA:
         self._check_case_gradients(allow_nonfinite=True)
         scale_before_step = float(self.scaler.get_scale())
         self.scaler.unscale_(self.optimizer)
+        if self.d4_local_diagnostics:
+            sums["d4_local_total_gradient_norm_before_clip"] = float(
+                torch.linalg.vector_norm(
+                    self.ctx_delta.grad.detach().float()
+                ).cpu()
+            )
         if torch.isfinite(self.ctx_delta.grad).all():
             self._check_case_gradients()
         else:
@@ -4006,6 +4297,42 @@ class VoxTellCMTTA:
             "selected_cac": selected_cac,
             **sums,
         }
+        if self.d4_local_diagnostics:
+            def diagnostic_value(name: str) -> str:
+                value = self.last_trace.get(name)
+                if value is None:
+                    return "none"
+                if isinstance(value, float):
+                    return f"{value:.6g}"
+                return str(value)
+
+            print(
+                "[VoxTell-CM-TTA] D4 local diagnostics: "
+                f"loss_type={diagnostic_value('d4_local_loss_type')}, "
+                f"L_local={diagnostic_value('L_local')}, "
+                f"weighted_L_local={diagnostic_value('weighted_L_local')}, "
+                "valid_windows="
+                f"{diagnostic_value('d4_local_valid_window_count')}, "
+                "teacher_small_norm_skipped="
+                f"{diagnostic_value('d4_local_teacher_small_norm_skipped_count')}, "
+                f"cosine_mean={diagnostic_value('d4_local_cosine_mean')}, "
+                f"cosine_p10={diagnostic_value('d4_local_cosine_p10')}, "
+                f"cosine_p50={diagnostic_value('d4_local_cosine_p50')}, "
+                f"cosine_p90={diagnostic_value('d4_local_cosine_p90')}, "
+                "teacher_norm_mean="
+                f"{diagnostic_value('d4_local_teacher_relation_norm_mean')}, "
+                "teacher_norm_min="
+                f"{diagnostic_value('d4_local_teacher_relation_norm_min')}, "
+                "student_norm_mean="
+                f"{diagnostic_value('d4_local_student_relation_norm_mean')}, "
+                "student_norm_min="
+                f"{diagnostic_value('d4_local_student_relation_norm_min')}, "
+                f"nonfinite={diagnostic_value('d4_local_nonfinite_count')}, "
+                "local_grad_norm="
+                f"{diagnostic_value('d4_local_gradient_norm')}, "
+                "total_grad_norm_before_clip="
+                f"{diagnostic_value('d4_local_total_gradient_norm_before_clip')}"
+            )
         return dict(self.last_trace)
 
     def state_dict(self) -> dict:

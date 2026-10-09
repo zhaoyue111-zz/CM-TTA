@@ -995,6 +995,17 @@ def parse_args() -> argparse.Namespace:
         help="Weight of D4 local text-fusion relation distillation.",
     )
     parser.add_argument(
+        "--d4_local_loss_type",
+        choices=("mse", "cosine"),
+        default="mse",
+        help="D4 local relation loss; mse preserves the original experiment.",
+    )
+    parser.add_argument(
+        "--d4_local_diagnostics",
+        action="store_true",
+        help="Record and print per-case D4 local relation/gradient diagnostics.",
+    )
+    parser.add_argument(
         "--gradient_conflict_diagnostics",
         action="store_true",
         help=(

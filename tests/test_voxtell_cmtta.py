@@ -26,6 +26,7 @@ from method.voxtell_cmtta import (
     cac_components_from_features,
     decoder_consistency_probabilities,
     decoder_grid_to_input_order,
+    d4_local_relation_loss_components,
     d4_local_relation_squared_sum,
     downsample_soft_label_and_valid_mask,
     check_voxtell_decoder_d5_alignment,
@@ -1385,6 +1386,208 @@ class VoxTellCMTTATest(unittest.TestCase):
         )
         self.assertEqual(count, 32 * cache["window_indices"].numel())
         self.assertGreater(float(squared_sum), 0.0)
+
+    def test_d4_local_cosine_direction_limits_and_window_denominator(self):
+        teacher_relation = torch.linspace(0.5, 2.0, 32)
+        foreground_weight = torch.zeros(1, 125)
+        background_weight = torch.zeros(1, 125)
+        foreground_weight[0, 0] = 1.0
+        background_weight[0, 1] = 1.0
+        cache = {
+            "window_indices": torch.tensor([0]),
+            "foreground_weight": foreground_weight,
+            "background_weight": background_weight,
+            "teacher_relation": teacher_relation.unsqueeze(0),
+            "teacher_small_norm_skipped_count": torch.tensor(0),
+        }
+
+        def fusion_for(relation):
+            fusion = torch.zeros(1, 32, 5, 5, 5)
+            fusion[0, :, 0, 0, 0] = relation
+            return fusion
+
+        same = d4_local_relation_loss_components(
+            fusion_for(teacher_relation * 3.0), cache, loss_type="cosine"
+        )
+        opposite = d4_local_relation_loss_components(
+            fusion_for(-teacher_relation * 2.0), cache, loss_type="cosine"
+        )
+        self.assertEqual(same["count"], 1)
+        self.assertEqual(opposite["count"], 1)
+        self.assertAlmostEqual(float(same["loss_sum"]), 0.0, places=6)
+        self.assertAlmostEqual(float(opposite["loss_sum"]), 2.0, places=6)
+        self.assertGreaterEqual(float(same["cosine"].min()), -1.0)
+        self.assertLessEqual(float(same["cosine"].max()), 1.0)
+        differentiable_fusion = fusion_for(teacher_relation.roll(1)).requires_grad_()
+        directional = d4_local_relation_loss_components(
+            differentiable_fusion, cache, loss_type="cosine"
+        )
+        directional["loss_sum"].backward()
+        self.assertTrue(torch.isfinite(differentiable_fusion.grad).all())
+        self.assertGreater(float(differentiable_fusion.grad.norm()), 0.0)
+
+    def test_d4_local_cosine_skips_teacher_zero_direction(self):
+        teacher_fusion = torch.ones(1, 32, 5, 5, 5)
+        pseudo = torch.full((1, 1, 5, 5, 5), 0.1)
+        pseudo[:, :, :, :, 2:] = 0.9
+        valid = torch.ones_like(pseudo)
+        cache = build_d4_local_teacher_cache(
+            teacher_fusion,
+            pseudo,
+            valid,
+            loss_type="cosine",
+        )
+        self.assertEqual(cache["window_indices"].numel(), 0)
+        self.assertGreater(
+            int(cache["teacher_small_norm_skipped_count"]), 0
+        )
+        components = d4_local_relation_loss_components(
+            teacher_fusion, cache, loss_type="cosine"
+        )
+        self.assertEqual(components["count"], 0)
+        self.assertEqual(float(components["loss_sum"]), 0.0)
+
+    def test_original_d4_cosine_is_view_batch_invariant(self):
+        torch.manual_seed(59)
+        base_model = TinyD4FusionVoxTell()
+        patch_tensor = torch.full((1, 10, 10, 10), 5.0)
+        patch_tensor[:, :, :, :3] = -5.0
+        valid = torch.ones(10, 10, 10)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+            {"scale": 1.1, "offset": -0.2},
+        ]
+
+        def build(view_batch_size):
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    use_d4_local_distill=True,
+                    d4_local_loss_type="cosine",
+                    w_d4_local=0.01,
+                    num_aug_views=2,
+                    view_batch_size=view_batch_size,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                ),
+            )
+
+        def run(adapter):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            result = adapter._backward_case_supervision(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            return (
+                result,
+                adapter._last_pseudo_diagnostics["L_local"],
+                adapter.ctx.grad.detach().clone(),
+            )
+
+        one = build(1)
+        all_views = build(3)
+        try:
+            one_result, one_local, one_gradient = run(one)
+            all_result, all_local, all_gradient = run(all_views)
+            self.assertTrue(np.allclose(one_result, all_result, atol=1e-7))
+            self.assertAlmostEqual(one_local, all_local, places=7)
+            self.assertTrue(torch.allclose(one_gradient, all_gradient, atol=1e-6))
+        finally:
+            one.close()
+            all_views.close()
+
+    def test_d4_local_diagnostics_do_not_change_gradient_or_update(self):
+        torch.manual_seed(61)
+        base_model = TinyD4FusionVoxTell()
+        patch_tensor = torch.full((1, 10, 10, 10), 5.0)
+        patch_tensor[:, :, :, :3] = -5.0
+        valid = torch.ones(10, 10, 10)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+
+        def build(diagnostics):
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    use_d4_local_distill=True,
+                    d4_local_loss_type="cosine",
+                    d4_local_diagnostics=diagnostics,
+                    w_d4_local=0.01,
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                ),
+            )
+
+        def run(adapter):
+            short = adapter.ctx.detach().clone()
+            prepared = {
+                "patches": [patch_tensor],
+                "valid_masks": [valid],
+                "params": params,
+                "short_ctx": short,
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "current_cac": 0.0,
+                "historical_cac": 0.0,
+                "weight_historical": 0.0,
+                "long_ctx": short.clone(),
+            }
+            adapter.model.forward_call_count = 0
+            with patch.object(
+                adapter,
+                "_select_case_view",
+                return_value=(1, torch.tensor([0.0, 1.0])),
+            ), patch.object(adapter, "_backward_case_cac", return_value=0.0):
+                trace = adapter.adapt_case(
+                    [patch_tensor], [valid], prepared_case=prepared
+                )
+            return (
+                trace,
+                adapter.ctx_delta.grad.detach().clone(),
+                adapter.ctx_delta.detach().clone(),
+                adapter.model.forward_call_count,
+            )
+
+        plain = build(False)
+        diagnostic = build(True)
+        try:
+            plain_result = run(plain)
+            with patch("builtins.print") as printed:
+                diagnostic_result = run(diagnostic)
+            plain_trace, plain_gradient, plain_ctx, plain_calls = plain_result
+            trace, gradient, ctx, calls = diagnostic_result
+            self.assertAlmostEqual(plain_trace["loss"], trace["loss"], places=7)
+            self.assertTrue(torch.allclose(plain_gradient, gradient, atol=1e-7))
+            self.assertTrue(torch.allclose(plain_ctx, ctx, atol=1e-7))
+            self.assertEqual(plain_calls, calls)
+            self.assertEqual(printed.call_count, 1)
+            self.assertEqual(trace["d4_local_loss_type"], "cosine")
+            self.assertIn("d4_local_gradient_norm", trace)
+            self.assertIn("d4_local_total_gradient_norm_before_clip", trace)
+            self.assertIn("d4_local_cosine_p50", trace)
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+        finally:
+            plain.close()
+            diagnostic.close()
 
     def test_d4_local_case_loss_and_gradient_are_view_batch_invariant(self):
         torch.manual_seed(43)
