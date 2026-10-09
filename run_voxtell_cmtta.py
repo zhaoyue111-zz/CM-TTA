@@ -982,6 +982,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w_cac", type=float, default=1.0)
     parser.add_argument("--w_entropy", type=float, default=0.1)
     parser.add_argument(
+        "--use_d4_local_distill",
+        action="store_true",
+        help=(
+            "Enable D4 pre-head 32-channel local text-fusion relation distillation."
+        ),
+    )
+    parser.add_argument(
+        "--w_d4_local",
+        type=float,
+        default=0.01,
+        help="Weight of D4 local text-fusion relation distillation.",
+    )
+    parser.add_argument(
         "--gradient_conflict_diagnostics",
         action="store_true",
         help=(

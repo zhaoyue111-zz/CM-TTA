@@ -97,6 +97,49 @@ class TinyMultiscaleVoxTell(TinyVoxTell):
         return [logits, d4, d3, d2, d2]
 
 
+class TinyFusionDecoderShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.num_heads = 32
+        self.stages = nn.ModuleList([nn.Identity() for _ in range(5)])
+        layers = [nn.Identity() for _ in range(5)]
+        layers[3] = nn.Conv3d(33, 1, kernel_size=1, bias=False)
+        self.seg_layers = nn.ModuleList(layers)
+
+
+class TinyD4FusionVoxTell(TinyVoxTell):
+    """Decoder double exposing the exact pre-head D4 fusion hook contract."""
+
+    def __init__(self):
+        super().__init__()
+        self.decoder = TinyFusionDecoderShell()
+
+    def forward(self, image, text_embedding, return_decoder_outputs=False):
+        batch, _, depth, height, width = image.shape
+        visual = image[:, 0].permute(1, 2, 3, 0).reshape(
+            depth * height * width, batch, 1
+        )
+        self.project_bottleneck_embed(visual)
+        text = text_embedding.squeeze(2).permute(1, 0, 2)
+        projected_text = self.project_text_embed(text)
+        prompt_scale = projected_text.mean(dim=-1).transpose(0, 1).view(
+            batch, 1, 1, 1, 1
+        )
+        d5 = image[:, :1] + prompt_scale
+        channel_scale = torch.linspace(
+            0.5, 1.5, 32, device=image.device, dtype=image.dtype
+        ).view(1, 32, 1, 1, 1)
+        fusion = image[:, :1] * prompt_scale * channel_scale
+        d4_input = torch.cat((image[:, :1], fusion), dim=1)
+        d4 = self.decoder.seg_layers[3](d4_input)
+        d3 = F.adaptive_avg_pool3d(d4, (5, 5, 5))
+        d2 = F.adaptive_avg_pool3d(d4, (2, 2, 2))
+        d1 = F.adaptive_avg_pool3d(d4, (1, 1, 1))
+        if return_decoder_outputs:
+            return [d5, d4, d3, d2, d1]
+        return d5
+
+
 class TinyQwenTokenizer:
     """Minimal tokenizer exposing the Hugging Face fields used by the adapter."""
 
@@ -1120,6 +1163,131 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertAlmostEqual(trace["loss"], trace["pseudo_loss"], places=6)
         finally:
             adapter.close()
+
+    def test_d4_fusion_capture_is_pre_head_aligned_and_forward_invariant(self):
+        adapter = VoxTellCMTTA(
+            TinyD4FusionVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="multiscale_d5",
+                use_d4_local_distill=True,
+                w_d4_local=0.01,
+            ),
+        )
+        image = torch.randn(1, 1, 10, 10, 10)
+        try:
+            ordinary = adapter._forward_decoder_outputs(image, adapter.ctx)
+            captured, fusion = adapter._forward_decoder_outputs_with_d4_fusion(
+                image, adapter.ctx
+            )
+            for left, right in zip(ordinary, captured):
+                self.assertTrue(torch.equal(left, right))
+            self.assertEqual(tuple(fusion.shape), (1, 32, 10, 10, 10))
+            self.assertEqual(tuple(fusion.shape[2:]), tuple(captured[1].shape[2:]))
+            self.assertTrue(fusion.requires_grad)
+        finally:
+            adapter.close()
+
+    def test_d4_local_distillation_is_optional_finite_and_ctx_only(self):
+        torch.manual_seed(41)
+        base_model = TinyD4FusionVoxTell()
+        patch_tensor = torch.full((1, 10, 10, 10), 5.0)
+        patch_tensor[:, :, :, :3] = -5.0
+        valid = torch.ones(10, 10, 10)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+
+        def build(enabled, weight):
+            return VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.ones(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="multiscale_d5",
+                    use_d4_local_distill=enabled,
+                    w_d4_local=weight,
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_cac=0.0,
+                    w_entropy=0.0,
+                ),
+            )
+
+        def run(adapter):
+            adapter.optimizer.zero_grad(set_to_none=True)
+            result = adapter._backward_case_supervision(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            return result, adapter.ctx.grad.detach().clone()
+
+        disabled = build(False, 0.01)
+        zero_weight = build(True, 0.0)
+        enabled = build(True, 0.01)
+        try:
+            disabled_result, disabled_gradient = run(disabled)
+            zero_result, zero_gradient = run(zero_weight)
+            enabled_result, enabled_gradient = run(enabled)
+            self.assertTrue(np.allclose(disabled_result, zero_result, atol=1e-7))
+            self.assertTrue(torch.allclose(disabled_gradient, zero_gradient, atol=1e-6))
+            diagnostics = enabled._last_pseudo_diagnostics
+            self.assertGreater(diagnostics["d4_local_valid_windows"], 0)
+            self.assertGreater(diagnostics["d4_local_loss"], 0.0)
+            self.assertAlmostEqual(
+                diagnostics["d4_local_weighted_loss"],
+                0.01 * diagnostics["d4_local_loss"],
+                places=7,
+            )
+            self.assertTrue(torch.isfinite(enabled_gradient).all())
+            self.assertGreater(float((enabled_gradient - disabled_gradient).norm()), 0.0)
+            self.assertTrue(
+                all(parameter.grad is None for parameter in enabled.model.parameters())
+            )
+            self.assertEqual(disabled_result, enabled_result)
+            short = enabled.ctx.detach().clone()
+            prepared = {
+                "patches": [patch_tensor],
+                "valid_masks": [valid],
+                "params": params,
+                "short_ctx": short,
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "current_cac": 0.0,
+                "historical_cac": 0.0,
+                "weight_historical": 0.0,
+                "long_ctx": short.clone(),
+            }
+            with patch.object(
+                enabled,
+                "_select_case_view",
+                return_value=(1, torch.tensor([0.0, 1.0])),
+            ), patch.object(enabled, "_backward_case_cac", return_value=0.0):
+                trace = enabled.adapt_case(
+                    [patch_tensor], [valid], prepared_case=prepared
+                )
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertGreater(trace["d4_local_valid_window_count"], 0)
+            self.assertAlmostEqual(trace["L_local"], trace["d4_local_loss"])
+            self.assertAlmostEqual(
+                trace["loss"],
+                trace["pseudo_loss"] + trace["weighted_L_local"],
+                places=6,
+            )
+        finally:
+            disabled.close()
+            zero_weight.close()
+            enabled.close()
 
     def test_tdc_softmax_case_is_chunk_invariant_and_keeps_teacher_selection(self):
         torch.manual_seed(23)
