@@ -4554,25 +4554,30 @@ class VoxTellCMTTA:
                     self.ctx_delta.grad.detach().float()
                 ).cpu()
             )
-        if torch.isfinite(self.ctx_delta.grad).all():
+        all_trainable_gradients_finite = all(
+            parameter.grad is not None
+            and bool(torch.isfinite(parameter.grad).all())
+            for parameter in self.trainable_parameters
+        )
+        if all_trainable_gradients_finite:
             self._check_case_gradients()
+            torch.nn.utils.clip_grad_norm_(
+                self.trainable_parameters, float(self.args.grad_clip)
+            )
         else:
             warnings.warn(
-                "GradScaler detected a non-finite ctx gradient; this case's "
+                "GradScaler detected a missing or non-finite trainable gradient; this case's "
                 "optimizer step may be skipped",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        torch.nn.utils.clip_grad_norm_(
-            self.trainable_parameters, float(self.args.grad_clip)
-        )
         self.scaler.step(self.optimizer)
         self.scaler.update()
         scale_after_step = float(self.scaler.get_scale())
         optimizer_step_skipped = scale_after_step < scale_before_step
         if optimizer_step_skipped:
             warnings.warn(
-                "GradScaler skipped the ctx optimizer step after AMP overflow",
+                "GradScaler skipped the optimizer step after AMP overflow",
                 RuntimeWarning,
                 stacklevel=2,
             )

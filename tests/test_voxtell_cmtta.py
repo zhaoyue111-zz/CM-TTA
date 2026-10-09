@@ -49,6 +49,7 @@ from run_voxtell_cmtta import (
     check_prediction_nifti_geometry,
     compute_tdc_sliding_comparisons,
     evaluate_case,
+    evaluate_selection_view_gt_metrics_before_adaptation,
     macro_average_case_metrics,
     patch_teacher_probability,
     predict_case_soft_probability,
@@ -522,6 +523,148 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertAlmostEqual(calls[3][0], post_sum, places=6)
             for name, value in post_state.items():
                 self.assertTrue(torch.equal(value, adapter.lora_state_dict()[name]))
+        finally:
+            adapter.close()
+
+    def test_selection_view_gt_metrics_use_lora_off_and_restore_state(self):
+        adapter = VoxTellCMTTA(
+            TinyLoRAVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                pseudo_update_mode="original",
+                use_lora=True,
+                lora_rank=1,
+                lora_alpha=1.0,
+                lora_dropout=0.0,
+            ),
+        )
+        observed = []
+
+        def fake_evaluate(*_args, **_kwargs):
+            observed.append(
+                [module.enabled for _, module in adapter._lora_modules]
+            )
+            return [{"view": 0, "GT_Dice_before_adaptation": 1.0}]
+
+        try:
+            with patch(
+                "run_voxtell_cmtta.evaluate_view_gt_metrics_before_adaptation",
+                side_effect=fake_evaluate,
+            ):
+                result = evaluate_selection_view_gt_metrics_before_adaptation(
+                    adapter,
+                    object(),
+                    Path("label.nii.gz"),
+                    torch.zeros(1, 2, 2, 2),
+                    None,
+                    (2, 2, 2),
+                    torch.zeros(1, 1, 2),
+                    [{"scale": 1.0, "offset": 0.0}],
+                )
+            self.assertEqual(result[0]["GT_Dice_before_adaptation"], 1.0)
+            self.assertEqual(observed, [[False, False]])
+            self.assertTrue(all(module.enabled for _, module in adapter._lora_modules))
+        finally:
+            adapter.close()
+
+    def test_lora_nonfinite_gradient_is_left_for_grad_scaler_to_skip(self):
+        class OverflowScaler:
+            def __init__(self):
+                self.scale_value = 8.0
+                self.found_nonfinite = False
+
+            def scale(self, objective):
+                return objective
+
+            def unscale_(self, optimizer):
+                del optimizer
+
+            def step(self, optimizer):
+                self.found_nonfinite = any(
+                    parameter.grad is not None
+                    and not bool(torch.isfinite(parameter.grad).all())
+                    for group in optimizer.param_groups
+                    for parameter in group["params"]
+                )
+                if not self.found_nonfinite:
+                    optimizer.step()
+
+            def update(self):
+                if self.found_nonfinite:
+                    self.scale_value /= 2.0
+
+            def get_scale(self):
+                return self.scale_value
+
+        adapter = VoxTellCMTTA(
+            TinyLoRAVoxTell(),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                use_lora=True,
+                lora_rank=1,
+                lora_alpha=1.0,
+                lora_dropout=0.0,
+                num_aug_views=1,
+            ),
+        )
+        adapter.scaler = OverflowScaler()
+        patch_tensor = torch.zeros(1, 2, 2, 2)
+        valid = torch.ones(2, 2, 2)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.9, "offset": 0.1},
+        ]
+        short = adapter.ctx.detach().clone()
+        prepared = {
+            "patches": [patch_tensor],
+            "valid_masks": [valid],
+            "params": params,
+            "short_ctx": short,
+            "current_quality": 0.0,
+            "historical_quality": 0.0,
+            "current_cac": 0.0,
+            "historical_cac": 0.0,
+            "weight_historical": 0.0,
+            "long_ctx": short.clone(),
+        }
+
+        def install_gradients(*_args, **_kwargs):
+            adapter.ctx_delta.grad = torch.ones_like(adapter.ctx_delta)
+            for _, parameter in adapter.lora_named_parameters:
+                parameter.grad = torch.zeros_like(parameter)
+            adapter.lora_named_parameters[-1][1].grad.fill_(float("inf"))
+            adapter._last_pseudo_diagnostics = {"pseudo_update_mode": "original"}
+            return 0.0, 0.0
+
+        try:
+            with warnings.catch_warnings(record=True) as caught, patch.object(
+                adapter,
+                "_select_case_view",
+                return_value=(0, torch.tensor([1.0, 0.0])),
+            ), patch.object(
+                adapter,
+                "_backward_case_supervision",
+                side_effect=install_gradients,
+            ), patch.object(
+                adapter, "_backward_case_cac", return_value=0.0
+            ), patch(
+                "torch.nn.utils.clip_grad_norm_"
+            ) as clip_grad:
+                warnings.simplefilter("always")
+                trace = adapter.adapt_case(
+                    [patch_tensor], [valid], prepared_case=prepared
+                )
+            self.assertTrue(trace["optimizer_step_skipped"])
+            self.assertEqual(adapter.scaler.get_scale(), 4.0)
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            clip_grad.assert_not_called()
+            self.assertTrue(
+                any("non-finite trainable gradient" in str(item.message) for item in caught)
+            )
         finally:
             adapter.close()
 

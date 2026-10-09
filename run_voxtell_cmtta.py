@@ -834,6 +834,29 @@ def evaluate_view_gt_metrics_before_adaptation(
     return metrics
 
 
+def evaluate_selection_view_gt_metrics_before_adaptation(
+    adapter,
+    predictor,
+    label_path: Path,
+    data: torch.Tensor,
+    bbox,
+    original_shape,
+    text_feature: torch.Tensor,
+    view_params: list[dict[str, float]],
+) -> list[dict[str, float | int]]:
+    """Evaluate GT view quality in the same LoRA-off state used by TDC."""
+    with adapter.lora_mode(False):
+        return evaluate_view_gt_metrics_before_adaptation(
+            predictor,
+            label_path,
+            data,
+            bbox,
+            original_shape,
+            text_feature,
+            view_params,
+        )
+
+
 def attach_view_selection_metrics(
     view_gt_metrics: list[dict[str, float | int]],
     view_selection: dict[str, list[float] | int | None],
@@ -1214,8 +1237,9 @@ def main() -> None:
                 selection_text_feature_before = adapter._encode_ctx(
                     prepared_case["short_ctx"].detach()
                 ).detach()
-            with adapter.lora_mode(True):
-                view_gt_metrics_before = evaluate_view_gt_metrics_before_adaptation(
+            view_gt_metrics_before = (
+                evaluate_selection_view_gt_metrics_before_adaptation(
+                    adapter,
                     predictor,
                     label_path,
                     data,
@@ -1224,6 +1248,7 @@ def main() -> None:
                     selection_text_feature_before,
                     prepared_case["params"],
                 )
+            )
 
             if args.selector_only_eval:
                 # Compute both quality families from this one shared frozen
