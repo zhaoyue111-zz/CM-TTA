@@ -37,6 +37,7 @@ from method.voxtell_cmtta import (
     masked_entropy_components,
     select_cac_view,
     soft_dice_loss,
+    teacher_student_diff_spatial_weight,
     tdc_from_components,
     tdc_patch_components,
     weighted_masked_dice_components,
@@ -1426,6 +1427,159 @@ class VoxTellCMTTATest(unittest.TestCase):
             float(per_view.mean()),
             places=7,
         )
+
+    def test_teacher_student_diff_lambda_zero_restores_loss_and_gradient(self):
+        teacher = torch.tensor([[[[[0.2, 0.8], [0.4, 0.6]]]]])
+        original_student = torch.tensor([[[[[0.9, 0.1], [0.3, 0.7]]]]])
+        valid = torch.tensor([[[[[1.0, 1.0], [1.0, 0.0]]]]])
+        baseline_prediction = torch.tensor(
+            [[[[[0.3, 0.7], [0.5, 0.9]]]]], requires_grad=True
+        )
+        weighted_prediction = baseline_prediction.detach().clone().requires_grad_(True)
+        weight = teacher_student_diff_spatial_weight(
+            teacher, original_student, 0.0
+        )
+        baseline_components = masked_dice_components(
+            baseline_prediction, teacher, valid
+        )
+        weighted_components = weighted_masked_dice_components(
+            weighted_prediction, teacher, valid * weight
+        )
+        baseline_loss = case_soft_dice_from_components(
+            baseline_components["intersection"],
+            baseline_components["prediction_mass"],
+            baseline_components["pseudo_mass"],
+        )
+        weighted_loss = case_soft_dice_from_components(
+            weighted_components["intersection"],
+            weighted_components["prediction_mass"],
+            weighted_components["pseudo_mass"],
+        )
+        baseline_loss.backward()
+        weighted_loss.backward()
+        self.assertTrue(torch.equal(weight, torch.ones_like(weight)))
+        self.assertTrue(torch.allclose(weighted_loss, baseline_loss, atol=0.0, rtol=0.0))
+        self.assertTrue(
+            torch.allclose(
+                weighted_prediction.grad,
+                baseline_prediction.grad,
+                atol=0.0,
+                rtol=0.0,
+            )
+        )
+
+    def test_teacher_student_diff_weighting_excludes_invalid_region(self):
+        teacher = torch.tensor([[[[[0.2, 0.8, 1.0]]]]])
+        original_student = torch.tensor([[[[[0.7, 0.1, 0.0]]]]])
+        prediction = torch.tensor([[[[[0.4, 0.6, 100.0]]]]])
+        valid = torch.tensor([[[[[1.0, 1.0, 0.0]]]]])
+        weight = teacher_student_diff_spatial_weight(
+            teacher, original_student, 4.0
+        )
+        actual = weighted_masked_dice_components(
+            prediction, teacher, valid * weight
+        )
+        expected = weighted_masked_dice_components(
+            prediction[..., :2], teacher[..., :2], weight[..., :2]
+        )
+        for key in actual:
+            self.assertTrue(torch.equal(actual[key], expected[key]))
+
+    def test_teacher_student_diff_case_dice_is_invariant_to_patch_split(self):
+        teacher = torch.tensor([[[[[0.2, 0.8, 0.4, 0.9]]]]])
+        original_student = torch.tensor([[[[[0.6, 0.1, 0.7, 0.3]]]]])
+        full_prediction = torch.tensor(
+            [[[[[0.3, 0.5, 0.8, 0.2]]]]], requires_grad=True
+        )
+        split_prediction = full_prediction.detach().clone().requires_grad_(True)
+        weight = teacher_student_diff_spatial_weight(
+            teacher, original_student, 4.0
+        )
+        full = weighted_masked_dice_components(
+            full_prediction, teacher, weight
+        )
+        full_loss = case_soft_dice_from_components(
+            full["intersection"], full["prediction_mass"], full["pseudo_mass"]
+        )
+        split_components = []
+        for start, end in ((0, 2), (2, 4)):
+            split_components.append(
+                weighted_masked_dice_components(
+                    split_prediction[..., start:end],
+                    teacher[..., start:end],
+                    weight[..., start:end],
+                )
+            )
+        split_loss = case_soft_dice_from_components(
+            sum(part["intersection"] for part in split_components),
+            sum(part["prediction_mass"] for part in split_components),
+            sum(part["pseudo_mass"] for part in split_components),
+        )
+        full_loss.backward()
+        split_loss.backward()
+        self.assertTrue(torch.allclose(split_loss, full_loss, atol=1e-7, rtol=1e-7))
+        self.assertTrue(
+            torch.allclose(
+                split_prediction.grad,
+                full_prediction.grad,
+                atol=1e-7,
+                rtol=1e-7,
+            )
+        )
+
+    def test_teacher_student_diff_original_path_records_weighted_diagnostics(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                pseudo_spatial_weighting="teacher_student_diff",
+                pseudo_spatial_lambda=4.0,
+                num_aug_views=1,
+                view_batch_size=1,
+            ),
+        )
+        patch_tensor = torch.linspace(-1.0, 1.0, 8).reshape(1, 2, 2, 2)
+        valid = torch.ones(2, 2, 2)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+        try:
+            adapter.optimizer.zero_grad(set_to_none=True)
+            pseudo_loss, entropy = adapter._backward_case_supervision(
+                [patch_tensor],
+                [valid],
+                params,
+                1,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            diagnostics = adapter._last_pseudo_diagnostics
+            self.assertTrue(np.isfinite(pseudo_loss))
+            self.assertTrue(np.isfinite(entropy))
+            self.assertEqual(
+                diagnostics["pseudo_spatial_weighting"],
+                "teacher_student_diff",
+            )
+            self.assertGreaterEqual(diagnostics["pseudo_spatial_weight_mean"], 1.0)
+            self.assertGreaterEqual(
+                diagnostics["pseudo_spatial_weight_max"],
+                diagnostics["pseudo_spatial_weight_mean"],
+            )
+            self.assertAlmostEqual(
+                pseudo_loss,
+                diagnostics["pre_update_weighted_segmentation_loss"],
+                places=7,
+            )
+            self.assertIsNotNone(adapter.ctx.grad)
+            self.assertTrue(torch.isfinite(adapter.ctx.grad).all())
+        finally:
+            adapter.close()
 
     def test_multiscale_soft_target_downsampling_excludes_padding(self):
         pseudo = torch.zeros(1, 1, 4, 4, 4)

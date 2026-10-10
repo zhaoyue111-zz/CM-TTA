@@ -218,6 +218,25 @@ def masked_dice_components(
     }
 
 
+def teacher_student_diff_spatial_weight(
+    teacher_probability: torch.Tensor,
+    original_student_probability: torch.Tensor,
+    spatial_lambda: float,
+) -> torch.Tensor:
+    """Build the detached D5 weight shared by every student view."""
+    if teacher_probability.shape != original_student_probability.shape:
+        raise ValueError(
+            "Teacher and original-view student probabilities must have matching shapes"
+        )
+    if spatial_lambda < 0.0:
+        raise ValueError("pseudo_spatial_lambda must be non-negative")
+    return (
+        1.0
+        + float(spatial_lambda)
+        * (teacher_probability.detach().float() - original_student_probability.detach().float()).abs()
+    ).detach()
+
+
 def downsample_soft_label_and_valid_mask(
     pseudo_label: torch.Tensor,
     valid_mask: torch.Tensor,
@@ -1364,6 +1383,18 @@ class VoxTellCMTTA:
                 "pseudo_teacher_inference='sliding' is available only with "
                 "pseudo_update_mode='original'"
             )
+        self.pseudo_spatial_weighting = str(
+            getattr(args, "pseudo_spatial_weighting", "none")
+        )
+        if self.pseudo_spatial_weighting not in ("none", "teacher_student_diff"):
+            raise ValueError(
+                "pseudo_spatial_weighting must be 'none' or 'teacher_student_diff'"
+            )
+        self.pseudo_spatial_lambda = float(
+            getattr(args, "pseudo_spatial_lambda", 4.0)
+        )
+        if self.pseudo_spatial_lambda < 0.0:
+            raise ValueError("pseudo_spatial_lambda must be non-negative")
         self.tdc_softmax_temperature = float(
             getattr(args, "tdc_softmax_temperature", 0.02)
         )
@@ -1434,6 +1465,26 @@ class VoxTellCMTTA:
                 raise ValueError("LoRA adaptation requires pseudo_update_mode='original'")
             if self.use_d4_local_distill:
                 raise ValueError("LoRA adaptation requires D4 local distillation off")
+        if self.pseudo_spatial_weighting == "teacher_student_diff":
+            if self.pseudo_update_mode != "original":
+                raise ValueError(
+                    "teacher_student_diff spatial weighting requires "
+                    "pseudo_update_mode='original'"
+                )
+            if self.pseudo_teacher_inference != "patch":
+                raise ValueError(
+                    "teacher_student_diff spatial weighting requires non-overlap "
+                    "patch teacher inference"
+                )
+            if self.view_selection_metric != "tdc":
+                raise ValueError(
+                    "teacher_student_diff spatial weighting requires TDC view selection"
+                )
+            if self.use_lora or self.use_d4_local_distill:
+                raise ValueError(
+                    "teacher_student_diff spatial weighting is a ctx-only experiment "
+                    "with LoRA and D4 local distillation disabled"
+                )
 
         self._lora_modules: list[
             tuple[str, LoRAPackedQKVMultiheadAttention]
@@ -2502,6 +2553,7 @@ class VoxTellCMTTA:
         """Collect global Dice/entropy statistics without retaining graphs."""
         total_views = len(params)
         dice_stats = None
+        unweighted_dice_stats = None
         entropy_sum = None
         entropy_mass = None
         local_loss_sum = None
@@ -2513,6 +2565,8 @@ class VoxTellCMTTA:
         local_teacher_norm_values: list[torch.Tensor] = []
         local_student_norm_values: list[torch.Tensor] = []
         local_teacher_caches: list[dict[str, torch.Tensor]] = []
+        spatial_weight_caches: list[dict[str, torch.Tensor]] = []
+        spatial_diff_values: list[torch.Tensor] = []
         if teacher_pseudo_labels is not None and len(teacher_pseudo_labels) != len(patches):
             raise ValueError(
                 "teacher_pseudo_labels must contain one soft label per case patch"
@@ -2586,11 +2640,51 @@ class VoxTellCMTTA:
                         else:
                             student_logits = self._forward(view_batch, student_ctx)
                         probabilities = torch.sigmoid(student_logits[:, :1])
-                        local_dice = masked_dice_components(
+                        unweighted_local_dice = masked_dice_components(
                             probabilities,
                             pseudo_label,
                             input_mask_batch.unsqueeze(1),
                         )
+                        if self.pseudo_spatial_weighting == "teacher_student_diff":
+                            if start != 0 and len(spatial_weight_caches) <= patch_index:
+                                raise RuntimeError(
+                                    "Original student view must be evaluated before other views"
+                                )
+                            if start == 0:
+                                original_student = probabilities[:1].detach()
+                                spatial_weight = teacher_student_diff_spatial_weight(
+                                    pseudo_label,
+                                    original_student,
+                                    self.pseudo_spatial_lambda,
+                                )
+                                valid_spatial = input_mask.unsqueeze(1).bool()
+                                spatial_diff_values.append(
+                                    (pseudo_label.float() - original_student.float())
+                                    .abs()[valid_spatial]
+                                    .detach()
+                                    .cpu()
+                                )
+                                spatial_weight_caches.append(
+                                    {
+                                        "teacher_probability": pseudo_label.detach().cpu(),
+                                        "original_student_probability": original_student.cpu(),
+                                        "spatial_weight": spatial_weight.cpu(),
+                                    }
+                                )
+                            else:
+                                spatial_weight = spatial_weight_caches[patch_index][
+                                    "spatial_weight"
+                                ].to(self.device, non_blocking=True)
+                            if self.pseudo_spatial_lambda == 0.0:
+                                local_dice = unweighted_local_dice
+                            else:
+                                local_dice = weighted_masked_dice_components(
+                                    probabilities,
+                                    pseudo_label,
+                                    input_mask_batch.unsqueeze(1) * spatial_weight,
+                                )
+                        else:
+                            local_dice = unweighted_local_dice
                         local_entropy, local_mass = masked_entropy_components(
                             probabilities[
                                 max(0, selected_view - start) :
@@ -2635,6 +2729,16 @@ class VoxTellCMTTA:
                         }
                     for key, value in local_dice.items():
                         dice_stats[key][start:end].add_(value)
+                    if self.pseudo_spatial_weighting == "teacher_student_diff":
+                        if unweighted_dice_stats is None:
+                            unweighted_dice_stats = {
+                                key: torch.zeros(
+                                    total_views, device=value.device, dtype=value.dtype
+                                )
+                                for key, value in unweighted_local_dice.items()
+                            }
+                        for key, value in unweighted_local_dice.items():
+                            unweighted_dice_stats[key][start:end].add_(value)
                     if self.use_d4_local_distill:
                         if local_loss_sum is None:
                             local_loss_sum = torch.zeros_like(patch_local_sum)
@@ -2658,8 +2762,27 @@ class VoxTellCMTTA:
             local_student_norm_values,
             local_nonfinite_count,
         )
+        if self.pseudo_spatial_weighting == "teacher_student_diff":
+            if len(spatial_weight_caches) != len(patches):
+                raise RuntimeError("Teacher-student spatial-weight cache is incomplete")
+            finite_diff = torch.cat(spatial_diff_values)
+            spatial_diagnostics = {
+                "pseudo_spatial_diff_mean": float(finite_diff.mean()),
+                "pseudo_spatial_diff_p90": float(torch.quantile(finite_diff, 0.9)),
+                "pseudo_spatial_weight_mean": float(
+                    1.0 + self.pseudo_spatial_lambda * finite_diff.mean()
+                ),
+                "pseudo_spatial_weight_max": float(
+                    1.0 + self.pseudo_spatial_lambda * finite_diff.max()
+                ),
+            }
+        else:
+            spatial_diagnostics = {}
         return {
             **dice_stats,
+            "unweighted_dice_stats": unweighted_dice_stats,
+            "pseudo_spatial_caches": spatial_weight_caches,
+            "pseudo_spatial_diagnostics": spatial_diagnostics,
             "entropy_sum": entropy_sum,
             "entropy_mass": entropy_mass,
             "d4_local_loss_sum": local_loss_sum,
@@ -3840,6 +3963,16 @@ class VoxTellCMTTA:
             pseudo_view_weights,
         )
         dice_derivatives = torch.autograd.grad(global_dice, global_dice_inputs)
+        if self.pseudo_spatial_weighting == "teacher_student_diff":
+            unweighted_stats = stats["unweighted_dice_stats"]
+            unweighted_global_dice = case_soft_dice_from_components(
+                unweighted_stats["intersection"],
+                unweighted_stats["prediction_mass"],
+                unweighted_stats["pseudo_mass"],
+                pseudo_view_weights,
+            )
+        else:
+            unweighted_global_dice = global_dice
         global_entropy_sum = stats["entropy_sum"].detach().requires_grad_(True)
         global_entropy_mass = stats["entropy_mass"].detach().requires_grad_(True)
         global_entropy = global_entropy_sum / global_entropy_mass.clamp_min(1.0)
@@ -3871,7 +4004,15 @@ class VoxTellCMTTA:
             with torch.no_grad(), torch.autocast(
                 device_type=self.device.type, enabled=autocast_enabled
             ):
-                if teacher_pseudo_labels is None:
+                if self.pseudo_spatial_weighting == "teacher_student_diff":
+                    spatial_cache = stats["pseudo_spatial_caches"][patch_index]
+                    pseudo_label = spatial_cache["teacher_probability"].to(
+                        self.device, non_blocking=True
+                    )
+                    spatial_weight = spatial_cache["spatial_weight"].to(
+                        self.device, non_blocking=True
+                    )
+                elif teacher_pseudo_labels is None:
                     with self.lora_mode(False):
                         pseudo_logits = self._forward(selected, long_ctx)
                     pseudo_label = torch.sigmoid(pseudo_logits[:, :1]).detach()
@@ -3900,11 +4041,21 @@ class VoxTellCMTTA:
                     else:
                         student_logits = self._forward(view_batch, student_ctx)
                     probabilities = torch.sigmoid(student_logits[:, :1])
-                    local_dice = masked_dice_components(
-                        probabilities,
-                        pseudo_label,
-                        input_mask_batch.unsqueeze(1),
-                    )
+                    if (
+                        self.pseudo_spatial_weighting == "teacher_student_diff"
+                        and self.pseudo_spatial_lambda != 0.0
+                    ):
+                        local_dice = weighted_masked_dice_components(
+                            probabilities,
+                            pseudo_label,
+                            input_mask_batch.unsqueeze(1) * spatial_weight,
+                        )
+                    else:
+                        local_dice = masked_dice_components(
+                            probabilities,
+                            pseudo_label,
+                            input_mask_batch.unsqueeze(1),
+                        )
                     local_tensors = [
                         local_dice["intersection"],
                         local_dice["prediction_mass"],
@@ -3964,6 +4115,18 @@ class VoxTellCMTTA:
                     self.scaler.scale(local_objective).backward()
         self._last_pseudo_diagnostics = {
             "pseudo_update_mode": "original",
+            "pseudo_spatial_weighting": self.pseudo_spatial_weighting,
+            "pseudo_spatial_lambda": self.pseudo_spatial_lambda,
+            "pseudo_unweighted_soft_dice": float(
+                unweighted_global_dice.detach().cpu()
+            ),
+            "pseudo_weighted_soft_dice": float(global_dice.detach().cpu()),
+            "pre_update_unweighted_segmentation_loss": float(
+                unweighted_global_dice.detach().cpu()
+            ),
+            "pre_update_weighted_segmentation_loss": float(
+                global_dice.detach().cpu()
+            ),
             "d4_local_loss_type": self.d4_local_loss_type,
             "d4_local_loss": float(global_local_loss.detach().cpu()),
             "d4_local_weighted_loss": float(weighted_local_loss.detach().cpu()),
@@ -3975,6 +4138,7 @@ class VoxTellCMTTA:
                 stats["d4_local_teacher_small_norm_skipped_count"]
             ),
         }
+        self._last_pseudo_diagnostics.update(stats["pseudo_spatial_diagnostics"])
         if self.d4_local_diagnostics:
             self._last_pseudo_diagnostics.update(
                 stats["d4_local_relation_diagnostics"]
@@ -4443,6 +4607,8 @@ class VoxTellCMTTA:
                 pseudo_view_weights[selected_view].cpu()
             ),
             "pseudo_teacher_inference": self.pseudo_teacher_inference,
+            "pseudo_spatial_weighting": self.pseudo_spatial_weighting,
+            "pseudo_spatial_lambda": self.pseudo_spatial_lambda,
             "use_lora": self.use_lora,
             "lora_rank": self.lora_rank if self.use_lora else None,
             "lora_alpha": self.lora_alpha if self.use_lora else None,
@@ -4492,7 +4658,10 @@ class VoxTellCMTTA:
                 "multiscale_bce_loss"
             ]
             sums["pseudo_loss_type"] = "multiscale_d5_soft_dice_plus_soft_bce"
-        elif self.pseudo_update_mode == "original" and self.use_d4_local_distill:
+        elif self.pseudo_update_mode == "original" and (
+            self.use_d4_local_distill
+            or self.pseudo_spatial_weighting == "teacher_student_diff"
+        ):
             sums.update(self._last_pseudo_diagnostics)
         sums["entropy_loss"] = entropy_loss
         local_contribution = float(
@@ -4690,6 +4859,8 @@ class VoxTellCMTTA:
             "lora_dropout": self.lora_dropout,
             "lora_modules": [name for name, _ in self._lora_modules],
             "lora_state": self.lora_state_dict(),
+            "pseudo_spatial_weighting": self.pseudo_spatial_weighting,
+            "pseudo_spatial_lambda": self.pseudo_spatial_lambda,
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -4742,6 +4913,20 @@ class VoxTellCMTTA:
                     "Checkpoint LoRA configuration does not match the current adapter"
                 )
             self.load_lora_state_dict(state.get("lora_state", {}))
+        checkpoint_spatial_weighting = state.get(
+            "pseudo_spatial_weighting", "none"
+        )
+        checkpoint_spatial_lambda = float(
+            state.get("pseudo_spatial_lambda", 4.0)
+        )
+        if (
+            checkpoint_spatial_weighting != self.pseudo_spatial_weighting
+            or checkpoint_spatial_lambda != self.pseudo_spatial_lambda
+        ):
+            raise ValueError(
+                "Checkpoint pseudo spatial-weighting configuration does not "
+                "match the current adapter"
+            )
         delta = state["ctx_delta"].to(self.device)
         if tuple(delta.shape) != tuple(self.ctx_delta.shape):
             raise ValueError(

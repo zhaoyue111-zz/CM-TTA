@@ -1108,6 +1108,21 @@ def parse_args() -> argparse.Namespace:
             "baseline and sliding uses one case-level fused inference."
         ),
     )
+    parser.add_argument(
+        "--pseudo_spatial_weighting",
+        choices=("none", "teacher_student_diff"),
+        default="none",
+        help=(
+            "Optional detached teacher-student difference weighting for "
+            "original D5 soft Dice."
+        ),
+    )
+    parser.add_argument(
+        "--pseudo_spatial_lambda",
+        type=float,
+        default=4.0,
+        help="Lambda in w = 1 + lambda * abs(qT - p0).",
+    )
     parser.add_argument("--bg_threshold", type=float, default=0.1)
     parser.add_argument("--tversky_alpha", type=float, default=0.3)
     parser.add_argument("--tversky_beta", type=float, default=0.7)
