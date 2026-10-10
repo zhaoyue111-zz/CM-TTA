@@ -92,6 +92,24 @@ class TinyVoxTell(nn.Module):
         return logits
 
 
+class TinyResponseVoxTell(TinyVoxTell):
+    """Response-path double with explicit reusable image features."""
+
+    def __init__(self):
+        super().__init__()
+        self.response_encoder_calls = 0
+        self.response_decoder_calls = 0
+
+    def encode_image_for_text_response(self, image):
+        self.response_encoder_calls += 1
+        return [image]
+
+    def decode_image_for_text_response(self, skips, text_features):
+        self.response_decoder_calls += 1
+        prompt = text_features.square().sum(dim=(1, 2)).view(-1, 1, 1, 1, 1)
+        return skips[0][:, :1] * prompt
+
+
 class TinyMultiscaleVoxTell(TinyVoxTell):
     """Tiny decoder with native, non-equal D5--D2 spatial grids."""
 
@@ -1609,6 +1627,195 @@ class VoxTellCMTTATest(unittest.TestCase):
                     gradient_conflict_diagnostics=True,
                 ),
             )
+
+    def test_text_response_perturbation_is_fixed_orthogonal_and_norm_restored(self):
+        adapter = VoxTellCMTTA(
+            TinyResponseVoxTell(),
+            torch.tensor([[[1.0, 2.0]]]),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                response_weight=0.01,
+                response_eps=0.01,
+                response_seed=19,
+            ),
+        )
+        try:
+            q0 = adapter._encode_ctx(adapter.initial_ctx_delta).detach().float()
+            direction = adapter._response_direction
+            self.assertFalse(direction.requires_grad)
+            self.assertAlmostEqual(float((q0 * direction).sum()), 0.0, places=6)
+            self.assertAlmostEqual(float(direction.norm()), 1.0, places=6)
+            student_embedding = adapter._encode_ctx(adapter.ctx)
+            plus, minus = adapter._perturbed_text_embeddings(student_embedding)
+            self.assertTrue(student_embedding.requires_grad)
+            self.assertTrue(plus.requires_grad)
+            self.assertTrue(minus.requires_grad)
+            self.assertAlmostEqual(
+                float(plus.detach().float().norm()),
+                float(student_embedding.detach().float().norm()),
+                places=6,
+            )
+            self.assertAlmostEqual(
+                float(minus.detach().float().norm()),
+                float(student_embedding.detach().float().norm()),
+                places=6,
+            )
+            saved_direction = direction.clone()
+            adapter.ctx.data.add_(0.2)
+            self.assertTrue(torch.equal(adapter._response_direction, saved_direction))
+        finally:
+            adapter.close()
+
+    def test_text_response_distillation_reuses_encoder_masks_and_backpropagates(self):
+        model = TinyResponseVoxTell()
+        adapter = VoxTellCMTTA(
+            model,
+            torch.tensor([[[1.0, 2.0]]]),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                response_weight=0.01,
+                response_eps=0.01,
+                response_seed=23,
+                num_aug_views=1,
+                view_batch_size=1,
+                w_entropy=0.0,
+            ),
+        )
+        image = torch.tensor([[[[1.0, 2.0], [3.0, 1000.0]]]])
+        valid = torch.tensor([[[1.0, 1.0], [1.0, 0.0]]])
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+        short_ctx = torch.tensor([[1.2, 1.8]])
+        long_ctx = torch.tensor([[0.8, 2.2]])
+        try:
+            adapter.optimizer.zero_grad(set_to_none=True)
+            adapter._backward_case_supervision(
+                [image],
+                [valid],
+                params,
+                1,
+                short_ctx,
+                1.0,
+                long_ctx,
+                False,
+            )
+            diagnostics = adapter._last_pseudo_diagnostics
+            self.assertGreater(diagnostics["response_loss"], 0.0)
+            self.assertAlmostEqual(
+                diagnostics["weighted_response_loss"],
+                0.01 * diagnostics["response_loss"],
+                places=6,
+            )
+            self.assertEqual(diagnostics["response_valid_voxel_views"], 6)
+            # Stats: one teacher + two student batches. Replay: two student
+            # batches. Each call handles base/+/- after exactly one encoding.
+            self.assertEqual(model.response_encoder_calls, 5)
+            self.assertEqual(model.response_decoder_calls, 5)
+            self.assertIsNotNone(adapter.ctx.grad)
+            self.assertTrue(torch.isfinite(adapter.ctx.grad).all())
+            self.assertGreater(float(adapter.ctx.grad.norm()), 0.0)
+            self.assertTrue(
+                all(parameter.grad is None for parameter in adapter.model.parameters())
+            )
+        finally:
+            adapter.close()
+
+    def test_text_response_zero_weight_uses_original_forward_path(self):
+        model = TinyResponseVoxTell()
+        adapter = VoxTellCMTTA(
+            model,
+            torch.tensor([[[1.0, 2.0]]]),
+            "cpu",
+            make_args(response_weight=0.0),
+        )
+        try:
+            adapter.optimizer.zero_grad(set_to_none=True)
+            adapter._backward_case_supervision(
+                [torch.ones(1, 1, 1, 2)],
+                [torch.ones(1, 1, 2)],
+                [
+                    {"scale": 1.0, "offset": 0.0},
+                    {"scale": 0.9, "offset": 0.0},
+                    {"scale": 1.1, "offset": 0.0},
+                ],
+                0,
+                adapter.ctx.detach().clone(),
+                1.0,
+                adapter.ctx.detach().clone(),
+                False,
+            )
+            self.assertEqual(model.response_encoder_calls, 0)
+            self.assertEqual(model.response_decoder_calls, 0)
+        finally:
+            adapter.close()
+
+    def test_text_response_adapt_trace_matches_backpropagated_total(self):
+        adapter = VoxTellCMTTA(
+            TinyResponseVoxTell(),
+            torch.tensor([[[1.0, 2.0]]]),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                response_weight=0.01,
+                response_eps=0.01,
+                num_aug_views=1,
+                view_batch_size=1,
+                w_cac=0.0,
+                w_entropy=0.0,
+            ),
+        )
+        image = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
+        valid = torch.ones(1, 2, 2)
+        short = torch.tensor([[1.2, 1.8]])
+        prepared = {
+            "patches": [image],
+            "valid_masks": [valid],
+            "params": [
+                {"scale": 1.0, "offset": 0.0},
+                {"scale": 0.8, "offset": 0.1},
+            ],
+            "short_ctx": short,
+            "current_quality": 0.0,
+            "historical_quality": 0.0,
+            "current_cac": 0.0,
+            "historical_cac": 0.0,
+            "weight_historical": 0.0,
+            "long_ctx": torch.tensor([[0.8, 2.2]]),
+        }
+        try:
+            with patch.object(
+                adapter,
+                "_select_case_view",
+                return_value=(1, torch.tensor([0.0, 1.0])),
+            ), patch.object(adapter, "_backward_case_cac", return_value=0.0):
+                trace = adapter.adapt_case(
+                    [image], [valid], prepared_case=prepared
+                )
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertGreater(trace["response_loss"], 0.0)
+            self.assertAlmostEqual(
+                trace["total_loss"],
+                trace["loss_without_response"]
+                + trace["weighted_response_loss"],
+                places=6,
+            )
+            self.assertEqual(trace["response_eps"], 0.01)
+            self.assertEqual(trace["response_weight"], 0.01)
+        finally:
+            adapter.close()
+
+    def test_text_response_two_channel_uses_foreground_minus_background(self):
+        logits = torch.tensor([[[[[2.0]]], [[[5.5]]]]])
+        response_logit = VoxTellCMTTA._response_foreground_logit(logits)
+        self.assertEqual(tuple(response_logit.shape), (1, 1, 1, 1, 1))
+        self.assertAlmostEqual(float(response_logit), 3.5)
 
     def test_multiscale_soft_target_downsampling_excludes_padding(self):
         pseudo = torch.zeros(1, 1, 4, 4, 4)

@@ -1396,6 +1396,14 @@ class VoxTellCMTTA:
         )
         if self.pseudo_spatial_lambda < 0.0:
             raise ValueError("pseudo_spatial_lambda must be non-negative")
+        self.response_weight = float(getattr(args, "response_weight", 0.0))
+        self.response_eps = float(getattr(args, "response_eps", 0.01))
+        self.response_seed = int(getattr(args, "response_seed", 1377))
+        if self.response_weight < 0.0:
+            raise ValueError("response_weight must be non-negative")
+        if self.response_eps <= 0.0:
+            raise ValueError("response_eps must be positive")
+        self.use_text_local_response_distill = self.response_weight > 0.0
         self.tdc_softmax_temperature = float(
             getattr(args, "tdc_softmax_temperature", 0.02)
         )
@@ -1494,6 +1502,27 @@ class VoxTellCMTTA:
                     "teacher_student_diff spatial weighting is a ctx-only experiment "
                     "with LoRA and D4 local distillation disabled"
                 )
+        if self.use_text_local_response_distill:
+            if self.pseudo_update_mode != "original":
+                raise ValueError(
+                    "Text local response distillation requires "
+                    "pseudo_update_mode='original'"
+                )
+            if self.pseudo_teacher_inference != "patch":
+                raise ValueError(
+                    "Text local response distillation requires non-overlap patch "
+                    "teacher inference"
+                )
+            if self.use_lora or self.use_d4_local_distill:
+                raise ValueError(
+                    "Text local response distillation is a ctx-only experiment "
+                    "with LoRA and D4 local distillation disabled"
+                )
+            if self.gradient_conflict_diagnostics:
+                raise ValueError(
+                    "gradient_conflict_diagnostics is not supported with text "
+                    "local response distillation"
+                )
 
         self._lora_modules: list[
             tuple[str, LoRAPackedQKVMultiheadAttention]
@@ -1501,6 +1530,10 @@ class VoxTellCMTTA:
         if self.use_lora:
             self._inject_cross_attention_lora()
         self._initial_lora_state = self.lora_state_dict()
+        self._response_direction = None
+        self._response_radius = None
+        if self.use_text_local_response_distill:
+            self._initialize_text_response_perturbation()
         self.optimizer = torch.optim.Adam(self.trainable_parameters, lr=self.lr)
         amp_enabled = self.device.type == "cuda"
         if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
@@ -1991,6 +2024,179 @@ class VoxTellCMTTA:
         if logits.ndim != 5:
             raise ValueError(f"VoxTell must return (B,N,D,H,W) logits, got {logits.shape}")
         return logits
+
+    def _initialize_text_response_perturbation(self) -> None:
+        """Create one fixed detached direction orthogonal to canonical liver q0."""
+        with torch.no_grad():
+            q0 = self._encode_ctx(self.initial_ctx_delta).detach().float()
+        q0_norm = torch.linalg.vector_norm(q0)
+        if not torch.isfinite(q0_norm) or float(q0_norm) <= EPS:
+            raise RuntimeError("Canonical liver embedding has zero or non-finite norm")
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(self.response_seed)
+        random_direction = torch.randn(
+            q0.shape, generator=generator, dtype=torch.float32
+        ).to(self.device)
+        q0_device = q0.to(self.device)
+        direction = random_direction - (
+            (random_direction * q0_device).sum()
+            / q0_device.square().sum().clamp_min(EPS)
+        ) * q0_device
+        direction_norm = torch.linalg.vector_norm(direction)
+        if not torch.isfinite(direction_norm) or float(direction_norm) <= EPS:
+            raise RuntimeError(
+                "Fixed random text direction is degenerate after q0 projection"
+            )
+        self._response_direction = (direction / direction_norm).detach()
+        self._response_radius = (
+            self.response_eps * q0_norm.to(self.device)
+        ).detach()
+
+    def _perturbed_text_embeddings(
+        self, text_features: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply the fixed +/- perturbation and restore each original norm."""
+        if self._response_direction is None or self._response_radius is None:
+            raise RuntimeError("Text response perturbation is not initialized")
+        direction = self._response_direction.to(
+            device=text_features.device, dtype=text_features.dtype
+        )
+        radius = self._response_radius.to(
+            device=text_features.device, dtype=text_features.dtype
+        )
+        original_norm = torch.linalg.vector_norm(
+            text_features.float(), dim=(-2, -1), keepdim=True
+        )
+
+        def restore_norm(value: torch.Tensor) -> torch.Tensor:
+            value_norm = torch.linalg.vector_norm(
+                value.float(), dim=(-2, -1), keepdim=True
+            ).clamp_min(EPS)
+            return value * (original_norm / value_norm).to(value.dtype)
+
+        return (
+            restore_norm(text_features + radius * direction),
+            restore_norm(text_features - radius * direction),
+        )
+
+    @staticmethod
+    def _response_foreground_logit(logits: torch.Tensor) -> torch.Tensor:
+        """Return the pre-sigmoid foreground score used by response distillation."""
+        if logits.ndim != 5:
+            raise ValueError("Response logits must have shape (B,C,D,H,W)")
+        if logits.shape[1] == 1:
+            return logits[:, :1]
+        if logits.shape[1] == 2:
+            return logits[:, 1:2] - logits[:, 0:1]
+        raise ValueError(
+            "Text response distillation supports one foreground logit or "
+            "two background/foreground logits"
+        )
+
+    def _encode_response_image(self, images: torch.Tensor) -> list[torch.Tensor]:
+        """Run the frozen image encoder once for all three text conditions."""
+        base_model = getattr(self.model, "_orig_mod", self.model)
+        custom_encoder = getattr(base_model, "encode_image_for_text_response", None)
+        if custom_encoder is not None:
+            features = custom_encoder(images)
+        else:
+            encoder = getattr(base_model, "encoder", None)
+            if encoder is None:
+                raise RuntimeError(
+                    "Text response distillation requires VoxTell encoder/decoder access"
+                )
+            features = encoder(images)
+        if not isinstance(features, (list, tuple)) or not features:
+            raise RuntimeError("VoxTell response image encoder must return skip features")
+        return [feature.detach() for feature in features]
+
+    def _decode_response_features(
+        self,
+        skips: list[torch.Tensor],
+        text_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode cached image skips with a batch of Qwen output embeddings."""
+        base_model = getattr(self.model, "_orig_mod", self.model)
+        custom_decoder = getattr(base_model, "decode_image_for_text_response", None)
+        if custom_decoder is not None:
+            logits = custom_decoder(skips, text_features)
+        else:
+            selected_layer = getattr(base_model, "selected_decoder_layer", None)
+            if selected_layer is None:
+                raise RuntimeError("VoxTell selected_decoder_layer is unavailable")
+            selected_feature = skips[int(selected_layer)]
+            bottleneck = selected_feature.permute(0, 3, 4, 2, 1)
+            bottleneck = base_model.project_bottleneck_embed(bottleneck)
+            batch_size, height, width, depth, channels = bottleneck.shape
+            bottleneck = (
+                bottleneck.permute(1, 2, 3, 0, 4)
+                .reshape(height * width * depth, batch_size, channels)
+            )
+            text_embed = base_model.project_text_embed(
+                text_features.permute(1, 0, 2)
+            )
+            mask_embedding, _ = base_model.transformer_decoder(
+                tgt=text_embed,
+                memory=bottleneck,
+                pos=base_model.pos_embed,
+            )
+            mask_embedding = mask_embedding.permute(1, 0, 2)
+            mask_embeddings = [
+                projection(mask_embedding)
+                for projection in base_model.project_to_decoder_channels
+            ]
+            prompt_outputs = []
+            for prompt_index in range(text_features.shape[1]):
+                prompt_embeddings = [
+                    embedding[:, prompt_index : prompt_index + 1]
+                    for embedding in mask_embeddings
+                ]
+                prompt_outputs.append(
+                    base_model.decoder(
+                        skips,
+                        prompt_embeddings,
+                        return_decoder_outputs=False,
+                    )
+                )
+            outputs = [
+                torch.cat(scale_outputs, dim=1)
+                for scale_outputs in zip(*prompt_outputs)
+            ]
+            logits = outputs if base_model.deep_supervision else outputs[0]
+        if isinstance(logits, (list, tuple)):
+            logits = logits[0]
+        if not torch.is_tensor(logits) or logits.ndim != 5:
+            raise RuntimeError("VoxTell response decoder must return 5-D D5 logits")
+        return logits
+
+    def _forward_text_response_triplet(
+        self, images: torch.Tensor, ctx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return unperturbed/+/- D5 logits after one frozen image encoding."""
+        if not self.use_text_local_response_distill:
+            raise RuntimeError("Text local response distillation is disabled")
+        text_features = self._encode_ctx(ctx)
+        plus_features, minus_features = self._perturbed_text_embeddings(text_features)
+        batch_size = images.shape[0]
+        base_features = text_features.expand(batch_size, -1, -1)
+        plus_features = plus_features.expand(batch_size, -1, -1)
+        minus_features = minus_features.expand(batch_size, -1, -1)
+        with torch.no_grad():
+            skips = self._encode_response_image(images)
+        tripled_skips = [torch.cat((skip, skip, skip), dim=0) for skip in skips]
+        combined_text = torch.cat(
+            (base_features, plus_features, minus_features), dim=0
+        )
+        combined_logits = self._decode_response_features(
+            tripled_skips, combined_text
+        )
+        return tuple(combined_logits.split(batch_size, dim=0))
+
+    def _text_response(self, plus_logits: torch.Tensor, minus_logits: torch.Tensor) -> torch.Tensor:
+        return (
+            self._response_foreground_logit(plus_logits).float()
+            - self._response_foreground_logit(minus_logits).float()
+        ) / (2.0 * self.response_eps)
 
     def _forward_decoder_outputs(
         self, images: torch.Tensor, ctx: torch.Tensor
@@ -2581,6 +2787,9 @@ class VoxTellCMTTA:
         spatial_diff_histogram = torch.zeros(
             PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS, dtype=torch.float64
         )
+        response_teacher_caches: list[dict[str, torch.Tensor]] = []
+        response_squared_sum = None
+        response_valid_count = 0
         if teacher_pseudo_labels is not None and len(teacher_pseudo_labels) != len(patches):
             raise ValueError(
                 "teacher_pseudo_labels must contain one soft label per case patch"
@@ -2598,6 +2807,13 @@ class VoxTellCMTTA:
                         pseudo_logits, teacher_fusion = self._forward_with_d4_fusion(
                             selected, long_ctx
                         )
+                    elif self.use_text_local_response_distill:
+                        pseudo_logits, teacher_plus, teacher_minus = (
+                            self._forward_text_response_triplet(selected, long_ctx)
+                        )
+                        teacher_response = self._text_response(
+                            teacher_plus, teacher_minus
+                        ).detach()
                     elif teacher_pseudo_labels is None:
                         with self.lora_mode(False):
                             pseudo_logits = self._forward(selected, long_ctx)
@@ -2607,6 +2823,13 @@ class VoxTellCMTTA:
                         pseudo_label = teacher_pseudo_labels[patch_index].to(
                             self.device, non_blocking=True
                         ).detach()
+                if self.use_text_local_response_distill:
+                    response_teacher_caches.append(
+                        {
+                            "teacher_probability": pseudo_label.detach().cpu(),
+                            "teacher_response": teacher_response.detach().cpu(),
+                        }
+                    )
                 if self.use_d4_local_distill:
                     d4_target, d4_valid = downsample_soft_label_and_valid_mask(
                         pseudo_label,
@@ -2650,6 +2873,15 @@ class VoxTellCMTTA:
                         if self.use_d4_local_distill:
                             student_logits, student_fusion = self._forward_with_d4_fusion(
                                 view_batch, student_ctx
+                            )
+                        elif self.use_text_local_response_distill:
+                            student_logits, student_plus, student_minus = (
+                                self._forward_text_response_triplet(
+                                    view_batch, student_ctx
+                                )
+                            )
+                            student_response = self._text_response(
+                                student_plus, student_minus
                             )
                         else:
                             student_logits = self._forward(view_batch, student_ctx)
@@ -2716,6 +2948,17 @@ class VoxTellCMTTA:
                                 )
                         else:
                             local_dice = unweighted_local_dice
+                        if self.use_text_local_response_distill:
+                            response_mask = input_mask_batch.unsqueeze(1).float()
+                            response_difference = (
+                                student_response - teacher_response
+                            ).float()
+                            patch_response_squared_sum = (
+                                response_difference.square() * response_mask
+                            ).sum()
+                            patch_response_valid_count = int(
+                                response_mask.sum().item()
+                            )
                         local_entropy, local_mass = masked_entropy_components(
                             probabilities[
                                 max(0, selected_view - start) :
@@ -2775,6 +3018,13 @@ class VoxTellCMTTA:
                             local_loss_sum = torch.zeros_like(patch_local_sum)
                         local_loss_sum.add_(patch_local_sum)
                         local_element_count += patch_local_count
+                    if self.use_text_local_response_distill:
+                        if response_squared_sum is None:
+                            response_squared_sum = torch.zeros_like(
+                                patch_response_squared_sum
+                            )
+                        response_squared_sum.add_(patch_response_squared_sum)
+                        response_valid_count += patch_response_valid_count
                     if start <= selected_view < end:
                         if entropy_sum is None:
                             entropy_sum = torch.zeros_like(local_entropy[0])
@@ -2787,6 +3037,13 @@ class VoxTellCMTTA:
             raise RuntimeError("D4 local teacher cache is incomplete")
         if local_loss_sum is None:
             local_loss_sum = entropy_sum.new_zeros(())
+        if response_squared_sum is None:
+            response_squared_sum = entropy_sum.new_zeros(())
+        if (
+            self.use_text_local_response_distill
+            and len(response_teacher_caches) != len(patches)
+        ):
+            raise RuntimeError("Text response teacher cache is incomplete")
         local_diagnostics = summarize_d4_local_diagnostics(
             local_cosine_values,
             local_teacher_norm_values,
@@ -2838,6 +3095,13 @@ class VoxTellCMTTA:
             "unweighted_dice_stats": unweighted_dice_stats,
             "pseudo_spatial_caches": spatial_weight_caches,
             "pseudo_spatial_diagnostics": spatial_diagnostics,
+            "response_teacher_caches": response_teacher_caches,
+            "response_squared_sum": response_squared_sum,
+            "response_valid_count": response_valid_count,
+            "response_cache_selected_view": selected_view,
+            "response_cache_teacher_ctx": long_ctx.detach().cpu().clone(),
+            "response_cache_eps": self.response_eps,
+            "response_cache_seed": self.response_seed,
             "entropy_sum": entropy_sum,
             "entropy_mass": entropy_mass,
             "d4_local_loss_sum": local_loss_sum,
@@ -4042,6 +4306,29 @@ class VoxTellCMTTA:
         else:
             global_local_loss = global_dice.new_zeros(())
         weighted_local_loss = self.w_d4_local * global_local_loss
+        response_valid_count = int(stats["response_valid_count"])
+        if self.use_text_local_response_distill:
+            if response_valid_count <= 0:
+                raise RuntimeError("Text response loss found no valid voxels")
+            if (
+                int(stats["response_cache_selected_view"]) != selected_view
+                or float(stats["response_cache_eps"]) != self.response_eps
+                or int(stats["response_cache_seed"]) != self.response_seed
+                or not torch.equal(
+                    stats["response_cache_teacher_ctx"],
+                    long_ctx.detach().cpu(),
+                )
+            ):
+                raise RuntimeError(
+                    "Text response teacher cache is stale for the current teacher, "
+                    "selected view, or perturbation configuration"
+                )
+            global_response_loss = (
+                stats["response_squared_sum"] / float(response_valid_count)
+            )
+        else:
+            global_response_loss = global_dice.new_zeros(())
+        weighted_response_loss = self.response_weight * global_response_loss
         local_gradient = (
             torch.zeros_like(self.ctx_delta, dtype=torch.float32)
             if self.d4_local_diagnostics
@@ -4059,7 +4346,15 @@ class VoxTellCMTTA:
             with torch.no_grad(), torch.autocast(
                 device_type=self.device.type, enabled=autocast_enabled
             ):
-                if self.pseudo_spatial_weighting == "teacher_student_diff":
+                if self.use_text_local_response_distill:
+                    response_cache = stats["response_teacher_caches"][patch_index]
+                    pseudo_label = response_cache["teacher_probability"].to(
+                        self.device, non_blocking=True
+                    )
+                    teacher_response = response_cache["teacher_response"].to(
+                        self.device, non_blocking=True
+                    )
+                elif self.pseudo_spatial_weighting == "teacher_student_diff":
                     spatial_cache = stats["pseudo_spatial_caches"][patch_index]
                     pseudo_label = spatial_cache["teacher_probability"].to(
                         self.device, non_blocking=True
@@ -4075,6 +4370,10 @@ class VoxTellCMTTA:
                     pseudo_label = teacher_pseudo_labels[patch_index].to(
                         self.device, non_blocking=True
                     ).detach()
+                if self.pseudo_spatial_weighting == "teacher_student_diff":
+                    spatial_weight = stats["pseudo_spatial_caches"][patch_index][
+                        "spatial_weight"
+                    ].to(self.device, non_blocking=True)
             for start in range(0, total_views, self.view_batch_size):
                 end = min(total_views, start + self.view_batch_size)
                 view_batch = self._make_view_batch(
@@ -4092,6 +4391,15 @@ class VoxTellCMTTA:
                     if self.use_d4_local_distill and local_element_count > 0:
                         student_logits, student_fusion = self._forward_with_d4_fusion(
                             view_batch, student_ctx
+                        )
+                    elif self.use_text_local_response_distill:
+                        student_logits, student_plus, student_minus = (
+                            self._forward_text_response_triplet(
+                                view_batch, student_ctx
+                            )
+                        )
+                        student_response = self._text_response(
+                            student_plus, student_minus
                         )
                     else:
                         student_logits = self._forward(view_batch, student_ctx)
@@ -4119,6 +4427,21 @@ class VoxTellCMTTA:
                         dice_derivatives[0][start:end],
                         dice_derivatives[1][start:end],
                     ]
+                    if self.use_text_local_response_distill:
+                        response_mask = input_mask_batch.unsqueeze(1).float()
+                        patch_response_squared_sum = (
+                            (student_response - teacher_response)
+                            .float()
+                            .square()
+                            .mul(response_mask)
+                            .sum()
+                        )
+                        local_tensors.append(patch_response_squared_sum)
+                        local_gradients.append(
+                            patch_response_squared_sum.new_tensor(
+                                self.response_weight / float(response_valid_count)
+                            )
+                        )
                     if self.use_d4_local_distill and local_element_count > 0:
                         local_components = d4_local_relation_loss_components(
                             student_fusion,
@@ -4172,6 +4495,9 @@ class VoxTellCMTTA:
             "pseudo_update_mode": "original",
             "pseudo_spatial_weighting": self.pseudo_spatial_weighting,
             "pseudo_spatial_lambda": self.pseudo_spatial_lambda,
+            "response_weight": self.response_weight,
+            "response_eps": self.response_eps,
+            "response_seed": self.response_seed,
             "pseudo_unweighted_soft_dice": float(
                 unweighted_global_dice.detach().cpu()
             ),
@@ -4182,6 +4508,9 @@ class VoxTellCMTTA:
             "pre_update_weighted_segmentation_loss": float(
                 global_dice.detach().cpu()
             ),
+            "response_loss": float(global_response_loss.detach().cpu()),
+            "weighted_response_loss": float(weighted_response_loss.detach().cpu()),
+            "response_valid_voxel_views": response_valid_count,
             "d4_local_loss_type": self.d4_local_loss_type,
             "d4_local_loss": float(global_local_loss.detach().cpu()),
             "d4_local_weighted_loss": float(weighted_local_loss.detach().cpu()),
@@ -4664,6 +4993,9 @@ class VoxTellCMTTA:
             "pseudo_teacher_inference": self.pseudo_teacher_inference,
             "pseudo_spatial_weighting": self.pseudo_spatial_weighting,
             "pseudo_spatial_lambda": self.pseudo_spatial_lambda,
+            "response_weight": self.response_weight,
+            "response_eps": self.response_eps,
+            "response_seed": self.response_seed,
             "use_lora": self.use_lora,
             "lora_rank": self.lora_rank if self.use_lora else None,
             "lora_alpha": self.lora_alpha if self.use_lora else None,
@@ -4716,6 +5048,7 @@ class VoxTellCMTTA:
         elif self.pseudo_update_mode == "original" and (
             self.use_d4_local_distill
             or self.pseudo_spatial_weighting == "teacher_student_diff"
+            or self.use_text_local_response_distill
         ):
             sums.update(self._last_pseudo_diagnostics)
         sums["entropy_loss"] = entropy_loss
@@ -4737,6 +5070,10 @@ class VoxTellCMTTA:
         )
         sums["cac_loss"] = float(cac_loss)
         sums["loss"] += self.w_cac * sums["cac_loss"]
+        sums["loss_without_response"] = sums["loss"]
+        sums["loss"] += float(
+            self._last_pseudo_diagnostics.get("weighted_response_loss", 0.0)
+        )
         sums["total_loss"] = sums["loss"]
 
         if (
@@ -4916,6 +5253,19 @@ class VoxTellCMTTA:
             "lora_state": self.lora_state_dict(),
             "pseudo_spatial_weighting": self.pseudo_spatial_weighting,
             "pseudo_spatial_lambda": self.pseudo_spatial_lambda,
+            "response_weight": self.response_weight,
+            "response_eps": self.response_eps,
+            "response_seed": self.response_seed,
+            "response_direction": (
+                None
+                if self._response_direction is None
+                else self._response_direction.detach().cpu()
+            ),
+            "response_radius": (
+                None
+                if self._response_radius is None
+                else self._response_radius.detach().cpu()
+            ),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -4982,6 +5332,28 @@ class VoxTellCMTTA:
                 "Checkpoint pseudo spatial-weighting configuration does not "
                 "match the current adapter"
             )
+        checkpoint_response_configuration = (
+            float(state.get("response_weight", 0.0)),
+            float(state.get("response_eps", 0.01)),
+            int(state.get("response_seed", 1377)),
+        )
+        current_response_configuration = (
+            self.response_weight,
+            self.response_eps,
+            self.response_seed,
+        )
+        if checkpoint_response_configuration != current_response_configuration:
+            raise ValueError(
+                "Checkpoint text response configuration does not match the "
+                "current adapter"
+            )
+        if self.use_text_local_response_distill:
+            checkpoint_direction = state.get("response_direction")
+            checkpoint_radius = state.get("response_radius")
+            if checkpoint_direction is None or checkpoint_radius is None:
+                raise ValueError("Checkpoint text response perturbation is incomplete")
+            self._response_direction = checkpoint_direction.to(self.device).detach()
+            self._response_radius = checkpoint_radius.to(self.device).detach()
         delta = state["ctx_delta"].to(self.device)
         if tuple(delta.shape) != tuple(self.ctx_delta.shape):
             raise ValueError(

@@ -1123,6 +1123,27 @@ def parse_args() -> argparse.Namespace:
         default=4.0,
         help="Lambda in w = 1 + lambda * abs(qT - p0).",
     )
+    parser.add_argument(
+        "--response_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of optional text local response distillation; zero keeps "
+            "the original forward path."
+        ),
+    )
+    parser.add_argument(
+        "--response_eps",
+        type=float,
+        default=0.01,
+        help="Relative radius and finite-difference epsilon for text response distillation.",
+    )
+    parser.add_argument(
+        "--response_seed",
+        type=int,
+        default=1377,
+        help="Fixed seed used to construct the detached text perturbation direction.",
+    )
     parser.add_argument("--bg_threshold", type=float, default=0.1)
     parser.add_argument("--tversky_alpha", type=float, default=0.3)
     parser.add_argument("--tversky_beta", type=float, default=0.7)
