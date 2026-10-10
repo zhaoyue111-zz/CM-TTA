@@ -18,6 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
 
 EPS = 1e-8
@@ -2058,26 +2059,28 @@ class VoxTellCMTTA:
         """Apply the fixed +/- perturbation and restore each original norm."""
         if self._response_direction is None or self._response_radius is None:
             raise RuntimeError("Text response perturbation is not initialized")
-        direction = self._response_direction.to(
-            device=text_features.device, dtype=text_features.dtype
-        )
-        radius = self._response_radius.to(
-            device=text_features.device, dtype=text_features.dtype
-        )
-        original_norm = torch.linalg.vector_norm(
-            text_features.float(), dim=(-2, -1), keepdim=True
-        )
+        with torch.autocast(device_type=self.device.type, enabled=False):
+            text_fp32 = text_features.float()
+            direction = self._response_direction.to(
+                device=text_features.device, dtype=torch.float32
+            )
+            radius = self._response_radius.to(
+                device=text_features.device, dtype=torch.float32
+            )
+            original_norm = torch.linalg.vector_norm(
+                text_fp32, dim=(-2, -1), keepdim=True
+            )
 
-        def restore_norm(value: torch.Tensor) -> torch.Tensor:
-            value_norm = torch.linalg.vector_norm(
-                value.float(), dim=(-2, -1), keepdim=True
-            ).clamp_min(EPS)
-            return value * (original_norm / value_norm).to(value.dtype)
+            def restore_norm(value: torch.Tensor) -> torch.Tensor:
+                value_norm = torch.linalg.vector_norm(
+                    value, dim=(-2, -1), keepdim=True
+                ).clamp_min(EPS)
+                return value * (original_norm / value_norm)
 
-        return (
-            restore_norm(text_features + radius * direction),
-            restore_norm(text_features - radius * direction),
-        )
+            return (
+                restore_norm(text_fp32 + radius * direction),
+                restore_norm(text_fp32 - radius * direction),
+            )
 
     @staticmethod
     def _response_foreground_logit(logits: torch.Tensor) -> torch.Tensor:
@@ -2172,7 +2175,7 @@ class VoxTellCMTTA:
     def _forward_text_response_triplet(
         self, images: torch.Tensor, ctx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return unperturbed/+/- D5 logits after one frozen image encoding."""
+        """Return base/+/- logits with shared skips and checkpointed FP32 responses."""
         if not self.use_text_local_response_distill:
             raise RuntimeError("Text local response distillation is disabled")
         text_features = self._encode_ctx(ctx)
@@ -2181,16 +2184,39 @@ class VoxTellCMTTA:
         base_features = text_features.expand(batch_size, -1, -1)
         plus_features = plus_features.expand(batch_size, -1, -1)
         minus_features = minus_features.expand(batch_size, -1, -1)
-        with torch.no_grad():
-            skips = self._encode_response_image(images)
-        tripled_skips = [torch.cat((skip, skip, skip), dim=0) for skip in skips]
-        combined_text = torch.cat(
-            (base_features, plus_features, minus_features), dim=0
+        # Keep exactly one FP32 skip pyramid.  Building AMP skips and casting
+        # them afterward would retain an additional full feature copy while
+        # the base decoder graph is alive.
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device.type, enabled=False
+        ):
+            skips = self._encode_response_image(images.float())
+        base_logits = self._decode_response_features(skips, base_features)
+
+        def decode_response_branch(branch_text: torch.Tensor) -> torch.Tensor:
+            with torch.autocast(device_type=self.device.type, enabled=False):
+                return self._decode_response_features(
+                    skips, branch_text.float()
+                ).float()
+
+        use_checkpoint = torch.is_grad_enabled() and (
+            plus_features.requires_grad or minus_features.requires_grad
         )
-        combined_logits = self._decode_response_features(
-            tripled_skips, combined_text
-        )
-        return tuple(combined_logits.split(batch_size, dim=0))
+        if use_checkpoint:
+            plus_logits = gradient_checkpoint(
+                decode_response_branch,
+                plus_features,
+                use_reentrant=False,
+            )
+            minus_logits = gradient_checkpoint(
+                decode_response_branch,
+                minus_features,
+                use_reentrant=False,
+            )
+        else:
+            plus_logits = decode_response_branch(plus_features)
+            minus_logits = decode_response_branch(minus_features)
+        return base_logits, plus_logits, minus_logits
 
     def _text_response(self, plus_logits: torch.Tensor, minus_logits: torch.Tensor) -> torch.Tensor:
         return (

@@ -99,6 +99,9 @@ class TinyResponseVoxTell(TinyVoxTell):
         super().__init__()
         self.response_encoder_calls = 0
         self.response_decoder_calls = 0
+        self.response_skip_batch_sizes = []
+        self.response_skip_data_ptrs = []
+        self.response_text_dtypes = []
 
     def encode_image_for_text_response(self, image):
         self.response_encoder_calls += 1
@@ -106,7 +109,14 @@ class TinyResponseVoxTell(TinyVoxTell):
 
     def decode_image_for_text_response(self, skips, text_features):
         self.response_decoder_calls += 1
-        prompt = text_features.square().sum(dim=(1, 2)).view(-1, 1, 1, 1, 1)
+        self.response_skip_batch_sizes.append(int(skips[0].shape[0]))
+        self.response_skip_data_ptrs.append(int(skips[0].data_ptr()))
+        self.response_text_dtypes.append(text_features.dtype)
+        first = text_features[:, :, 0]
+        second = text_features[:, :, 1]
+        prompt = (
+            first.square() + 0.3 * second.square() * first + 0.1 * second
+        ).sum(dim=1).view(-1, 1, 1, 1, 1)
         return skips[0][:, :1] * prompt
 
 
@@ -1665,6 +1675,16 @@ class VoxTellCMTTATest(unittest.TestCase):
             saved_direction = direction.clone()
             adapter.ctx.data.add_(0.2)
             self.assertTrue(torch.equal(adapter._response_direction, saved_direction))
+            with torch.no_grad(), torch.autocast(
+                device_type="cpu", dtype=torch.bfloat16, enabled=True
+            ):
+                _, plus_logits, minus_logits = (
+                    adapter._forward_text_response_triplet(
+                        torch.ones(1, 1, 1, 2), adapter.ctx
+                    )
+                )
+            self.assertEqual(plus_logits.dtype, torch.float32)
+            self.assertEqual(minus_logits.dtype, torch.float32)
         finally:
             adapter.close()
 
@@ -1714,15 +1734,64 @@ class VoxTellCMTTATest(unittest.TestCase):
             )
             self.assertEqual(diagnostics["response_valid_voxel_views"], 6)
             # Stats: one teacher + two student batches. Replay: two student
-            # batches. Each call handles base/+/- after exactly one encoding.
+            # batches. Each triplet performs exactly one image encoding, and
+            # no decoder branch receives a tripled skip batch.
             self.assertEqual(model.response_encoder_calls, 5)
-            self.assertEqual(model.response_decoder_calls, 5)
+            self.assertGreaterEqual(model.response_decoder_calls, 15)
+            self.assertTrue(
+                all(batch_size == 1 for batch_size in model.response_skip_batch_sizes)
+            )
+            self.assertLessEqual(
+                len(set(model.response_skip_data_ptrs)),
+                model.response_encoder_calls,
+            )
+            self.assertTrue(
+                all(dtype == torch.float32 for dtype in model.response_text_dtypes)
+            )
             self.assertIsNotNone(adapter.ctx.grad)
             self.assertTrue(torch.isfinite(adapter.ctx.grad).all())
             self.assertGreater(float(adapter.ctx.grad.norm()), 0.0)
             self.assertTrue(
                 all(parameter.grad is None for parameter in adapter.model.parameters())
             )
+        finally:
+            adapter.close()
+
+    def test_text_response_loss_alone_has_finite_nonzero_ctx_gradient(self):
+        adapter = VoxTellCMTTA(
+            TinyResponseVoxTell(),
+            torch.tensor([[[1.0, 2.0]]]),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                response_weight=0.01,
+                response_eps=0.01,
+            ),
+        )
+        image = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
+        try:
+            with torch.no_grad():
+                _, teacher_plus, teacher_minus = (
+                    adapter._forward_text_response_triplet(
+                        image, torch.tensor([[0.8, 2.2]])
+                    )
+                )
+                teacher_response = adapter._text_response(
+                    teacher_plus, teacher_minus
+                ).detach()
+            _, student_plus, student_minus = adapter._forward_text_response_triplet(
+                image, adapter.ctx
+            )
+            student_response = adapter._text_response(student_plus, student_minus)
+            response_loss = (student_response - teacher_response).square().mean()
+            response_gradient = torch.autograd.grad(
+                adapter.response_weight * response_loss,
+                adapter.ctx,
+            )[0]
+            self.assertGreater(float(response_loss.detach()), 1e-8)
+            self.assertTrue(torch.isfinite(response_gradient).all())
+            self.assertGreater(float(response_gradient.norm()), 1e-8)
         finally:
             adapter.close()
 
