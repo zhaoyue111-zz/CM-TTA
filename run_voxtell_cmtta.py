@@ -39,6 +39,72 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def load_case_order_replay(path: str | Path) -> list[str]:
+    """Load an explicit complete basename order from JSON."""
+    source = Path(path)
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    order = payload.get("case_order") if isinstance(payload, dict) else payload
+    if not isinstance(order, list) or not order or not all(
+        isinstance(name, str) and name for name in order
+    ):
+        raise ValueError(
+            "case_order_replay must be a JSON list or contain a case_order list"
+        )
+    if len(set(order)) != len(order):
+        raise ValueError("case_order_replay contains duplicate basenames")
+    return order
+
+
+def apply_case_order_replay(
+    entries: list[tuple[Path, Path]], order: list[str]
+) -> list[tuple[Path, Path]]:
+    """Reorder every loaded case exactly once, rejecting partial/mismatched lists."""
+    by_basename = {entry[0].name: entry for entry in entries}
+    if len(by_basename) != len(entries):
+        raise ValueError("Loaded test entries contain duplicate image basenames")
+    loaded = set(by_basename)
+    requested = set(order)
+    if loaded != requested or len(order) != len(entries):
+        raise ValueError(
+            "case_order_replay must list every loaded basename exactly once; "
+            f"missing={sorted(loaded - requested)}, extra={sorted(requested - loaded)}"
+        )
+    return [by_basename[name] for name in order]
+
+
+def load_view_params_replay(path: str | Path) -> dict[str, list[dict[str, float]]]:
+    """Load case-aligned augmentation parameters from a prior results.json."""
+    source = Path(path)
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    rows = payload.get("cases") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise ValueError("view_params_replay must contain a results case list")
+    replay = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("basename"), str):
+            raise ValueError("Every replay result row must contain a basename")
+        basename = row["basename"]
+        if basename in replay:
+            raise ValueError(f"Duplicate replay basename: {basename}")
+        trace = row.get("adaptation_trace")
+        params = trace.get("view_params") if isinstance(trace, dict) else None
+        if not isinstance(params, list) or not params:
+            raise ValueError(f"Missing adaptation_trace.view_params for {basename}")
+        normalized_params = []
+        for param in params:
+            if not isinstance(param, dict) or set(param) != {"scale", "offset"}:
+                raise ValueError(
+                    f"Invalid adaptation_trace.view_params entry for {basename}"
+                )
+            scale = float(param["scale"])
+            offset = float(param["offset"])
+            if not np.isfinite(scale) or not np.isfinite(offset):
+                raise ValueError(f"Non-finite replay parameter for {basename}")
+            normalized_params.append({"scale": scale, "offset": offset})
+        replay[basename] = normalized_params
+    return replay
+
+
 def binary_metrics(prediction: np.ndarray, target: np.ndarray) -> dict[str, float]:
     prediction = np.asarray(prediction, dtype=bool)
     target = np.asarray(target, dtype=bool)
@@ -985,8 +1051,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt", default="liver")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output_dir", default="results_/voxtell_cmtta_p0")
+    parser.add_argument(
+        "--fail_if_output_exists",
+        action="store_true",
+        help="Refuse to start when output_dir already exists.",
+    )
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--seed", type=int, default=1377)
+    parser.add_argument(
+        "--case_order_replay",
+        default=None,
+        help="JSON file listing every case basename in the exact execution order.",
+    )
+    parser.add_argument(
+        "--view_params_replay",
+        default=None,
+        help=(
+            "Prior results.json whose per-case adaptation_trace.view_params "
+            "replace random augmentation sampling."
+        ),
+    )
 
     # CM-TTA uses the paper's one-step Adam configuration.
     parser.add_argument("--lr", type=float, default=5e-3)
@@ -1188,11 +1272,32 @@ def main() -> None:
         torch.cuda.set_device(args.device)
 
     output_dir = Path(args.output_dir)
+    if args.fail_if_output_exists and output_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite existing output_dir: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "args.json").write_text(
         json.dumps(vars(args), indent=2, default=str), encoding="utf-8"
     )
     entries = read_test_entries(args.data_dir, args.split_file)
+    replay_order = None
+    if args.case_order_replay:
+        replay_order = load_case_order_replay(args.case_order_replay)
+        entries = apply_case_order_replay(entries, replay_order)
+    replay_view_params = None
+    if args.view_params_replay:
+        replay_view_params = load_view_params_replay(args.view_params_replay)
+        loaded_basenames = {image_path.name for image_path, _ in entries}
+        replay_basenames = set(replay_view_params)
+        if loaded_basenames != replay_basenames:
+            raise ValueError(
+                "view_params_replay basenames do not match loaded cases; "
+                f"missing={sorted(loaded_basenames - replay_basenames)}, "
+                f"extra={sorted(replay_basenames - loaded_basenames)}"
+            )
+    print(
+        "Case execution order: "
+        + ", ".join(image_path.name for image_path, _ in entries)
+    )
     predictor = build_predictor(args)
     predictor.text_backbone.requires_grad_(False)
 
@@ -1268,7 +1373,23 @@ def main() -> None:
             # adapt_case() will use for view selection, without selecting a
             # view or updating ctx.  All GT view diagnostics are computed
             # from this pre-adaptation embedding.
-            prepared_case = adapter.prepare_case(patches, valid_masks)
+            expected_view_params = (
+                None
+                if replay_view_params is None
+                else replay_view_params[image_path.name]
+            )
+            prepared_case = adapter.prepare_case(
+                patches,
+                valid_masks,
+                view_params_override=expected_view_params,
+            )
+            if (
+                expected_view_params is not None
+                and prepared_case["params"] != expected_view_params
+            ):
+                raise RuntimeError(
+                    f"Prepared view parameter replay mismatch for {image_path.name}"
+                )
             with torch.no_grad():
                 selection_text_feature_before = adapter._encode_ctx(
                     prepared_case["short_ctx"].detach()
@@ -1406,6 +1527,13 @@ def main() -> None:
                 prepared_case=prepared_case,
                 teacher_pseudo_provider=teacher_pseudo_provider,
             )
+            if (
+                expected_view_params is not None
+                and trace["view_params"] != expected_view_params
+            ):
+                raise RuntimeError(
+                    f"Adaptation view parameter replay mismatch for {image_path.name}"
+                )
             if args.pseudo_teacher_inference == "sliding":
                 info = teacher_context.get("info")
                 if info is None:
@@ -1728,6 +1856,17 @@ def main() -> None:
 
     average = macro_average_case_metrics(case_rows)
     output = {"cases": case_rows, "average": average}
+    if replay_order is not None or replay_view_params is not None:
+        output["replay_validation"] = {
+            "case_order_source": args.case_order_replay,
+            "view_params_source": args.view_params_replay,
+            "actual_case_order": [image_path.name for image_path, _ in entries],
+            "case_order_matches_request": (
+                replay_order is None
+                or [image_path.name for image_path, _ in entries] == replay_order
+            ),
+            "view_params_match_source_by_basename": replay_view_params is not None,
+        }
     if args.selector_only_eval:
         selector_summary = summarize_selector_only(selector_reports)
         output["selector_only_summary"] = selector_summary

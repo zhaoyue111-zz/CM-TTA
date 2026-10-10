@@ -4878,6 +4878,7 @@ class VoxTellCMTTA:
         self,
         patches: list[torch.Tensor],
         valid_masks: Optional[list[torch.Tensor]] = None,
+        view_params_override: Optional[list[dict[str, float]]] = None,
     ) -> dict:
         """Prepare one case without selecting views or updating any parameter."""
         if not patches:
@@ -4898,7 +4899,30 @@ class VoxTellCMTTA:
                 )
             normalized_masks.append(mask.float().contiguous())
         valid_masks = normalized_masks
-        params = self._sample_intensity_params(self.num_aug_views)
+        if view_params_override is None:
+            params = self._sample_intensity_params(self.num_aug_views)
+        else:
+            expected_views = 1 + self.num_aug_views
+            if len(view_params_override) != expected_views:
+                raise ValueError(
+                    "view_params_override must contain exactly "
+                    f"{expected_views} views, got {len(view_params_override)}"
+                )
+            params = []
+            for param in view_params_override:
+                if not isinstance(param, dict) or set(param) != {"scale", "offset"}:
+                    raise ValueError(
+                        "Each replayed view parameter must contain only scale and offset"
+                    )
+                scale = float(param["scale"])
+                offset = float(param["offset"])
+                if not np.isfinite(scale) or not np.isfinite(offset):
+                    raise ValueError("Replayed view parameters must be finite")
+                params.append({"scale": scale, "offset": offset})
+            if params[0] != {"scale": 1.0, "offset": 0.0}:
+                raise ValueError(
+                    "Replayed view 0 must remain the unaugmented scale=1, offset=0 view"
+                )
         with self.lora_mode(False):
             short_ctx, current_quality, historical_quality, weight_historical = self._dynamic_short_ctx(
                 patches, valid_masks

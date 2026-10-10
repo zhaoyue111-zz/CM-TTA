@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import sys
 import types
@@ -45,6 +46,7 @@ from method.voxtell_cmtta import (
     save_cmtta_checkpoint,
 )
 from run_voxtell_cmtta import (
+    apply_case_order_replay,
     binary_diagnostic_metrics,
     case_metric_changes,
     check_prediction_nifti_geometry,
@@ -52,6 +54,8 @@ from run_voxtell_cmtta import (
     evaluate_case,
     evaluate_selection_view_gt_metrics_before_adaptation,
     macro_average_case_metrics,
+    load_case_order_replay,
+    load_view_params_replay,
     patch_teacher_probability,
     predict_case_soft_probability,
     save_prediction_nifti,
@@ -830,6 +834,78 @@ class VoxTellCMTTATest(unittest.TestCase):
         self.assertEqual(original_param, params[0])
         self.assertTrue(torch.equal(selected, data * 2.0 - 0.5))
         self.assertEqual(selected_param, params[1])
+
+    def test_case_order_and_view_params_replay_are_case_aligned(self):
+        entries = [
+            (Path("/images/a.nii.gz"), Path("/labels/a.nii.gz")),
+            (Path("/images/b.nii.gz"), Path("/labels/b.nii.gz")),
+        ]
+        params_a = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.1},
+        ]
+        params_b = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.9, "offset": 0.2},
+        ]
+        with TemporaryDirectory() as directory:
+            order_path = Path(directory) / "order.json"
+            replay_path = Path(directory) / "results.json"
+            order_path.write_text(
+                json.dumps({"case_order": ["b.nii.gz", "a.nii.gz"]}),
+                encoding="utf-8",
+            )
+            replay_path.write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {
+                                "basename": "a.nii.gz",
+                                "adaptation_trace": {"view_params": params_a},
+                            },
+                            {
+                                "basename": "b.nii.gz",
+                                "adaptation_trace": {"view_params": params_b},
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            order = load_case_order_replay(order_path)
+            reordered = apply_case_order_replay(entries, order)
+            replay = load_view_params_replay(replay_path)
+        self.assertEqual([entry[0].name for entry in reordered], order)
+        self.assertEqual(replay["a.nii.gz"], params_a)
+        self.assertEqual(replay["b.nii.gz"], params_b)
+        with self.assertRaisesRegex(ValueError, "every loaded basename"):
+            apply_case_order_replay(entries, ["a.nii.gz"])
+
+    def test_prepare_case_replays_exact_view_params_without_sampling(self):
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(),
+            torch.zeros(1, 1, 2),
+            "cpu",
+            make_args(num_aug_views=1, view_batch_size=1),
+        )
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.125, "offset": -0.25},
+        ]
+        try:
+            with patch.object(
+                adapter,
+                "_sample_intensity_params",
+                side_effect=AssertionError("replay must bypass random sampling"),
+            ):
+                prepared = adapter.prepare_case(
+                    [torch.zeros(1, 2, 2, 2)],
+                    [torch.ones(2, 2, 2)],
+                    view_params_override=params,
+                )
+            self.assertEqual(prepared["params"], params)
+        finally:
+            adapter.close()
 
     def test_tdc_sliding_comparisons_use_trace_view_four_sliding_calls_and_no_step(self):
         adapter = VoxTellCMTTA(

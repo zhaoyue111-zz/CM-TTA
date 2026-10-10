@@ -1,0 +1,12 @@
+{
+  "case_order": [
+    "CYST_PA69.nii.gz",
+    "MET_PA13.nii.gz",
+    "MET_PA25.nii.gz",
+    "HCC_10081574_20140213.nii.gz",
+    "FNH_PA32.nii.gz",
+    "HEM_PA66.nii.gz",
+    "HEM_PA29.nii.gz",
+    "HEM_PA101.nii.gz"
+  ]
+}
