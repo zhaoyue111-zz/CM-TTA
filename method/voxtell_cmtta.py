@@ -27,6 +27,7 @@ MULTISCALE_D5_WEIGHTS = (0.8, 0.09, 0.06, 0.05)
 D4_FUSION_CHANNELS = 32
 D4_LOCAL_WINDOW_SIZE = 5
 D4_LOCAL_COSINE_EPS = 1e-6
+PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS = 4096
 
 
 class LoRAPackedQKVMultiheadAttention(nn.Module):
@@ -1408,6 +1409,14 @@ class VoxTellCMTTA:
         self.gradient_conflict_diagnostics = bool(
             getattr(args, "gradient_conflict_diagnostics", False)
         )
+        if (
+            self.gradient_conflict_diagnostics
+            and self.pseudo_spatial_weighting == "teacher_student_diff"
+        ):
+            raise ValueError(
+                "gradient_conflict_diagnostics is not supported with "
+                "teacher_student_diff spatial weighting"
+            )
         # Optional validation only.  It performs one additional ordinary
         # forward beside the decoder-output forward and is therefore off by
         # default for the normal low-memory adaptation path.
@@ -2566,7 +2575,12 @@ class VoxTellCMTTA:
         local_student_norm_values: list[torch.Tensor] = []
         local_teacher_caches: list[dict[str, torch.Tensor]] = []
         spatial_weight_caches: list[dict[str, torch.Tensor]] = []
-        spatial_diff_values: list[torch.Tensor] = []
+        spatial_diff_sum = 0.0
+        spatial_diff_count = 0
+        spatial_diff_max = 0.0
+        spatial_diff_histogram = torch.zeros(
+            PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS, dtype=torch.float64
+        )
         if teacher_pseudo_labels is not None and len(teacher_pseudo_labels) != len(patches):
             raise ValueError(
                 "teacher_pseudo_labels must contain one soft label per case patch"
@@ -2658,12 +2672,29 @@ class VoxTellCMTTA:
                                     self.pseudo_spatial_lambda,
                                 )
                                 valid_spatial = input_mask.unsqueeze(1).bool()
-                                spatial_diff_values.append(
+                                valid_diff = (
                                     (pseudo_label.float() - original_student.float())
                                     .abs()[valid_spatial]
                                     .detach()
-                                    .cpu()
                                 )
+                                patch_diff_count = int(valid_diff.numel())
+                                if patch_diff_count > 0:
+                                    spatial_diff_sum += float(
+                                        valid_diff.double().sum().cpu()
+                                    )
+                                    spatial_diff_count += patch_diff_count
+                                    spatial_diff_max = max(
+                                        spatial_diff_max,
+                                        float(valid_diff.max().cpu()),
+                                    )
+                                    spatial_diff_histogram.add_(
+                                        torch.histc(
+                                            valid_diff.float(),
+                                            bins=PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS,
+                                            min=0.0,
+                                            max=1.0,
+                                        ).cpu().double()
+                                    )
                                 spatial_weight_caches.append(
                                     {
                                         "teacher_probability": pseudo_label.detach().cpu(),
@@ -2765,15 +2796,39 @@ class VoxTellCMTTA:
         if self.pseudo_spatial_weighting == "teacher_student_diff":
             if len(spatial_weight_caches) != len(patches):
                 raise RuntimeError("Teacher-student spatial-weight cache is incomplete")
-            finite_diff = torch.cat(spatial_diff_values)
+            if spatial_diff_count <= 0:
+                raise RuntimeError(
+                    "Teacher-student spatial diagnostics found no valid voxels"
+                )
+            cumulative_histogram = spatial_diff_histogram.cumsum(dim=0)
+            p90_rank = 0.9 * float(spatial_diff_count)
+            p90_bin = int(
+                torch.searchsorted(
+                    cumulative_histogram,
+                    torch.tensor(p90_rank, dtype=cumulative_histogram.dtype),
+                    right=False,
+                ).item()
+            )
+            p90_bin = min(
+                p90_bin, PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS - 1
+            )
+            diff_mean = spatial_diff_sum / float(spatial_diff_count)
+            diff_p90_approx = (p90_bin + 1) / float(
+                PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS
+            )
             spatial_diagnostics = {
-                "pseudo_spatial_diff_mean": float(finite_diff.mean()),
-                "pseudo_spatial_diff_p90": float(torch.quantile(finite_diff, 0.9)),
+                "pseudo_spatial_diff_mean": diff_mean,
+                "pseudo_spatial_diff_p90_approx": diff_p90_approx,
+                "pseudo_spatial_diff_p90_approximation": "fixed_histogram_upper_edge",
+                "pseudo_spatial_diff_histogram_bins": (
+                    PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS
+                ),
+                "pseudo_spatial_diff_histogram_range": [0.0, 1.0],
                 "pseudo_spatial_weight_mean": float(
-                    1.0 + self.pseudo_spatial_lambda * finite_diff.mean()
+                    1.0 + self.pseudo_spatial_lambda * diff_mean
                 ),
                 "pseudo_spatial_weight_max": float(
-                    1.0 + self.pseudo_spatial_lambda * finite_diff.max()
+                    1.0 + self.pseudo_spatial_lambda * spatial_diff_max
                 ),
             }
         else:

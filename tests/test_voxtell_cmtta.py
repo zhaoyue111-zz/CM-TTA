@@ -1549,16 +1549,20 @@ class VoxTellCMTTATest(unittest.TestCase):
         ]
         try:
             adapter.optimizer.zero_grad(set_to_none=True)
-            pseudo_loss, entropy = adapter._backward_case_supervision(
-                [patch_tensor],
-                [valid],
-                params,
-                1,
-                adapter.ctx.detach().clone(),
-                1.0,
-                adapter.ctx.detach().clone(),
-                False,
-            )
+            with patch(
+                "torch.quantile",
+                side_effect=AssertionError("full-case quantile must not be used"),
+            ):
+                pseudo_loss, entropy = adapter._backward_case_supervision(
+                    [patch_tensor],
+                    [valid],
+                    params,
+                    1,
+                    adapter.ctx.detach().clone(),
+                    1.0,
+                    adapter.ctx.detach().clone(),
+                    False,
+                )
             diagnostics = adapter._last_pseudo_diagnostics
             self.assertTrue(np.isfinite(pseudo_loss))
             self.assertTrue(np.isfinite(entropy))
@@ -1571,6 +1575,14 @@ class VoxTellCMTTATest(unittest.TestCase):
                 diagnostics["pseudo_spatial_weight_max"],
                 diagnostics["pseudo_spatial_weight_mean"],
             )
+            self.assertIn("pseudo_spatial_diff_p90_approx", diagnostics)
+            self.assertEqual(
+                diagnostics["pseudo_spatial_diff_p90_approximation"],
+                "fixed_histogram_upper_edge",
+            )
+            self.assertEqual(
+                diagnostics["pseudo_spatial_diff_histogram_range"], [0.0, 1.0]
+            )
             self.assertAlmostEqual(
                 pseudo_loss,
                 diagnostics["pre_update_weighted_segmentation_loss"],
@@ -1580,6 +1592,23 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertTrue(torch.isfinite(adapter.ctx.grad).all())
         finally:
             adapter.close()
+
+    def test_teacher_student_diff_rejects_gradient_conflict_diagnostics(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "gradient_conflict_diagnostics is not supported",
+        ):
+            VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    pseudo_spatial_weighting="teacher_student_diff",
+                    gradient_conflict_diagnostics=True,
+                ),
+            )
 
     def test_multiscale_soft_target_downsampling_excludes_padding(self):
         pseudo = torch.zeros(1, 1, 4, 4, 4)
