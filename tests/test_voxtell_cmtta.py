@@ -2001,12 +2001,9 @@ class VoxTellCMTTATest(unittest.TestCase):
         for teacher, students, mask in patches:
             accumulator.update_teacher(teacher, mask)
             accumulator.update_student_batch(teacher, students, mask.expand(2, -1, -1, -1), 0)
-            accumulator.update_decomposition(
-                teacher,
-                students.sum(dim=0, keepdim=True),
-                students.square().sum(dim=0, keepdim=True),
-                mask,
-            )
+            state = accumulator.start_patch_welford(teacher)
+            accumulator.update_patch_welford(state, students)
+            accumulator.finish_patch_welford(teacher, state, mask)
             expanded_mask = mask.unsqueeze(1).expand_as(students)
             response_squared_sum += float(
                 ((students - teacher).square() * expanded_mask).sum()
@@ -2035,13 +2032,93 @@ class VoxTellCMTTATest(unittest.TestCase):
         mask = torch.ones(1, 1, 1, 1)
         zero.update_teacher(zero_teacher, mask)
         zero.update_student_batch(zero_teacher, zero_student, mask, 0)
-        zero.update_decomposition(zero_teacher, zero_student, zero_student.square(), mask)
+        state = zero.start_patch_welford(zero_teacher)
+        zero.update_patch_welford(state, zero_student)
+        zero.finish_patch_welford(zero_teacher, state, mask)
         zero_diagnostics = zero.finalize(0, [params[0]], 1.0, 1)
         self.assertIsNone(
             zero_diagnostics["student_views"][0][
                 "cosine_similarity_to_teacher"
             ]
         )
+        with self.assertWarnsRegex(RuntimeWarning, "does not match response_loss"):
+            failed = zero.finalize(0, [params[0]], 2.0, 1)
+        self.assertFalse(failed["consistency_checks_passed"])
+        self.assertGreater(failed["mse_decomposition_absolute_error"], 0.0)
+
+    def test_response_welford_is_stable_for_large_offset_small_view_variance(self):
+        accumulator = ResponseDiagnosticsAccumulator(2)
+        teacher = torch.full((1, 1, 1, 1, 3), 100.0, dtype=torch.float32)
+        students = torch.stack(
+            (
+                torch.full_like(teacher[0], 100.01),
+                torch.full_like(teacher[0], 99.99),
+            )
+        )
+        mask = torch.ones(1, 1, 1, 3)
+        accumulator.update_teacher(teacher, mask)
+        accumulator.update_student_batch(
+            teacher, students, mask.expand(2, -1, -1, -1), 0
+        )
+        state = accumulator.start_patch_welford(teacher)
+        accumulator.update_patch_welford(state, students)
+        accumulator.finish_patch_welford(teacher, state, mask)
+        direct_loss = float(
+            (students.double() - teacher.double()).square().mean()
+        )
+        diagnostics = accumulator.finalize(
+            0,
+            [
+                {"scale": 1.0, "offset": 0.0},
+                {"scale": 1.0, "offset": 0.0},
+            ],
+            direct_loss,
+            1,
+        )
+        self.assertTrue(diagnostics["consistency_checks_passed"])
+        self.assertAlmostEqual(
+            diagnostics["student_mean_response_mse_to_teacher"], 0.0, places=14
+        )
+        self.assertAlmostEqual(
+            diagnostics["student_view_response_variance"],
+            direct_loss,
+            places=14,
+        )
+
+    def test_response_diagnostics_weight_patches_by_valid_voxel_count(self):
+        accumulator = ResponseDiagnosticsAccumulator(2)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.0, "offset": 0.0},
+        ]
+        patch_specs = ((1, 0.0), (3, 2.0))
+        total_squared_sum = 0.0
+        total_count = 0
+        for valid_count, student_value in patch_specs:
+            teacher = torch.zeros(1, 1, 1, 1, valid_count)
+            students = torch.full(
+                (2, 1, 1, 1, valid_count), student_value
+            )
+            mask = torch.ones(1, 1, 1, valid_count)
+            accumulator.update_teacher(teacher, mask)
+            accumulator.update_student_batch(
+                teacher, students, mask.expand(2, -1, -1, -1), 0
+            )
+            state = accumulator.start_patch_welford(teacher)
+            accumulator.update_patch_welford(state, students)
+            accumulator.finish_patch_welford(teacher, state, mask)
+            total_squared_sum += float((students - teacher).square().sum())
+            total_count += students.numel()
+        response_loss = total_squared_sum / total_count
+        diagnostics = accumulator.finalize(0, params, response_loss, 1)
+        # Correct valid-voxel weighting is (1*0 + 3*4) / 4 = 3;
+        # averaging the two patch MSEs would incorrectly produce 2.
+        self.assertAlmostEqual(response_loss, 3.0)
+        self.assertAlmostEqual(
+            diagnostics["valid_voxel_weighted_view_mse"], 3.0
+        )
+        self.assertAlmostEqual(diagnostics["student_views"][0]["mean"], 1.5)
+        self.assertEqual(diagnostics["teacher"]["valid_voxel_count"], 4)
 
     def test_response_diagnostics_do_not_change_loss_gradient_or_forward_count(self):
         torch.manual_seed(211)
