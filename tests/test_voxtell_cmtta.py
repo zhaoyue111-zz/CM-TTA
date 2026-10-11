@@ -17,6 +17,7 @@ from torch.nn import functional as F
 from data.voxtell_p0 import make_case_patches, pad_to_patch_grid
 from method.voxtell_cmtta import (
     LoRAPackedQKVMultiheadAttention,
+    ResponseDiagnosticsAccumulator,
     ShortPromptMemory,
     VoxTellCMTTA,
     avg_entropy,
@@ -1910,6 +1911,7 @@ class VoxTellCMTTATest(unittest.TestCase):
                 pseudo_update_mode="original",
                 response_weight=0.01,
                 response_eps=0.01,
+                response_diagnostics=True,
                 num_aug_views=1,
                 view_batch_size=1,
                 w_cac=0.0,
@@ -1953,6 +1955,13 @@ class VoxTellCMTTATest(unittest.TestCase):
             )
             self.assertEqual(trace["response_eps"], 0.01)
             self.assertEqual(trace["response_weight"], 0.01)
+            self.assertIn("response_diagnostics", trace)
+            self.assertTrue(
+                trace["response_diagnostics"]["consistency_checks_passed"]
+            )
+            self.assertEqual(
+                trace["response_diagnostics"]["selected_view"], 1
+            )
         finally:
             adapter.close()
 
@@ -1961,6 +1970,189 @@ class VoxTellCMTTATest(unittest.TestCase):
         response_logit = VoxTellCMTTA._response_foreground_logit(logits)
         self.assertEqual(tuple(response_logit.shape), (1, 1, 1, 1, 1))
         self.assertAlmostEqual(float(response_logit), 3.5)
+
+    def test_response_diagnostics_use_valid_voxel_weighting_and_mse_decomposition(self):
+        accumulator = ResponseDiagnosticsAccumulator(2)
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+        # Split unequal-valued voxels into separate patches so an accidental
+        # mean of patch means would disagree with the valid-voxel reduction.
+        patches = [
+            (
+                torch.tensor([[[[[1.0, 99.0]]]]]),
+                torch.tensor([[[[[2.0, -999.0]]]], [[[[0.0, 999.0]]]]]),
+                torch.tensor([[[[1.0, 0.0]]]]),
+            ),
+            (
+                torch.tensor([[[[[2.0, 99.0, 99.0]]]]]),
+                torch.tensor(
+                    [
+                        [[[[4.0, -999.0, -999.0]]]],
+                        [[[[2.0, 999.0, 999.0]]]],
+                    ]
+                ),
+                torch.tensor([[[[1.0, 0.0, 0.0]]]]),
+            ),
+        ]
+        response_squared_sum = 0.0
+        response_count = 0
+        for teacher, students, mask in patches:
+            accumulator.update_teacher(teacher, mask)
+            accumulator.update_student_batch(teacher, students, mask.expand(2, -1, -1, -1), 0)
+            accumulator.update_decomposition(
+                teacher,
+                students.sum(dim=0, keepdim=True),
+                students.square().sum(dim=0, keepdim=True),
+                mask,
+            )
+            expanded_mask = mask.unsqueeze(1).expand_as(students)
+            response_squared_sum += float(
+                ((students - teacher).square() * expanded_mask).sum()
+            )
+            response_count += int(expanded_mask.sum())
+        response_loss = response_squared_sum / response_count
+        diagnostics = accumulator.finalize(1, params, response_loss, 1)
+        self.assertAlmostEqual(response_loss, 1.5)
+        self.assertAlmostEqual(diagnostics["teacher"]["mean"], 1.5)
+        self.assertAlmostEqual(diagnostics["teacher"]["std"], 0.5)
+        self.assertEqual(diagnostics["teacher"]["valid_voxel_count"], 2)
+        self.assertAlmostEqual(
+            diagnostics["student_mean_response_mse_to_teacher"], 0.5
+        )
+        self.assertAlmostEqual(
+            diagnostics["student_view_response_variance"], 1.0
+        )
+        self.assertAlmostEqual(diagnostics["mse_decomposition_sum"], 1.5)
+        self.assertAlmostEqual(
+            diagnostics["valid_voxel_weighted_view_mse"], 1.5
+        )
+
+        zero = ResponseDiagnosticsAccumulator(1)
+        zero_teacher = torch.zeros(1, 1, 1, 1, 1)
+        zero_student = torch.ones(1, 1, 1, 1, 1)
+        mask = torch.ones(1, 1, 1, 1)
+        zero.update_teacher(zero_teacher, mask)
+        zero.update_student_batch(zero_teacher, zero_student, mask, 0)
+        zero.update_decomposition(zero_teacher, zero_student, zero_student.square(), mask)
+        zero_diagnostics = zero.finalize(0, [params[0]], 1.0, 1)
+        self.assertIsNone(
+            zero_diagnostics["student_views"][0][
+                "cosine_similarity_to_teacher"
+            ]
+        )
+
+    def test_response_diagnostics_do_not_change_loss_gradient_or_forward_count(self):
+        torch.manual_seed(211)
+        model = TinyResponseVoxTell()
+        adapters = [
+            VoxTellCMTTA(
+                copy.deepcopy(model),
+                torch.tensor([[[1.0, 2.0]]]),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    response_weight=0.01,
+                    response_eps=0.01,
+                    response_seed=31,
+                    response_diagnostics=enabled,
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_entropy=0.0,
+                ),
+            )
+            for enabled in (False, True)
+        ]
+        image = torch.tensor([[[[1.0, 2.0], [3.0, 1000.0]]]])
+        valid = torch.tensor([[[1.0, 1.0], [1.0, 0.0]]])
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+        losses = []
+        gradients = []
+        calls = []
+        try:
+            for adapter in adapters:
+                adapter.optimizer.zero_grad(set_to_none=True)
+                loss, _ = adapter._backward_case_supervision(
+                    [image],
+                    [valid],
+                    params,
+                    1,
+                    torch.tensor([[1.2, 1.8]]),
+                    1.0,
+                    torch.tensor([[0.8, 2.2]]),
+                    False,
+                )
+                losses.append((loss, adapter._last_pseudo_diagnostics["response_loss"]))
+                gradients.append(adapter.ctx.grad.detach().clone())
+                calls.append(
+                    (
+                        adapter.model.response_encoder_calls,
+                        adapter.model.response_decoder_calls,
+                    )
+                )
+            self.assertEqual(losses[0], losses[1])
+            self.assertTrue(torch.equal(gradients[0], gradients[1]))
+            self.assertEqual(calls[0], calls[1])
+            diagnostics = adapters[1]._last_pseudo_diagnostics[
+                "response_diagnostics"
+            ]
+            self.assertTrue(diagnostics["consistency_checks_passed"])
+        finally:
+            for adapter in adapters:
+                adapter.close()
+
+    def test_response_export_writes_teacher_once_and_students_per_view(self):
+        with TemporaryDirectory() as directory:
+            adapter = VoxTellCMTTA(
+                TinyResponseVoxTell(),
+                torch.tensor([[[1.0, 2.0]]]),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    response_weight=0.01,
+                    response_export_dir=directory,
+                    response_export_cases=["case.nii.gz"],
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_entropy=0.0,
+                ),
+            )
+            try:
+                adapter.optimizer.zero_grad(set_to_none=True)
+                adapter._backward_case_supervision(
+                    [torch.ones(1, 1, 1, 2)],
+                    [torch.ones(1, 1, 2)],
+                    [
+                        {"scale": 1.0, "offset": 0.0},
+                        {"scale": 0.9, "offset": 0.1},
+                    ],
+                    1,
+                    torch.tensor([[1.2, 1.8]]),
+                    1.0,
+                    torch.tensor([[0.8, 2.2]]),
+                    False,
+                    case_basename="case.nii.gz",
+                    adaptation_step=1,
+                )
+                exported = sorted(Path(directory).rglob("*.npz"))
+                self.assertEqual(len(exported), 3)
+                self.assertEqual(
+                    sum("teacher_selected_view" in path.name for path in exported),
+                    1,
+                )
+                for path in exported:
+                    with np.load(path) as payload:
+                        self.assertEqual(payload["response"].dtype, np.float32)
+                        self.assertEqual(payload["valid_mask"].dtype, np.float32)
+                        self.assertEqual(str(payload["case_basename"]), "case.nii.gz")
+            finally:
+                adapter.close()
 
     def test_multiscale_soft_target_downsampling_excludes_padding(self):
         pseudo = torch.zeros(1, 1, 4, 4, 4)

@@ -31,6 +31,251 @@ D4_LOCAL_COSINE_EPS = 1e-6
 PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS = 4096
 
 
+class ResponseDiagnosticsAccumulator:
+    """Accumulate valid-voxel response diagnostics across case patches."""
+
+    def __init__(self, num_views: int) -> None:
+        if num_views <= 0:
+            raise ValueError("Response diagnostics require at least one student view")
+        self.num_views = int(num_views)
+        self.teacher = self._empty_moments()
+        self.students = [self._empty_moments() for _ in range(self.num_views)]
+        self.mean_teacher_squared_sum = 0.0
+        self.view_variance_sum = 0.0
+        self.decomposition_valid_count = 0
+
+    @staticmethod
+    def _empty_moments() -> dict[str, float | int | None]:
+        return {
+            "sum": 0.0,
+            "absolute_sum": 0.0,
+            "square_sum": 0.0,
+            "min": None,
+            "max": None,
+            "valid_voxel_count": 0,
+            "teacher_squared_difference_sum": 0.0,
+            "teacher_dot_sum": 0.0,
+            "teacher_square_sum": 0.0,
+        }
+
+    @staticmethod
+    def _valid_values(
+        response: torch.Tensor, valid_mask: torch.Tensor
+    ) -> torch.Tensor:
+        mask = valid_mask.bool()
+        while mask.ndim < response.ndim:
+            mask = mask.unsqueeze(1)
+        mask = mask.expand_as(response)
+        return response.detach().float()[mask]
+
+    @staticmethod
+    def _update_moments(
+        moments: dict[str, float | int | None], values: torch.Tensor
+    ) -> None:
+        count = int(values.numel())
+        if count == 0:
+            return
+        values64 = values.double()
+        moments["sum"] = float(moments["sum"]) + float(values64.sum().cpu())
+        moments["absolute_sum"] = float(moments["absolute_sum"]) + float(
+            values64.abs().sum().cpu()
+        )
+        moments["square_sum"] = float(moments["square_sum"]) + float(
+            values64.square().sum().cpu()
+        )
+        value_min = float(values64.min().cpu())
+        value_max = float(values64.max().cpu())
+        old_min = moments["min"]
+        old_max = moments["max"]
+        moments["min"] = value_min if old_min is None else min(float(old_min), value_min)
+        moments["max"] = value_max if old_max is None else max(float(old_max), value_max)
+        moments["valid_voxel_count"] = int(moments["valid_voxel_count"]) + count
+
+    def update_teacher(
+        self, teacher_response: torch.Tensor, valid_mask: torch.Tensor
+    ) -> None:
+        self._update_moments(
+            self.teacher, self._valid_values(teacher_response, valid_mask)
+        )
+
+    def update_student_batch(
+        self,
+        teacher_response: torch.Tensor,
+        student_response: torch.Tensor,
+        valid_mask: torch.Tensor,
+        start_view: int,
+    ) -> None:
+        for batch_index in range(student_response.shape[0]):
+            view_id = start_view + batch_index
+            if not 0 <= view_id < self.num_views:
+                raise ValueError("Student response view index is outside diagnostics")
+            student_values = self._valid_values(
+                student_response[batch_index : batch_index + 1],
+                valid_mask[batch_index : batch_index + 1],
+            )
+            teacher_values = self._valid_values(
+                teacher_response,
+                valid_mask[batch_index : batch_index + 1],
+            )
+            if student_values.numel() != teacher_values.numel():
+                raise RuntimeError("Teacher/student response diagnostic shapes differ")
+            moments = self.students[view_id]
+            self._update_moments(moments, student_values)
+            if student_values.numel() > 0:
+                student64 = student_values.double()
+                teacher64 = teacher_values.double()
+                moments["teacher_squared_difference_sum"] = float(
+                    moments["teacher_squared_difference_sum"]
+                ) + float((student64 - teacher64).square().sum().cpu())
+                moments["teacher_dot_sum"] = float(
+                    moments["teacher_dot_sum"]
+                ) + float((student64 * teacher64).sum().cpu())
+                moments["teacher_square_sum"] = float(
+                    moments["teacher_square_sum"]
+                ) + float(teacher64.square().sum().cpu())
+
+    def update_decomposition(
+        self,
+        teacher_response: torch.Tensor,
+        student_sum: torch.Tensor,
+        student_square_sum: torch.Tensor,
+        valid_mask: torch.Tensor,
+    ) -> None:
+        mean_response = student_sum.detach().float() / float(self.num_views)
+        view_variance = (
+            student_square_sum.detach().float() / float(self.num_views)
+            - mean_response.square()
+        ).clamp_min(0.0)
+        mean_values = self._valid_values(mean_response, valid_mask)
+        teacher_values = self._valid_values(teacher_response, valid_mask)
+        variance_values = self._valid_values(view_variance, valid_mask)
+        count = int(mean_values.numel())
+        if count == 0:
+            return
+        self.mean_teacher_squared_sum += float(
+            (mean_values.double() - teacher_values.double()).square().sum().cpu()
+        )
+        self.view_variance_sum += float(variance_values.double().sum().cpu())
+        self.decomposition_valid_count += count
+
+    @staticmethod
+    def _finalize_moments(
+        moments: dict[str, float | int | None]
+    ) -> dict[str, float | int | None]:
+        count = int(moments["valid_voxel_count"])
+        if count <= 0:
+            return {
+                "mean": None,
+                "abs_mean": None,
+                "std": None,
+                "rms": None,
+                "min": None,
+                "max": None,
+                "valid_voxel_count": 0,
+            }
+        mean = float(moments["sum"]) / count
+        second_moment = float(moments["square_sum"]) / count
+        return {
+            "mean": mean,
+            "std": float(max(0.0, second_moment - mean * mean) ** 0.5),
+            "rms": float(max(0.0, second_moment) ** 0.5),
+            "min": float(moments["min"]),
+            "max": float(moments["max"]),
+            "valid_voxel_count": count,
+        }
+
+    def finalize(
+        self,
+        selected_view: int,
+        params: list[dict[str, float]],
+        response_loss: float,
+        adaptation_step: int,
+    ) -> dict:
+        if len(params) != self.num_views:
+            raise ValueError("Response diagnostic params do not match view count")
+
+        def finalized_with_abs(
+            moments: dict[str, float | int | None]
+        ) -> dict[str, float | int | None]:
+            result = self._finalize_moments(moments)
+            count = int(result["valid_voxel_count"])
+            result["abs_mean"] = (
+                float(moments.get("absolute_sum", 0.0)) / count
+                if count > 0
+                else None
+            )
+            return result
+
+        teacher = finalized_with_abs(self.teacher)
+        teacher["context_source"] = "long_ctx"
+        student_rows = []
+        weighted_mse_sum = 0.0
+        weighted_mse_count = 0
+        for view_id, (moments, param) in enumerate(zip(self.students, params)):
+            row = finalized_with_abs(moments)
+            count = int(row["valid_voxel_count"])
+            mse = (
+                float(moments["teacher_squared_difference_sum"]) / count
+                if count > 0
+                else None
+            )
+            teacher_norm_square = float(moments["teacher_square_sum"])
+            student_norm_square = float(moments["square_sum"])
+            norm_product = (teacher_norm_square * student_norm_square) ** 0.5
+            cosine = (
+                float(moments["teacher_dot_sum"]) / norm_product
+                if norm_product > 0.0
+                else None
+            )
+            if cosine is not None:
+                cosine = max(-1.0, min(1.0, cosine))
+            if mse is not None:
+                weighted_mse_sum += mse * count
+                weighted_mse_count += count
+            row.update(
+                {
+                    "view_id": view_id,
+                    "augmentation": dict(param),
+                    "context_source": "short_ctx",
+                    "mse_to_teacher": mse,
+                    "cosine_similarity_to_teacher": cosine,
+                }
+            )
+            student_rows.append(row)
+        if self.decomposition_valid_count <= 0 or weighted_mse_count <= 0:
+            raise RuntimeError("Response diagnostics found no valid voxels")
+        mean_teacher_mse = (
+            self.mean_teacher_squared_sum / self.decomposition_valid_count
+        )
+        view_variance = self.view_variance_sum / self.decomposition_valid_count
+        decomposition_sum = mean_teacher_mse + view_variance
+        weighted_view_mse = weighted_mse_sum / weighted_mse_count
+        tolerance = max(1e-5, abs(float(response_loss)) * 1e-5)
+        decomposition_error = abs(decomposition_sum - float(response_loss))
+        view_mse_error = abs(weighted_view_mse - float(response_loss))
+        if decomposition_error > tolerance or view_mse_error > tolerance:
+            raise RuntimeError(
+                "Response diagnostic MSE decomposition does not match response_loss: "
+                f"loss={response_loss}, decomposition={decomposition_sum}, "
+                f"weighted_view_mse={weighted_view_mse}, tolerance={tolerance}"
+            )
+        return {
+            "adaptation_step": int(adaptation_step),
+            "selected_view": int(selected_view),
+            "teacher": teacher,
+            "student_views": student_rows,
+            "student_mean_response_mse_to_teacher": mean_teacher_mse,
+            "student_view_response_variance": view_variance,
+            "mse_decomposition_sum": decomposition_sum,
+            "response_loss": float(response_loss),
+            "mse_decomposition_absolute_error": decomposition_error,
+            "valid_voxel_weighted_view_mse": weighted_view_mse,
+            "view_mse_response_loss_absolute_error": view_mse_error,
+            "consistency_tolerance": tolerance,
+            "consistency_checks_passed": True,
+        }
+
+
 class LoRAPackedQKVMultiheadAttention(nn.Module):
     """Q/K/V LoRA for a packed ``nn.MultiheadAttention.in_proj_weight``."""
 
@@ -1400,11 +1645,31 @@ class VoxTellCMTTA:
         self.response_weight = float(getattr(args, "response_weight", 0.0))
         self.response_eps = float(getattr(args, "response_eps", 0.01))
         self.response_seed = int(getattr(args, "response_seed", 1377))
+        self.response_diagnostics = bool(
+            getattr(args, "response_diagnostics", False)
+        )
+        response_export_dir = getattr(args, "response_export_dir", None)
+        self.response_export_dir = (
+            None if response_export_dir is None else Path(response_export_dir)
+        )
+        response_export_cases = getattr(args, "response_export_cases", None)
+        self.response_export_cases = (
+            None
+            if response_export_cases is None
+            else {str(name) for name in response_export_cases}
+        )
         if self.response_weight < 0.0:
             raise ValueError("response_weight must be non-negative")
         if self.response_eps <= 0.0:
             raise ValueError("response_eps must be positive")
         self.use_text_local_response_distill = self.response_weight > 0.0
+        if (
+            self.response_diagnostics or self.response_export_dir is not None
+        ) and not self.use_text_local_response_distill:
+            raise ValueError(
+                "Response diagnostics/export require response_weight > 0 so they can "
+                "reuse the existing response-loss forward pass"
+            )
         self.tdc_softmax_temperature = float(
             getattr(args, "tdc_softmax_temperature", 0.02)
         )
@@ -2224,6 +2489,64 @@ class VoxTellCMTTA:
             - self._response_foreground_logit(minus_logits).float()
         ) / (2.0 * self.response_eps)
 
+    def _response_export_enabled_for_case(
+        self, case_basename: Optional[str]
+    ) -> bool:
+        if self.response_export_dir is None:
+            return False
+        if case_basename is None:
+            raise ValueError(
+                "Response export requires adapt_case(case_basename=...)"
+            )
+        return (
+            self.response_export_cases is None
+            or case_basename in self.response_export_cases
+        )
+
+    def _export_response_patch(
+        self,
+        response: torch.Tensor,
+        valid_mask: torch.Tensor,
+        case_basename: str,
+        adaptation_step: int,
+        patch_index: int,
+        role: str,
+        view_id: Optional[int],
+    ) -> None:
+        """Immediately save one existing response tensor; never retain case maps."""
+        if self.response_export_dir is None:
+            return
+        safe_basename = Path(case_basename).name
+        if safe_basename != case_basename:
+            raise ValueError("Response export case_basename must be a basename")
+        case_dir = self.response_export_dir / safe_basename / (
+            f"step_{int(adaptation_step):03d}"
+        )
+        case_dir.mkdir(parents=True, exist_ok=True)
+        view_suffix = (
+            f"teacher_selected_view_{int(view_id):02d}"
+            if role == "teacher"
+            else f"student_view_{int(view_id):02d}"
+        )
+        destination = case_dir / f"patch_{int(patch_index):04d}_{view_suffix}.npz"
+        if destination.exists():
+            raise FileExistsError(
+                f"Refusing to overwrite response export: {destination}"
+            )
+        response_array = response.detach().float().cpu().numpy()
+        mask_array = valid_mask.detach().float().cpu().numpy()
+        np.savez_compressed(
+            destination,
+            response=response_array,
+            valid_mask=mask_array,
+            case_basename=np.asarray(case_basename),
+            adaptation_step=np.asarray(int(adaptation_step), dtype=np.int64),
+            patch_index=np.asarray(int(patch_index), dtype=np.int64),
+            role=np.asarray(role),
+            view_id=np.asarray(-1 if view_id is None else int(view_id), dtype=np.int64),
+        )
+        del response_array, mask_array
+
     def _forward_decoder_outputs(
         self, images: torch.Tensor, ctx: torch.Tensor
     ) -> list[torch.Tensor]:
@@ -2790,6 +3113,8 @@ class VoxTellCMTTA:
         long_ctx: torch.Tensor,
         autocast_enabled: bool,
         teacher_pseudo_labels: Optional[list[torch.Tensor]] = None,
+        case_basename: Optional[str] = None,
+        adaptation_step: int = 1,
     ) -> dict[str, torch.Tensor]:
         """Collect global Dice/entropy statistics without retaining graphs."""
         total_views = len(params)
@@ -2816,6 +3141,14 @@ class VoxTellCMTTA:
         response_teacher_caches: list[dict[str, torch.Tensor]] = []
         response_squared_sum = None
         response_valid_count = 0
+        response_diagnostic_accumulator = (
+            ResponseDiagnosticsAccumulator(total_views)
+            if self.response_diagnostics
+            else None
+        )
+        response_export_enabled = self._response_export_enabled_for_case(
+            case_basename
+        )
         if teacher_pseudo_labels is not None and len(teacher_pseudo_labels) != len(patches):
             raise ValueError(
                 "teacher_pseudo_labels must contain one soft label per case patch"
@@ -2856,6 +3189,26 @@ class VoxTellCMTTA:
                             "teacher_response": teacher_response.detach().cpu(),
                         }
                     )
+                    if response_diagnostic_accumulator is not None:
+                        response_diagnostic_accumulator.update_teacher(
+                            teacher_response, input_mask
+                        )
+                        patch_student_response_sum = torch.zeros_like(
+                            teacher_response, dtype=torch.float32
+                        )
+                        patch_student_response_square_sum = torch.zeros_like(
+                            teacher_response, dtype=torch.float32
+                        )
+                    if response_export_enabled:
+                        self._export_response_patch(
+                            teacher_response,
+                            input_mask,
+                            str(case_basename),
+                            adaptation_step,
+                            patch_index,
+                            "teacher",
+                            selected_view,
+                        )
                 if self.use_d4_local_distill:
                     d4_target, d4_valid = downsample_soft_label_and_valid_mask(
                         pseudo_label,
@@ -3051,12 +3404,55 @@ class VoxTellCMTTA:
                             )
                         response_squared_sum.add_(patch_response_squared_sum)
                         response_valid_count += patch_response_valid_count
+                        if response_diagnostic_accumulator is not None:
+                            response_diagnostic_accumulator.update_student_batch(
+                                teacher_response,
+                                student_response,
+                                input_mask_batch,
+                                start,
+                            )
+                            patch_student_response_sum.add_(
+                                student_response.detach().float().sum(
+                                    dim=0, keepdim=True
+                                )
+                            )
+                            patch_student_response_square_sum.add_(
+                                student_response.detach().float().square().sum(
+                                    dim=0, keepdim=True
+                                )
+                            )
+                        if response_export_enabled:
+                            for batch_index in range(end - start):
+                                self._export_response_patch(
+                                    student_response[
+                                        batch_index : batch_index + 1
+                                    ],
+                                    input_mask_batch[
+                                        batch_index : batch_index + 1
+                                    ],
+                                    str(case_basename),
+                                    adaptation_step,
+                                    patch_index,
+                                    "student",
+                                    start + batch_index,
+                                )
                     if start <= selected_view < end:
                         if entropy_sum is None:
                             entropy_sum = torch.zeros_like(local_entropy[0])
                             entropy_mass = torch.zeros_like(local_mass[0])
                         entropy_sum.add_(local_entropy[0])
                         entropy_mass.add_(local_mass[0])
+                if response_diagnostic_accumulator is not None:
+                    response_diagnostic_accumulator.update_decomposition(
+                        teacher_response,
+                        patch_student_response_sum,
+                        patch_student_response_square_sum,
+                        input_mask,
+                    )
+                    del (
+                        patch_student_response_sum,
+                        patch_student_response_square_sum,
+                    )
         if dice_stats is None or entropy_sum is None or entropy_mass is None:
             raise RuntimeError("Case supervision accumulation produced no statistics")
         if self.use_d4_local_distill and len(local_teacher_caches) != len(patches):
@@ -3128,6 +3524,8 @@ class VoxTellCMTTA:
             "response_cache_teacher_ctx": long_ctx.detach().cpu().clone(),
             "response_cache_eps": self.response_eps,
             "response_cache_seed": self.response_seed,
+            "response_diagnostic_accumulator": response_diagnostic_accumulator,
+            "response_diagnostic_adaptation_step": int(adaptation_step),
             "entropy_sum": entropy_sum,
             "entropy_mass": entropy_mass,
             "d4_local_loss_sum": local_loss_sum,
@@ -4258,6 +4656,8 @@ class VoxTellCMTTA:
         ctx_delta_before: Optional[torch.Tensor] = None,
         pseudo_view_weights: Optional[torch.Tensor] = None,
         teacher_pseudo_labels: Optional[list[torch.Tensor]] = None,
+        case_basename: Optional[str] = None,
+        adaptation_step: int = 1,
     ) -> tuple[float, float]:
         """Backpropagate case-level Dice and entropy with one patch graph."""
         if self.pseudo_update_mode == "decoder_masked":
@@ -4296,6 +4696,8 @@ class VoxTellCMTTA:
             long_ctx,
             autocast_enabled,
             teacher_pseudo_labels,
+            case_basename,
+            adaptation_step,
         )
         global_dice_inputs = tuple(
             stats[key].detach().requires_grad_(True)
@@ -4355,6 +4757,21 @@ class VoxTellCMTTA:
         else:
             global_response_loss = global_dice.new_zeros(())
         weighted_response_loss = self.response_weight * global_response_loss
+        response_diagnostics = None
+        if self.response_diagnostics:
+            response_accumulator = stats["response_diagnostic_accumulator"]
+            if not isinstance(
+                response_accumulator, ResponseDiagnosticsAccumulator
+            ):
+                raise RuntimeError("Response diagnostic accumulator is missing")
+            response_diagnostics = response_accumulator.finalize(
+                selected_view=selected_view,
+                params=params,
+                response_loss=float(global_response_loss.detach().cpu()),
+                adaptation_step=int(
+                    stats["response_diagnostic_adaptation_step"]
+                ),
+            )
         local_gradient = (
             torch.zeros_like(self.ctx_delta, dtype=torch.float32)
             if self.d4_local_diagnostics
@@ -4549,6 +4966,10 @@ class VoxTellCMTTA:
             ),
         }
         self._last_pseudo_diagnostics.update(stats["pseudo_spatial_diagnostics"])
+        if response_diagnostics is not None:
+            self._last_pseudo_diagnostics["response_diagnostics"] = (
+                response_diagnostics
+            )
         if self.d4_local_diagnostics:
             self._last_pseudo_diagnostics.update(
                 stats["d4_local_relation_diagnostics"]
@@ -4953,6 +5374,8 @@ class VoxTellCMTTA:
         valid_masks: Optional[list[torch.Tensor]] = None,
         prepared_case: Optional[dict] = None,
         teacher_pseudo_provider=None,
+        case_basename: Optional[str] = None,
+        adaptation_step: int = 1,
     ) -> dict:
         """Adapt once on one complete case, aggregating all patch gradients."""
         if prepared_case is None:
@@ -5067,6 +5490,8 @@ class VoxTellCMTTA:
             ctx_delta_before,
             pseudo_loss_weights,
             teacher_pseudo_labels,
+            case_basename,
+            adaptation_step,
         )
         sums["soft_dice"] = pseudo_loss
         if self.pseudo_update_mode == "decoder_masked":
@@ -5245,6 +5670,43 @@ class VoxTellCMTTA:
             "selected_cac": selected_cac,
             **sums,
         }
+        if self.response_diagnostics:
+            diagnostics = self.last_trace.get("response_diagnostics")
+            if not isinstance(diagnostics, dict):
+                raise RuntimeError("Enabled response diagnostics were not recorded")
+            teacher = diagnostics["teacher"]
+            print(
+                "[VoxTell-CM-TTA] response teacher: "
+                f"step={diagnostics['adaptation_step']} "
+                f"selected_view={diagnostics['selected_view']} "
+                f"mean={teacher['mean']:.6g} abs_mean={teacher['abs_mean']:.6g} "
+                f"std={teacher['std']:.6g} rms={teacher['rms']:.6g} "
+                f"min={teacher['min']:.6g} max={teacher['max']:.6g} "
+                f"valid={teacher['valid_voxel_count']}"
+            )
+            for view in diagnostics["student_views"]:
+                cosine = view["cosine_similarity_to_teacher"]
+                cosine_text = "null" if cosine is None else f"{cosine:.6g}"
+                augmentation = view["augmentation"]
+                print(
+                    "[VoxTell-CM-TTA] response student: "
+                    f"step={diagnostics['adaptation_step']} view={view['view_id']} "
+                    f"scale={augmentation['scale']:.6g} "
+                    f"offset={augmentation['offset']:.6g} "
+                    f"mean={view['mean']:.6g} abs_mean={view['abs_mean']:.6g} "
+                    f"std={view['std']:.6g} rms={view['rms']:.6g} "
+                    f"min={view['min']:.6g} max={view['max']:.6g} "
+                    f"valid={view['valid_voxel_count']} "
+                    f"mse={view['mse_to_teacher']:.6g} cosine={cosine_text}"
+                )
+            print(
+                "[VoxTell-CM-TTA] response decomposition: "
+                f"mean_mse={diagnostics['student_mean_response_mse_to_teacher']:.6g} "
+                f"view_variance={diagnostics['student_view_response_variance']:.6g} "
+                f"sum={diagnostics['mse_decomposition_sum']:.6g} "
+                f"weighted_view_mse={diagnostics['valid_voxel_weighted_view_mse']:.6g} "
+                f"response_loss={diagnostics['response_loss']:.6g}"
+            )
         if self.d4_local_diagnostics:
             def diagnostic_value(name: str) -> str:
                 value = self.last_trace.get(name)

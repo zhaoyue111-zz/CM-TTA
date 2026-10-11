@@ -1228,6 +1228,32 @@ def parse_args() -> argparse.Namespace:
         default=1377,
         help="Fixed seed used to construct the detached text perturbation direction.",
     )
+    parser.add_argument(
+        "--response_diagnostics",
+        action="store_true",
+        help=(
+            "Record valid-voxel teacher/student response moments, per-view "
+            "agreement, and the response-MSE variance decomposition."
+        ),
+    )
+    parser.add_argument(
+        "--response_export_dir",
+        default=None,
+        help=(
+            "Optional directory for immediate per-patch float32 compressed NPZ "
+            "response exports."
+        ),
+    )
+    parser.add_argument(
+        "--response_export_case",
+        dest="response_export_cases",
+        action="append",
+        default=None,
+        help=(
+            "Restrict response NPZ export to this exact case basename; repeat "
+            "the option for multiple cases. Without it, all cases are exported."
+        ),
+    )
     parser.add_argument("--bg_threshold", type=float, default=0.1)
     parser.add_argument("--tversky_alpha", type=float, default=0.3)
     parser.add_argument("--tversky_beta", type=float, default=0.7)
@@ -1526,6 +1552,8 @@ def main() -> None:
                 valid_masks,
                 prepared_case=prepared_case,
                 teacher_pseudo_provider=teacher_pseudo_provider,
+                case_basename=image_path.name,
+                adaptation_step=1,
             )
             if (
                 expected_view_params is not None
