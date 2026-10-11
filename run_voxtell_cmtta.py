@@ -1229,6 +1229,21 @@ def parse_args() -> argparse.Namespace:
         help="Fixed seed used to construct the detached text perturbation direction.",
     )
     parser.add_argument(
+        "--response_normalization",
+        choices=("none", "teacher_energy"),
+        default="none",
+        help=(
+            "Optional case-level response-MSE normalization by detached teacher "
+            "response energy."
+        ),
+    )
+    parser.add_argument(
+        "--response_energy_floor",
+        type=float,
+        default=1e-6,
+        help="Finite positive floor for teacher-energy response normalization.",
+    )
+    parser.add_argument(
         "--response_diagnostics",
         action="store_true",
         help=(

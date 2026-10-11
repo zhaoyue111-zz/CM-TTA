@@ -1686,6 +1686,12 @@ class VoxTellCMTTA:
         self.response_weight = float(getattr(args, "response_weight", 0.0))
         self.response_eps = float(getattr(args, "response_eps", 0.01))
         self.response_seed = int(getattr(args, "response_seed", 1377))
+        self.response_normalization = str(
+            getattr(args, "response_normalization", "none")
+        )
+        self.response_energy_floor = float(
+            getattr(args, "response_energy_floor", 1e-6)
+        )
         self.response_diagnostics = bool(
             getattr(args, "response_diagnostics", False)
         )
@@ -1703,6 +1709,15 @@ class VoxTellCMTTA:
             raise ValueError("response_weight must be non-negative")
         if self.response_eps <= 0.0:
             raise ValueError("response_eps must be positive")
+        if self.response_normalization not in ("none", "teacher_energy"):
+            raise ValueError(
+                "response_normalization must be 'none' or 'teacher_energy'"
+            )
+        if (
+            not np.isfinite(self.response_energy_floor)
+            or self.response_energy_floor <= 0.0
+        ):
+            raise ValueError("response_energy_floor must be finite and positive")
         self.use_text_local_response_distill = self.response_weight > 0.0
         if (
             self.response_diagnostics or self.response_export_dir is not None
@@ -3182,6 +3197,8 @@ class VoxTellCMTTA:
         response_teacher_caches: list[dict[str, torch.Tensor]] = []
         response_squared_sum = None
         response_valid_count = 0
+        response_teacher_squared_sum = None
+        response_teacher_valid_count = 0
         response_diagnostic_accumulator = (
             ResponseDiagnosticsAccumulator(total_views)
             if self.response_diagnostics
@@ -3224,6 +3241,18 @@ class VoxTellCMTTA:
                             self.device, non_blocking=True
                         ).detach()
                 if self.use_text_local_response_distill:
+                    teacher_response_mask = input_mask.unsqueeze(1).float()
+                    patch_teacher_squared_sum = (
+                        teacher_response.float().square() * teacher_response_mask
+                    ).sum()
+                    if response_teacher_squared_sum is None:
+                        response_teacher_squared_sum = torch.zeros_like(
+                            patch_teacher_squared_sum
+                        )
+                    response_teacher_squared_sum.add_(patch_teacher_squared_sum)
+                    response_teacher_valid_count += int(
+                        teacher_response_mask.sum().item()
+                    )
                     response_teacher_caches.append(
                         {
                             "teacher_probability": pseudo_label.detach().cpu(),
@@ -3491,6 +3520,8 @@ class VoxTellCMTTA:
             local_loss_sum = entropy_sum.new_zeros(())
         if response_squared_sum is None:
             response_squared_sum = entropy_sum.new_zeros(())
+        if response_teacher_squared_sum is None:
+            response_teacher_squared_sum = entropy_sum.new_zeros(())
         if (
             self.use_text_local_response_distill
             and len(response_teacher_caches) != len(patches)
@@ -3550,6 +3581,8 @@ class VoxTellCMTTA:
             "response_teacher_caches": response_teacher_caches,
             "response_squared_sum": response_squared_sum,
             "response_valid_count": response_valid_count,
+            "response_teacher_squared_sum": response_teacher_squared_sum,
+            "response_teacher_valid_count": response_teacher_valid_count,
             "response_cache_selected_view": selected_view,
             "response_cache_teacher_ctx": long_ctx.detach().cpu().clone(),
             "response_cache_eps": self.response_eps,
@@ -4765,9 +4798,14 @@ class VoxTellCMTTA:
             global_local_loss = global_dice.new_zeros(())
         weighted_local_loss = self.w_d4_local * global_local_loss
         response_valid_count = int(stats["response_valid_count"])
+        response_teacher_valid_count = int(
+            stats["response_teacher_valid_count"]
+        )
         if self.use_text_local_response_distill:
             if response_valid_count <= 0:
                 raise RuntimeError("Text response loss found no valid voxels")
+            if response_teacher_valid_count <= 0:
+                raise RuntimeError("Text response teacher energy found no valid voxels")
             if (
                 int(stats["response_cache_selected_view"]) != selected_view
                 or float(stats["response_cache_eps"]) != self.response_eps
@@ -4781,12 +4819,35 @@ class VoxTellCMTTA:
                     "Text response teacher cache is stale for the current teacher, "
                     "selected view, or perturbation configuration"
                 )
-            global_response_loss = (
+            global_response_raw_loss = (
                 stats["response_squared_sum"] / float(response_valid_count)
             )
+            response_teacher_energy = (
+                stats["response_teacher_squared_sum"]
+                / float(response_teacher_valid_count)
+            ).detach()
+            if self.response_normalization == "teacher_energy":
+                response_energy_denominator = response_teacher_energy.clamp_min(
+                    self.response_energy_floor
+                ).detach()
+            else:
+                response_energy_denominator = (
+                    global_response_raw_loss.new_ones(()).detach()
+                )
+            global_response_normalized_loss = (
+                global_response_raw_loss / response_energy_denominator
+            )
         else:
-            global_response_loss = global_dice.new_zeros(())
-        weighted_response_loss = self.response_weight * global_response_loss
+            global_response_raw_loss = global_dice.new_zeros(())
+            response_teacher_energy = global_dice.new_zeros(()).detach()
+            response_energy_denominator = global_dice.new_ones(()).detach()
+            global_response_normalized_loss = global_dice.new_zeros(())
+        weighted_response_loss = (
+            self.response_weight * global_response_normalized_loss
+        )
+        response_backward_denominator = float(
+            response_energy_denominator.detach().cpu()
+        )
         response_diagnostics = None
         if self.response_diagnostics:
             response_accumulator = stats["response_diagnostic_accumulator"]
@@ -4797,7 +4858,7 @@ class VoxTellCMTTA:
             response_diagnostics = response_accumulator.finalize(
                 selected_view=selected_view,
                 params=params,
-                response_loss=float(global_response_loss.detach().cpu()),
+                response_loss=float(global_response_raw_loss.detach().cpu()),
                 adaptation_step=int(
                     stats["response_diagnostic_adaptation_step"]
                 ),
@@ -4912,7 +4973,11 @@ class VoxTellCMTTA:
                         local_tensors.append(patch_response_squared_sum)
                         local_gradients.append(
                             patch_response_squared_sum.new_tensor(
-                                self.response_weight / float(response_valid_count)
+                                self.response_weight
+                                / (
+                                    float(response_valid_count)
+                                    * response_backward_denominator
+                                )
                             )
                         )
                     if self.use_d4_local_distill and local_element_count > 0:
@@ -4971,6 +5036,8 @@ class VoxTellCMTTA:
             "response_weight": self.response_weight,
             "response_eps": self.response_eps,
             "response_seed": self.response_seed,
+            "response_normalization": self.response_normalization,
+            "response_energy_floor": self.response_energy_floor,
             "pseudo_unweighted_soft_dice": float(
                 unweighted_global_dice.detach().cpu()
             ),
@@ -4981,9 +5048,20 @@ class VoxTellCMTTA:
             "pre_update_weighted_segmentation_loss": float(
                 global_dice.detach().cpu()
             ),
-            "response_loss": float(global_response_loss.detach().cpu()),
+            "response_loss": float(global_response_raw_loss.detach().cpu()),
+            "response_raw_loss": float(global_response_raw_loss.detach().cpu()),
+            "response_teacher_energy": float(
+                response_teacher_energy.detach().cpu()
+            ),
+            "response_energy_denominator": float(
+                response_energy_denominator.detach().cpu()
+            ),
+            "response_normalized_loss": float(
+                global_response_normalized_loss.detach().cpu()
+            ),
             "weighted_response_loss": float(weighted_response_loss.detach().cpu()),
             "response_valid_voxel_views": response_valid_count,
+            "response_teacher_valid_voxels": response_teacher_valid_count,
             "d4_local_loss_type": self.d4_local_loss_type,
             "d4_local_loss": float(global_local_loss.detach().cpu()),
             "d4_local_weighted_loss": float(weighted_local_loss.detach().cpu()),
@@ -5499,6 +5577,8 @@ class VoxTellCMTTA:
             "response_weight": self.response_weight,
             "response_eps": self.response_eps,
             "response_seed": self.response_seed,
+            "response_normalization": self.response_normalization,
+            "response_energy_floor": self.response_energy_floor,
             "use_lora": self.use_lora,
             "lora_rank": self.lora_rank if self.use_lora else None,
             "lora_alpha": self.lora_alpha if self.use_lora else None,
@@ -5700,6 +5780,17 @@ class VoxTellCMTTA:
             "selected_cac": selected_cac,
             **sums,
         }
+        if self.use_text_local_response_distill:
+            print(
+                "[VoxTell-CM-TTA] response loss: "
+                f"normalization={self.last_trace['response_normalization']} "
+                f"raw={self.last_trace['response_raw_loss']:.6g} "
+                f"teacher_energy={self.last_trace['response_teacher_energy']:.6g} "
+                "denominator="
+                f"{self.last_trace['response_energy_denominator']:.6g} "
+                f"normalized={self.last_trace['response_normalized_loss']:.6g} "
+                f"weighted={self.last_trace['weighted_response_loss']:.6g}"
+            )
         if self.response_diagnostics:
             diagnostics = self.last_trace.get("response_diagnostics")
             if not isinstance(diagnostics, dict):
@@ -5735,7 +5826,7 @@ class VoxTellCMTTA:
                 f"view_variance={diagnostics['student_view_response_variance']:.6g} "
                 f"sum={diagnostics['mse_decomposition_sum']:.6g} "
                 f"weighted_view_mse={diagnostics['valid_voxel_weighted_view_mse']:.6g} "
-                f"response_loss={diagnostics['response_loss']:.6g}"
+                f"raw_response_loss={diagnostics['response_loss']:.6g}"
             )
         if self.d4_local_diagnostics:
             def diagnostic_value(name: str) -> str:
@@ -5798,6 +5889,8 @@ class VoxTellCMTTA:
             "response_weight": self.response_weight,
             "response_eps": self.response_eps,
             "response_seed": self.response_seed,
+            "response_normalization": self.response_normalization,
+            "response_energy_floor": self.response_energy_floor,
             "response_direction": (
                 None
                 if self._response_direction is None
@@ -5878,11 +5971,15 @@ class VoxTellCMTTA:
             float(state.get("response_weight", 0.0)),
             float(state.get("response_eps", 0.01)),
             int(state.get("response_seed", 1377)),
+            str(state.get("response_normalization", "none")),
+            float(state.get("response_energy_floor", 1e-6)),
         )
         current_response_configuration = (
             self.response_weight,
             self.response_eps,
             self.response_seed,
+            self.response_normalization,
+            self.response_energy_floor,
         )
         if checkpoint_response_configuration != current_response_configuration:
             raise ValueError(

@@ -1901,6 +1901,18 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             adapter.close()
 
+    def test_response_energy_floor_must_be_finite_and_positive(self):
+        for invalid in (0.0, -1.0, float("nan"), float("inf")):
+            with self.assertRaisesRegex(
+                ValueError, "response_energy_floor must be finite and positive"
+            ):
+                VoxTellCMTTA(
+                    TinyResponseVoxTell(),
+                    torch.tensor([[[1.0, 2.0]]]),
+                    "cpu",
+                    make_args(response_energy_floor=invalid),
+                )
+
     def test_text_response_adapt_trace_matches_backpropagated_total(self):
         adapter = VoxTellCMTTA(
             TinyResponseVoxTell(),
@@ -1955,6 +1967,16 @@ class VoxTellCMTTATest(unittest.TestCase):
             )
             self.assertEqual(trace["response_eps"], 0.01)
             self.assertEqual(trace["response_weight"], 0.01)
+            self.assertEqual(trace["response_normalization"], "none")
+            self.assertEqual(trace["response_energy_denominator"], 1.0)
+            self.assertEqual(
+                trace["response_raw_loss"], trace["response_normalized_loss"]
+            )
+            self.assertAlmostEqual(
+                trace["weighted_response_loss"],
+                0.01 * trace["response_raw_loss"],
+                places=6,
+            )
             self.assertIn("response_diagnostics", trace)
             self.assertTrue(
                 trace["response_diagnostics"]["consistency_checks_passed"]
@@ -2132,6 +2154,8 @@ class VoxTellCMTTATest(unittest.TestCase):
                     view_selection_metric="tdc",
                     pseudo_update_mode="original",
                     response_weight=0.01,
+                    response_normalization="teacher_energy",
+                    response_energy_floor=1e-6,
                     response_eps=0.01,
                     response_seed=31,
                     response_diagnostics=enabled,
@@ -2229,6 +2253,273 @@ class VoxTellCMTTATest(unittest.TestCase):
                         self.assertEqual(payload["valid_mask"].dtype, np.float32)
                         self.assertEqual(str(payload["case_basename"]), "case.nii.gz")
             finally:
+                adapter.close()
+
+    def test_response_teacher_energy_uses_case_valid_voxels_once(self):
+        adapter = VoxTellCMTTA(
+            TinyResponseVoxTell(),
+            torch.tensor([[[1.0, 2.0]]]),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                response_weight=0.01,
+                response_normalization="teacher_energy",
+                response_energy_floor=1e-6,
+                num_aug_views=1,
+                view_batch_size=1,
+                w_entropy=0.0,
+            ),
+        )
+        patches = [
+            torch.tensor([[[[1.0, 50.0, 50.0]]]]),
+            torch.tensor([[[[2.0, 3.0, 50.0]]]]),
+        ]
+        masks = [
+            torch.tensor([[[1.0, 0.0, 0.0]]]),
+            torch.tensor([[[1.0, 1.0, 0.0]]]),
+        ]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.8, "offset": 0.1},
+        ]
+        short_ctx = torch.tensor([[1.2, 1.8]])
+        long_ctx = torch.tensor([[0.8, 2.2]])
+        try:
+            stats = adapter._forward_case_supervision_stats(
+                patches,
+                masks,
+                params,
+                1,
+                short_ctx,
+                1.0,
+                long_ctx,
+                False,
+            )
+            expected_square_sum = 0.0
+            expected_count = 0
+            for cache, valid_mask in zip(stats["response_teacher_caches"], masks):
+                teacher = cache["teacher_response"].double()
+                mask = valid_mask.unsqueeze(0).unsqueeze(1).double()
+                expected_square_sum += float((teacher.square() * mask).sum())
+                expected_count += int(mask.sum())
+            self.assertEqual(stats["response_teacher_valid_count"], 3)
+            self.assertEqual(expected_count, 3)
+            self.assertAlmostEqual(
+                float(stats["response_teacher_squared_sum"]),
+                expected_square_sum,
+                places=4,
+            )
+
+            adapter.optimizer.zero_grad(set_to_none=True)
+            adapter._backward_case_supervision(
+                patches,
+                masks,
+                params,
+                1,
+                short_ctx,
+                1.0,
+                long_ctx,
+                False,
+            )
+            trace = adapter._last_pseudo_diagnostics
+            expected_energy = expected_square_sum / expected_count
+            self.assertAlmostEqual(
+                trace["response_teacher_energy"], expected_energy, places=4
+            )
+            self.assertAlmostEqual(
+                trace["response_energy_denominator"],
+                max(expected_energy, 1e-6),
+                places=4,
+            )
+            self.assertAlmostEqual(
+                trace["response_normalized_loss"],
+                trace["response_raw_loss"]
+                / trace["response_energy_denominator"],
+                places=6,
+            )
+            self.assertEqual(trace["response_loss"], trace["response_raw_loss"])
+        finally:
+            adapter.close()
+
+    def test_response_energy_floor_keeps_zero_energy_case_finite(self):
+        adapter = VoxTellCMTTA(
+            TinyResponseVoxTell(),
+            torch.tensor([[[1.0, 2.0]]]),
+            "cpu",
+            make_args(
+                view_selection_metric="tdc",
+                pseudo_update_mode="original",
+                response_weight=0.01,
+                response_normalization="teacher_energy",
+                response_energy_floor=2e-4,
+                num_aug_views=1,
+                view_batch_size=1,
+                w_entropy=0.0,
+            ),
+        )
+        try:
+            adapter.optimizer.zero_grad(set_to_none=True)
+            adapter._backward_case_supervision(
+                [torch.zeros(1, 1, 1, 2)],
+                [torch.ones(1, 1, 2)],
+                [
+                    {"scale": 1.0, "offset": 0.0},
+                    {"scale": 0.9, "offset": 0.0},
+                ],
+                0,
+                torch.tensor([[1.2, 1.8]]),
+                1.0,
+                torch.tensor([[0.8, 2.2]]),
+                False,
+            )
+            trace = adapter._last_pseudo_diagnostics
+            self.assertEqual(trace["response_teacher_energy"], 0.0)
+            self.assertAlmostEqual(trace["response_energy_denominator"], 2e-4)
+            self.assertTrue(np.isfinite(trace["response_normalized_loss"]))
+            self.assertTrue(np.isfinite(trace["weighted_response_loss"]))
+        finally:
+            adapter.close()
+
+    def test_response_normalized_patch_replay_matches_direct_gradient(self):
+        torch.manual_seed(313)
+        base_model = TinyResponseVoxTell()
+        adapters = [
+            VoxTellCMTTA(
+                copy.deepcopy(base_model),
+                torch.tensor([[[1.0, 2.0]]]),
+                "cpu",
+                make_args(
+                    view_selection_metric="tdc",
+                    pseudo_update_mode="original",
+                    response_weight=0.03,
+                    response_normalization="teacher_energy",
+                    response_energy_floor=1e-6,
+                    response_seed=41,
+                    num_aug_views=1,
+                    view_batch_size=1,
+                    w_entropy=0.0,
+                ),
+            )
+            for _ in range(2)
+        ]
+        replay, direct = adapters
+        patches = [
+            torch.tensor([[[[1.0, 2.0, 30.0]]]]),
+            torch.tensor([[[[0.5, 1.5, 2.5]]]]),
+        ]
+        masks = [
+            torch.tensor([[[1.0, 1.0, 0.0]]]),
+            torch.tensor([[[1.0, 1.0, 1.0]]]),
+        ]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.75, "offset": 0.2},
+        ]
+        short_ctx = torch.tensor([[1.2, 1.8]])
+        long_ctx = torch.tensor([[0.8, 2.2]])
+
+        def zero_gradient_dice(probabilities, _pseudo, _mask):
+            zero = probabilities.flatten(1).sum(dim=1) * 0.0
+            return {
+                "intersection": zero,
+                "prediction_mass": zero,
+                "pseudo_mass": zero,
+            }
+
+        try:
+            replay.optimizer.zero_grad(set_to_none=True)
+            with patch(
+                "method.voxtell_cmtta.masked_dice_components",
+                side_effect=zero_gradient_dice,
+            ):
+                replay._backward_case_supervision(
+                    patches,
+                    masks,
+                    params,
+                    1,
+                    short_ctx,
+                    1.0,
+                    long_ctx,
+                    False,
+                )
+            replay_gradient = replay.ctx.grad.detach().clone()
+            replay_trace = replay._last_pseudo_diagnostics
+
+            response_squared_sum = None
+            response_valid_count = 0
+            teacher_squared_sum = None
+            teacher_valid_count = 0
+            for patch_tensor, valid_mask in zip(patches, masks):
+                teacher_view = direct._make_view_batch(
+                    patch_tensor, params, valid_mask, 1, 2
+                )
+                with torch.no_grad():
+                    _, teacher_plus, teacher_minus = (
+                        direct._forward_text_response_triplet(
+                            teacher_view, long_ctx
+                        )
+                    )
+                    teacher_response = direct._text_response(
+                        teacher_plus, teacher_minus
+                    ).detach()
+                teacher_mask = valid_mask.unsqueeze(0).unsqueeze(1).float()
+                patch_teacher_sum = (
+                    teacher_response.square() * teacher_mask
+                ).sum()
+                teacher_squared_sum = (
+                    patch_teacher_sum
+                    if teacher_squared_sum is None
+                    else teacher_squared_sum + patch_teacher_sum
+                )
+                teacher_valid_count += int(teacher_mask.sum())
+                for view_id in range(len(params)):
+                    student_view = direct._make_view_batch(
+                        patch_tensor, params, valid_mask, view_id, view_id + 1
+                    )
+                    student_ctx = short_ctx + (
+                        direct.ctx - direct.ctx.detach()
+                    )
+                    _, plus, minus = direct._forward_text_response_triplet(
+                        student_view, student_ctx
+                    )
+                    student_response = direct._text_response(plus, minus)
+                    patch_squared_sum = (
+                        (student_response - teacher_response).square()
+                        * teacher_mask
+                    ).sum()
+                    response_squared_sum = (
+                        patch_squared_sum
+                        if response_squared_sum is None
+                        else response_squared_sum + patch_squared_sum
+                    )
+                    response_valid_count += int(teacher_mask.sum())
+            teacher_energy = (
+                teacher_squared_sum / float(teacher_valid_count)
+            ).detach()
+            denominator = teacher_energy.clamp_min(1e-6).detach()
+            raw_loss = response_squared_sum / float(response_valid_count)
+            direct_loss = 0.03 * raw_loss / denominator
+            direct_gradient = torch.autograd.grad(direct_loss, direct.ctx)[0]
+
+            self.assertAlmostEqual(
+                replay_trace["response_raw_loss"], float(raw_loss.detach()), places=5
+            )
+            self.assertAlmostEqual(
+                replay_trace["response_teacher_energy"],
+                float(teacher_energy),
+                places=5,
+            )
+            self.assertAlmostEqual(
+                replay_trace["weighted_response_loss"],
+                float(direct_loss.detach()),
+                places=6,
+            )
+            self.assertTrue(
+                torch.allclose(replay_gradient, direct_gradient, atol=2e-5, rtol=2e-5)
+            )
+        finally:
+            for adapter in adapters:
                 adapter.close()
 
     def test_multiscale_soft_target_downsampling_excludes_padding(self):
