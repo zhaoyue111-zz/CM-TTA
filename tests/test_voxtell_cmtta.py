@@ -38,6 +38,7 @@ from method.voxtell_cmtta import (
     masked_dice_components,
     masked_entropy_components,
     d5_text_alignment_scores,
+    sampled_d5_text_alignment_scores,
     sample_text_rank_pairs,
     select_cac_view,
     soft_dice_loss,
@@ -264,8 +265,15 @@ class TinyTextRankVoxTell(TinyVoxTell):
         query = self.project_to_decoder_channels[0](
             projected_text.permute(1, 0, 2)
         )
-        first = image[:, :1]
-        second = 0.4 * image[:, :1].square() - 0.3
+        # Make v5 itself text-dependent, as in VoxTell where preceding fusion
+        # stages feed the final decoder stage.
+        query_signal = query[:, 0, 0].view(batch, 1, 1, 1, 1)
+        first = image[:, :1] * (1.0 + 0.2 * query_signal)
+        second = (
+            0.4 * image[:, :1].square()
+            - 0.3
+            + 0.1 * query_signal * image[:, :1]
+        )
         voxels = self.decoder.stages[-1](torch.cat((first, second), dim=1))
         logits = torch.einsum("b c d h w, b n c -> b n d h w", voxels, query)
         if return_decoder_outputs:
@@ -366,6 +374,22 @@ class VoxTellCMTTATest(unittest.TestCase):
             scores, reconstructed = d5_text_alignment_scores(g5, v5)
             self.assertEqual(tuple(scores.shape), tuple(logits.shape))
             self.assertTrue(torch.allclose(reconstructed, logits.float(), atol=1e-7))
+            repeated_indices = torch.tensor([0, 5, 5, 17, 23])
+            sampled_scores, sampled_diagnostics = (
+                sampled_d5_text_alignment_scores(
+                    g5, v5, repeated_indices, return_diagnostics=True
+                )
+            )
+            expected_scores = scores[:, 0].flatten(1).index_select(
+                1, repeated_indices
+            )
+            expected_dot = reconstructed[:, 0].flatten(1).index_select(
+                1, repeated_indices
+            )
+            self.assertTrue(torch.allclose(sampled_scores, expected_scores, atol=1e-7))
+            self.assertTrue(
+                torch.allclose(sampled_diagnostics["dot"], expected_dot, atol=1e-7)
+            )
 
             # Only these explicit valid-region indices may appear in the plan;
             # padded indices 1, 3, 5, and 7 are absent from both pools.
@@ -431,6 +455,8 @@ class VoxTellCMTTATest(unittest.TestCase):
             },
         ]
         params = [{"scale": 1.0, "offset": 0.0}]
+        short_ctx_value = torch.tensor([[0.65, -0.1]])
+        short_current_weight = 0.37
         try:
             replay._last_text_rank_region_caches = regions
             replay.optimizer.zero_grad(set_to_none=True)
@@ -439,14 +465,40 @@ class VoxTellCMTTATest(unittest.TestCase):
                 masks,
                 params,
                 0,
-                replay.ctx_delta.detach().clone(),
-                1.0,
+                short_ctx_value,
+                short_current_weight,
                 False,
                 1,
             )
             replay_gradient = replay.ctx_delta.grad.detach().clone()
 
             plan = sample_text_rank_pairs(regions, 41, seed=23)
+            foreground_indices = torch.cat(
+                [
+                    entry["foreground_flat_indices"] + patch_index * 8
+                    for patch_index, entry in enumerate(plan["per_patch"])
+                ]
+            )
+            self.assertLess(
+                int(torch.unique(foreground_indices).numel()),
+                int(foreground_indices.numel()),
+            )
+            foreground_patch_by_pair = {}
+            background_patch_by_pair = {}
+            for patch_index, entry in enumerate(plan["per_patch"]):
+                foreground_patch_by_pair.update(
+                    {int(pair_id): patch_index for pair_id in entry["foreground_pair_ids"]}
+                )
+                background_patch_by_pair.update(
+                    {int(pair_id): patch_index for pair_id in entry["background_pair_ids"]}
+                )
+            self.assertTrue(
+                any(
+                    foreground_patch_by_pair[pair_id]
+                    != background_patch_by_pair[pair_id]
+                    for pair_id in range(41)
+                )
+            )
             foreground = [None] * 41
             background = [None] * 41
             direct.optimizer.zero_grad(set_to_none=True)
@@ -454,8 +506,11 @@ class VoxTellCMTTATest(unittest.TestCase):
                 selected = direct._make_view_batch(
                     patch, params, mask, 0, 1
                 ).to(direct.device)
+                student_ctx = short_ctx_value + short_current_weight * (
+                    direct.ctx_delta - direct.ctx_delta.detach()
+                )
                 logits, g5, v5 = direct._forward_with_d5_alignment(
-                    selected, direct.ctx_delta
+                    selected, student_ctx
                 )
                 del logits
                 flat = d5_text_alignment_scores(g5, v5)[0][:, 0].reshape(-1)
@@ -568,6 +623,16 @@ class VoxTellCMTTATest(unittest.TestCase):
                     "ctx_rank_gradient"
                 ]
             )
+            self.assertEqual(
+                trace_enabled["text_rank_diagnostics"]["diagnostic_scope"],
+                "sampled_positions",
+            )
+            self.assertEqual(
+                trace_enabled["text_rank_diagnostics"][
+                    "d5_dot_reconstruction_sample_count"
+                ],
+                2 * common["text_rank_pairs"],
+            )
 
             enabled._last_text_rank_region_caches = [
                 {
@@ -585,6 +650,52 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             disabled.close()
             enabled.close()
+
+    def test_text_rank_diagnostic_validation_and_checkpoint_toggle(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "text_rank_diagnostics requires alignment_loss='text_rank'",
+        ):
+            VoxTellCMTTA(
+                TinyVoxTell(),
+                torch.zeros(1, 1, 2),
+                "cpu",
+                make_args(alignment_loss="cac", text_rank_diagnostics=True),
+            )
+
+        common = dict(
+            alignment_loss="text_rank",
+            w_text_rank=0.01,
+            text_rank_margin=0.0,
+            text_rank_temperature=0.1,
+            text_rank_pairs=17,
+            text_rank_seed=1377,
+        )
+        diagnostics_off = VoxTellCMTTA(
+            TinyTextRankVoxTell(),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(**common, text_rank_diagnostics=False),
+        )
+        diagnostics_on = VoxTellCMTTA(
+            TinyTextRankVoxTell(),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(**common, text_rank_diagnostics=True),
+        )
+        try:
+            state_without_diagnostics = diagnostics_off.state_dict()
+            self.assertFalse(state_without_diagnostics["text_rank_diagnostics"])
+            diagnostics_on.load_state_dict(state_without_diagnostics)
+            self.assertTrue(diagnostics_on.text_rank_diagnostics)
+
+            state_with_diagnostics = diagnostics_on.state_dict()
+            self.assertTrue(state_with_diagnostics["text_rank_diagnostics"])
+            diagnostics_off.load_state_dict(state_with_diagnostics)
+            self.assertFalse(diagnostics_off.text_rank_diagnostics)
+        finally:
+            diagnostics_off.close()
+            diagnostics_on.close()
 
     def test_lora_initial_zero_delta_matches_baseline_and_targets_cross_attention(self):
         torch.manual_seed(67)

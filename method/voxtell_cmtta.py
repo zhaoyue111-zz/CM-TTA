@@ -62,6 +62,58 @@ def d5_text_alignment_scores(
     return scores, dot
 
 
+def sampled_d5_text_alignment_scores(
+    g5: torch.Tensor,
+    v5: torch.Tensor,
+    flat_indices: torch.Tensor,
+    *,
+    return_diagnostics: bool = False,
+) -> tuple[torch.Tensor, Optional[dict[str, torch.Tensor]]]:
+    """Compute FP32 D5 cosine only at sampled spatial positions.
+
+    The gather happens while ``v5`` retains its forward dtype.  Consequently
+    no full-resolution FP32 visual copy or cosine map is created.  Repeated
+    indices deliberately remain repeated; ``index_select`` backward sums all
+    of their contributions into the corresponding source locations.
+    """
+    if g5.ndim != 3 or v5.ndim != 5:
+        raise ValueError("g5/v5 must have shapes (B,N,C) and (B,C,D,H,W)")
+    if g5.shape[0] != v5.shape[0] or g5.shape[2] != v5.shape[1]:
+        raise ValueError("g5/v5 batch or channel dimensions do not match")
+    if g5.shape[1] != 1:
+        raise ValueError("Sampled D5 text alignment requires one query")
+    if flat_indices.ndim != 1:
+        raise ValueError("flat_indices must be one-dimensional")
+    indices = flat_indices.to(device=v5.device, dtype=torch.long)
+    spatial_size = int(np.prod(v5.shape[2:]))
+    if indices.numel() and (
+        int(indices.min()) < 0 or int(indices.max()) >= spatial_size
+    ):
+        raise IndexError("Sampled D5 flat index is outside the spatial grid")
+
+    # flatten(2) is a view for VoxTell's contiguous decoder output.  The
+    # index_select therefore materializes only B*C*K values in the forward
+    # dtype; conversion to FP32 occurs after this gather.
+    sampled_visual = v5.flatten(2).index_select(2, indices)
+    sampled_visual_fp32 = sampled_visual.float()
+    query_fp32 = g5[:, 0].float()
+    dot = torch.einsum("b c, b c k -> b k", query_fp32, sampled_visual_fp32)
+    query_norm = torch.linalg.vector_norm(query_fp32, dim=1).clamp_min(
+        TEXT_RANK_COSINE_EPS
+    )
+    visual_norm = torch.linalg.vector_norm(
+        sampled_visual_fp32, dim=1
+    ).clamp_min(TEXT_RANK_COSINE_EPS)
+    scores = dot / (query_norm[:, None] * visual_norm)
+    if not return_diagnostics:
+        return scores, None
+    return scores, {
+        "dot": dot,
+        "query_norm": query_norm,
+        "visual_norm": visual_norm,
+    }
+
+
 def text_rank_pair_loss(
     foreground_scores: torch.Tensor,
     background_scores: torch.Tensor,
@@ -1763,6 +1815,10 @@ class VoxTellCMTTA:
             raise ValueError("text_rank_temperature must be finite and positive")
         if self.text_rank_pairs <= 0:
             raise ValueError("text_rank_pairs must be positive")
+        if self.text_rank_diagnostics and self.alignment_loss != "text_rank":
+            raise ValueError(
+                "text_rank_diagnostics requires alignment_loss='text_rank'"
+            )
         self.use_d4_local_distill = bool(
             getattr(args, "use_d4_local_distill", False)
         )
@@ -5742,12 +5798,13 @@ class VoxTellCMTTA:
         background_scores = torch.empty_like(foreground_scores)
         foreground_seen = torch.zeros(pair_count, dtype=torch.bool)
         background_seen = torch.zeros(pair_count, dtype=torch.bool)
-        foreground_v_norms: list[torch.Tensor] = []
-        background_v_norms: list[torch.Tensor] = []
-        sampled_g_norms: list[torch.Tensor] = []
-        reconstruction_absolute_sum = 0.0
-        reconstruction_absolute_max = 0.0
-        reconstruction_element_count = 0
+        if self.text_rank_diagnostics:
+            foreground_v_norms: list[torch.Tensor] = []
+            background_v_norms: list[torch.Tensor] = []
+            sampled_g_norms: list[torch.Tensor] = []
+            reconstruction_absolute_sum = 0.0
+            reconstruction_absolute_max = 0.0
+            reconstruction_element_count = 0
 
         with torch.no_grad():
             for patch_index, (patch, valid_mask) in enumerate(
@@ -5770,55 +5827,73 @@ class VoxTellCMTTA:
                     logits, g5, v5 = self._forward_with_d5_alignment(
                         selected, student_ctx
                     )
-                score_grid, reconstructed_logits = d5_text_alignment_scores(g5, v5)
-                if score_grid.shape[1] != 1:
-                    raise RuntimeError(
-                        "text_rank expects the fixed single liver query at D5"
-                    )
-                score_flat = score_grid[:, 0].reshape(-1)
-                voxel_norm_flat = torch.linalg.vector_norm(
-                    v5.float(), dim=1
-                ).reshape(-1)
-                query_norm = torch.linalg.vector_norm(g5[:, 0].float(), dim=-1)
-                reconstruction_error = (
-                    reconstructed_logits[:, :1] - logits[:, :1].float()
-                ).abs()
-                reconstruction_absolute_sum += float(
-                    reconstruction_error.double().sum().cpu()
+                foreground_indices_cpu = patch_plan[
+                    "foreground_flat_indices"
+                ]
+                background_indices_cpu = patch_plan[
+                    "background_flat_indices"
+                ]
+                sampled_indices_cpu = torch.cat(
+                    (foreground_indices_cpu, background_indices_cpu)
                 )
-                reconstruction_element_count += int(reconstruction_error.numel())
-                if reconstruction_error.numel() > 0:
-                    reconstruction_absolute_max = max(
-                        reconstruction_absolute_max,
-                        float(reconstruction_error.max().cpu()),
+                sampled_scores, sampled_diagnostics = (
+                    sampled_d5_text_alignment_scores(
+                        g5,
+                        v5,
+                        sampled_indices_cpu.to(self.device),
+                        return_diagnostics=self.text_rank_diagnostics,
                     )
+                )
+                sampled_scores = sampled_scores.reshape(-1)
+                foreground_sample_count = int(foreground_pair_ids.numel())
+                foreground_pair_ids_device = foreground_pair_ids.to(self.device)
+                background_pair_ids_device = background_pair_ids.to(self.device)
+                foreground_scores[foreground_pair_ids_device] = sampled_scores[
+                    :foreground_sample_count
+                ]
+                background_scores[background_pair_ids_device] = sampled_scores[
+                    foreground_sample_count:
+                ]
+                foreground_seen[foreground_pair_ids] = True
+                background_seen[background_pair_ids] = True
 
-                for region_name, destination, seen, norm_values in (
-                    (
-                        "foreground",
-                        foreground_scores,
-                        foreground_seen,
-                        foreground_v_norms,
-                    ),
-                    (
-                        "background",
-                        background_scores,
-                        background_seen,
-                        background_v_norms,
-                    ),
-                ):
-                    pair_ids_cpu = patch_plan[f"{region_name}_pair_ids"]
-                    flat_indices_cpu = patch_plan[f"{region_name}_flat_indices"]
-                    if pair_ids_cpu.numel() == 0:
-                        continue
-                    pair_ids = pair_ids_cpu.to(self.device)
-                    flat_indices = flat_indices_cpu.to(self.device)
-                    destination[pair_ids] = score_flat[flat_indices]
-                    seen[pair_ids_cpu] = True
-                    if self.text_rank_diagnostics:
-                        norm_values.append(voxel_norm_flat[flat_indices].detach().cpu())
-                        sampled_g_norms.append(
-                            query_norm.detach().cpu().expand(pair_ids_cpu.numel())
+                if self.text_rank_diagnostics:
+                    if sampled_diagnostics is None:
+                        raise RuntimeError("Sampled D5 diagnostics were not returned")
+                    visual_norms = sampled_diagnostics["visual_norm"].reshape(-1)
+                    foreground_v_norms.append(
+                        visual_norms[:foreground_sample_count].detach().cpu()
+                    )
+                    background_v_norms.append(
+                        visual_norms[foreground_sample_count:].detach().cpu()
+                    )
+                    sampled_g_norms.append(
+                        sampled_diagnostics["query_norm"]
+                        .detach()
+                        .cpu()
+                        .expand(sampled_indices_cpu.numel())
+                    )
+                    sampled_logits = (
+                        logits[:, 0]
+                        .flatten(1)
+                        .index_select(
+                            1, sampled_indices_cpu.to(logits.device)
+                        )
+                        .float()
+                    )
+                    reconstruction_error = (
+                        sampled_diagnostics["dot"] - sampled_logits
+                    ).abs()
+                    reconstruction_absolute_sum += float(
+                        reconstruction_error.double().sum().cpu()
+                    )
+                    reconstruction_element_count += int(
+                        reconstruction_error.numel()
+                    )
+                    if reconstruction_error.numel() > 0:
+                        reconstruction_absolute_max = max(
+                            reconstruction_absolute_max,
+                            float(reconstruction_error.max().cpu()),
                         )
 
         if not bool(foreground_seen.all()) or not bool(background_seen.all()):
@@ -5919,24 +5994,33 @@ class VoxTellCMTTA:
                 _logits, g5, v5 = self._forward_with_d5_alignment(
                     selected, student_ctx
                 )
-            score_flat = d5_text_alignment_scores(g5, v5)[0][:, 0].reshape(-1)
+            foreground_indices_cpu = patch_plan["foreground_flat_indices"]
+            background_indices_cpu = patch_plan["background_flat_indices"]
+            sampled_indices_cpu = torch.cat(
+                (foreground_indices_cpu, background_indices_cpu)
+            )
+            sampled_scores = sampled_d5_text_alignment_scores(
+                g5,
+                v5,
+                sampled_indices_cpu.to(self.device),
+                return_diagnostics=False,
+            )[0].reshape(-1)
+            foreground_sample_count = int(foreground_pair_ids_cpu.numel())
             local_terms = []
             if foreground_pair_ids_cpu.numel() > 0:
                 pair_ids = foreground_pair_ids_cpu.to(self.device)
-                flat_indices = patch_plan["foreground_flat_indices"].to(self.device)
                 local_terms.append(
                     (
-                        score_flat[flat_indices]
+                        sampled_scores[:foreground_sample_count]
                         * foreground_derivative[pair_ids]
                         * self.w_text_rank
                     ).sum()
                 )
             if background_pair_ids_cpu.numel() > 0:
                 pair_ids = background_pair_ids_cpu.to(self.device)
-                flat_indices = patch_plan["background_flat_indices"].to(self.device)
                 local_terms.append(
                     (
-                        score_flat[flat_indices]
+                        sampled_scores[foreground_sample_count:]
                         * background_derivative[pair_ids]
                         * self.w_text_rank
                     ).sum()
@@ -5967,6 +6051,7 @@ class VoxTellCMTTA:
             result["text_rank_diagnostics"] = {
                 "skipped": False,
                 "skip_reason": None,
+                "diagnostic_scope": "sampled_positions",
                 "sampled_foreground_cosine_mean": foreground_mean,
                 "sampled_foreground_cosine_std": foreground_std,
                 "sampled_background_cosine_mean": background_mean,
@@ -5990,10 +6075,14 @@ class VoxTellCMTTA:
                 "d5_dot_reconstruction_absolute_error_max": (
                     reconstruction_absolute_max
                 ),
+                "d5_dot_reconstruction_sample_count": (
+                    reconstruction_element_count
+                ),
                 "d5_dot_reconstruction_comparison_precision": (
                     "FP32 dot from tensors produced by the unchanged AMP forward "
-                    "versus returned D5 logits cast to FP32"
+                    "versus returned D5 logits cast to FP32; sampled_positions only"
                 ),
+                "d5_dot_reconstruction_scope": "sampled_positions",
                 "finite_checks": {
                     "scores": scores_finite,
                     "loss": loss_finite,
@@ -6762,7 +6851,6 @@ class VoxTellCMTTA:
             float(state.get("text_rank_temperature", 0.1)),
             int(state.get("text_rank_pairs", 2048)),
             int(state.get("text_rank_seed", 1377)),
-            bool(state.get("text_rank_diagnostics", False)),
         )
         current_alignment_configuration = (
             self.alignment_loss,
@@ -6771,7 +6859,6 @@ class VoxTellCMTTA:
             self.text_rank_temperature,
             self.text_rank_pairs,
             self.text_rank_seed,
-            self.text_rank_diagnostics,
         )
         if checkpoint_alignment_configuration != current_alignment_configuration:
             raise ValueError(
