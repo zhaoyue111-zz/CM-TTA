@@ -17,6 +17,7 @@ from typing import Iterable, Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy import ndimage
 from torch import nn
 from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
@@ -210,6 +211,158 @@ def sample_text_rank_pairs(
     result["pair_count"] = int(num_pairs)
     result["skip_reason"] = None
     return result
+
+
+def build_largest_component_teacher_cache(
+    teacher_probabilities: list[torch.Tensor],
+    valid_masks: list[torch.Tensor],
+    patch_locations: list[tuple[int, int, int]],
+) -> dict[str, object]:
+    """Build one 26-connected whole-case teacher component correction.
+
+    Inputs and returned per-patch tensors live on CPU.  Patch coordinates are
+    used directly, so components crossing patch faces/edges/corners remain
+    connected and padding never participates in labeling.
+    """
+    if not (
+        len(teacher_probabilities) == len(valid_masks) == len(patch_locations)
+    ):
+        raise ValueError(
+            "Teacher probabilities, valid masks, and patch locations must align"
+        )
+    if not teacher_probabilities:
+        raise ValueError("Component correction requires at least one patch")
+    normalized_probabilities: list[torch.Tensor] = []
+    normalized_masks: list[torch.Tensor] = []
+    normalized_locations: list[tuple[int, int, int]] = []
+    case_shape = [0, 0, 0]
+    for patch_index, (probability, valid_mask, location) in enumerate(
+        zip(teacher_probabilities, valid_masks, patch_locations)
+    ):
+        probability = torch.as_tensor(probability).detach().cpu().float()
+        if probability.ndim == 4:
+            probability = probability.unsqueeze(0)
+        if probability.ndim != 5 or tuple(probability.shape[:2]) != (1, 1):
+            raise ValueError(
+                f"Teacher patch {patch_index} must have shape (1,1,D,H,W)"
+            )
+        valid_mask = torch.as_tensor(valid_mask).detach().cpu().bool()
+        if valid_mask.ndim == 4 and valid_mask.shape[0] == 1:
+            valid_mask = valid_mask[0]
+        if valid_mask.ndim != 3 or tuple(valid_mask.shape) != tuple(
+            probability.shape[2:]
+        ):
+            raise ValueError(
+                f"Valid mask {patch_index} does not match its teacher patch"
+            )
+        if len(location) != 3:
+            raise ValueError("Each patch location must contain (d,h,w)")
+        location = tuple(int(value) for value in location)
+        if any(value < 0 for value in location):
+            raise ValueError("Patch locations must be non-negative")
+        for axis, (start, size) in enumerate(zip(location, valid_mask.shape)):
+            case_shape[axis] = max(case_shape[axis], start + int(size))
+        normalized_probabilities.append(probability)
+        normalized_masks.append(valid_mask)
+        normalized_locations.append(location)
+
+    foreground_case = np.zeros(tuple(case_shape), dtype=np.bool_)
+    valid_case = np.zeros(tuple(case_shape), dtype=np.bool_)
+    occupied_case = np.zeros(tuple(case_shape), dtype=np.bool_)
+    for probability, valid_mask, location in zip(
+        normalized_probabilities, normalized_masks, normalized_locations
+    ):
+        slices = tuple(
+            slice(start, start + size)
+            for start, size in zip(location, valid_mask.shape)
+        )
+        if occupied_case[slices].any():
+            raise ValueError("Patch locations overlap in component correction")
+        occupied_case[slices] = True
+        valid_numpy = valid_mask.numpy()
+        valid_case[slices] = valid_numpy
+        foreground_case[slices] = (
+            probability[0, 0].numpy() >= 0.5
+        ) & valid_numpy
+
+    original_foreground_count = int(foreground_case.sum())
+    largest_case = np.zeros_like(foreground_case)
+    component_count = 0
+    if original_foreground_count > 0:
+        labels, component_count = ndimage.label(
+            foreground_case,
+            structure=np.ones((3, 3, 3), dtype=np.uint8),
+        )
+        sizes = np.bincount(labels.reshape(-1))
+        sizes[0] = 0
+        largest_label = int(sizes.argmax())
+        largest_case = labels == largest_label
+    removed_case = foreground_case & ~largest_case
+
+    patch_caches: list[dict[str, torch.Tensor]] = []
+    for probability, valid_mask, location in zip(
+        normalized_probabilities, normalized_masks, normalized_locations
+    ):
+        slices = tuple(
+            slice(start, start + size)
+            for start, size in zip(location, valid_mask.shape)
+        )
+        largest_patch = torch.from_numpy(largest_case[slices].copy())
+        removed_patch = torch.from_numpy(removed_case[slices].copy())
+        original_foreground = (probability[0, 0] >= 0.5) & valid_mask
+        background_patch = (probability[0, 0] < 0.5) & valid_mask
+        corrected_probability = probability.clone()
+        corrected_probability[0, 0][removed_patch] = 0.0
+        entropy_valid = valid_mask & ~removed_patch
+        patch_caches.append(
+            {
+                "teacher_probability_original": probability,
+                "teacher_probability_corrected": corrected_probability,
+                "entropy_valid_mask": entropy_valid.float(),
+                "foreground_indices": torch.nonzero(
+                    original_foreground.reshape(-1), as_tuple=False
+                ).flatten(),
+                "largest_indices": torch.nonzero(
+                    largest_patch.reshape(-1), as_tuple=False
+                ).flatten(),
+                "removed_indices": torch.nonzero(
+                    removed_patch.reshape(-1), as_tuple=False
+                ).flatten(),
+                "background_indices": torch.nonzero(
+                    background_patch.reshape(-1), as_tuple=False
+                ).flatten(),
+            }
+        )
+    return {
+        "patches": patch_caches,
+        "case_shape": tuple(case_shape),
+        "component_count": int(component_count),
+        "original_foreground_voxels": original_foreground_count,
+        "largest_component_voxels": int(largest_case.sum()),
+        "removed_component_voxels": int(removed_case.sum()),
+        "teacher_had_foreground": original_foreground_count > 0,
+    }
+
+
+def text_rank_regions_from_component_cache(
+    component_teacher_cache: dict[str, object],
+    negative_source: str,
+) -> list[dict[str, torch.Tensor]]:
+    """Expose fixed C/background-or-E sample pools for whole-case ranking."""
+    if negative_source not in ("background", "removed_components"):
+        raise ValueError("Invalid text-rank component negative source")
+    negative_key = (
+        "removed_indices"
+        if negative_source == "removed_components"
+        else "background_indices"
+    )
+    return [
+        {
+            "foreground_indices": patch["largest_indices"].long().cpu(),
+            "background_indices": patch[negative_key].long().cpu(),
+        }
+        for patch in component_teacher_cache["patches"]
+    ]
 
 
 class ResponseDiagnosticsAccumulator:
@@ -1802,6 +1955,12 @@ class VoxTellCMTTA:
         self.text_rank_diagnostics = bool(
             getattr(args, "text_rank_diagnostics", False)
         )
+        self.pseudo_component_filter = str(
+            getattr(args, "pseudo_component_filter", "none")
+        )
+        self.text_rank_negative_source = str(
+            getattr(args, "text_rank_negative_source", "background")
+        )
         if self.alignment_loss not in ("cac", "text_rank"):
             raise ValueError("alignment_loss must be 'cac' or 'text_rank'")
         if not np.isfinite(self.w_text_rank) or self.w_text_rank < 0.0:
@@ -1818,6 +1977,24 @@ class VoxTellCMTTA:
         if self.text_rank_diagnostics and self.alignment_loss != "text_rank":
             raise ValueError(
                 "text_rank_diagnostics requires alignment_loss='text_rank'"
+            )
+        if self.pseudo_component_filter not in ("none", "largest"):
+            raise ValueError("pseudo_component_filter must be 'none' or 'largest'")
+        if self.text_rank_negative_source not in (
+            "background",
+            "removed_components",
+        ):
+            raise ValueError(
+                "text_rank_negative_source must be 'background' or "
+                "'removed_components'"
+            )
+        if (
+            self.text_rank_negative_source == "removed_components"
+            and self.pseudo_component_filter != "largest"
+        ):
+            raise ValueError(
+                "text_rank_negative_source='removed_components' requires "
+                "pseudo_component_filter='largest'"
             )
         self.use_d4_local_distill = bool(
             getattr(args, "use_d4_local_distill", False)
@@ -2073,6 +2250,30 @@ class VoxTellCMTTA:
             if self.gradient_conflict_diagnostics:
                 raise ValueError(
                     "gradient_conflict_diagnostics is not supported with text_rank"
+                )
+        if self.pseudo_component_filter == "largest":
+            if self.pseudo_update_mode != "original":
+                raise ValueError(
+                    "largest component filtering requires pseudo_update_mode='original'"
+                )
+            if self.pseudo_teacher_inference != "patch":
+                raise ValueError(
+                    "largest component filtering requires non-overlap patch "
+                    "teacher inference"
+                )
+            if self.view_selection_metric != "tdc":
+                raise ValueError(
+                    "largest component filtering requires TDC view selection"
+                )
+            if self.use_d4_local_distill or self.use_text_local_response_distill:
+                raise ValueError(
+                    "largest component filtering is not combined with D4 local or "
+                    "text-response distillation"
+                )
+            if self.gradient_conflict_diagnostics:
+                raise ValueError(
+                    "gradient_conflict_diagnostics is not supported with largest "
+                    "component filtering"
                 )
 
         self._lora_modules: list[
@@ -3453,6 +3654,34 @@ class VoxTellCMTTA:
             )
         return weights
 
+    def _collect_component_filtered_teacher(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        patch_locations: list[tuple[int, int, int]],
+        params: list[dict[str, float]],
+        selected_view: int,
+        long_ctx: torch.Tensor,
+        autocast_enabled: bool,
+    ) -> dict[str, object]:
+        """Run the existing selected-view teacher once and correct it case-wide."""
+        probabilities: list[torch.Tensor] = []
+        with torch.no_grad(), self.lora_mode(False):
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                with torch.autocast(
+                    device_type=self.device.type, enabled=autocast_enabled
+                ):
+                    logits = self._forward(selected, long_ctx)
+                probabilities.append(
+                    torch.sigmoid(logits[:, :1]).detach().cpu()
+                )
+        return build_largest_component_teacher_cache(
+            probabilities, valid_masks, patch_locations
+        )
+
     def _forward_case_supervision_stats(
         self,
         patches: list[torch.Tensor],
@@ -3466,6 +3695,7 @@ class VoxTellCMTTA:
         teacher_pseudo_labels: Optional[list[torch.Tensor]] = None,
         case_basename: Optional[str] = None,
         adaptation_step: int = 1,
+        component_teacher_cache: Optional[dict[str, object]] = None,
     ) -> dict[str, torch.Tensor]:
         """Collect global Dice/entropy statistics without retaining graphs."""
         total_views = len(params)
@@ -3507,6 +3737,20 @@ class VoxTellCMTTA:
             raise ValueError(
                 "teacher_pseudo_labels must contain one soft label per case patch"
             )
+        component_patch_caches = (
+            None
+            if component_teacher_cache is None
+            else component_teacher_cache["patches"]
+        )
+        if component_patch_caches is not None and len(component_patch_caches) != len(patches):
+            raise ValueError("Component teacher cache does not align with case patches")
+        component_text_rank_caches = (
+            None
+            if component_teacher_cache is None
+            else text_rank_regions_from_component_cache(
+                component_teacher_cache, self.text_rank_negative_source
+            )
+        )
         with torch.no_grad():
             for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
                 selected = self._make_view_batch(
@@ -3575,17 +3819,24 @@ class VoxTellCMTTA:
                             selected_view,
                         )
                 if self.alignment_loss == "text_rank":
-                    valid_region = input_mask.unsqueeze(1).bool()
-                    foreground_region = (pseudo_label >= 0.5) & valid_region
-                    background_region = (pseudo_label < 0.5) & valid_region
+                    if component_patch_caches is None:
+                        valid_region = input_mask.unsqueeze(1).bool()
+                        foreground_region = (pseudo_label >= 0.5) & valid_region
+                        background_region = (pseudo_label < 0.5) & valid_region
+                        foreground_indices = torch.nonzero(
+                            foreground_region.reshape(-1), as_tuple=False
+                        ).flatten().cpu()
+                        background_indices = torch.nonzero(
+                            background_region.reshape(-1), as_tuple=False
+                        ).flatten().cpu()
+                    else:
+                        rank_regions = component_text_rank_caches[patch_index]
+                        foreground_indices = rank_regions["foreground_indices"]
+                        background_indices = rank_regions["background_indices"]
                     text_rank_region_caches.append(
                         {
-                            "foreground_indices": torch.nonzero(
-                                foreground_region.reshape(-1), as_tuple=False
-                            ).flatten().cpu(),
-                            "background_indices": torch.nonzero(
-                                background_region.reshape(-1), as_tuple=False
-                            ).flatten().cpu(),
+                            "foreground_indices": foreground_indices,
+                            "background_indices": background_indices,
                         }
                     )
                 if self.use_d4_local_distill:
@@ -3717,6 +3968,16 @@ class VoxTellCMTTA:
                             patch_response_valid_count = int(
                                 response_mask.sum().item()
                             )
+                        entropy_mask_batch = (
+                            input_mask_batch
+                            if component_patch_caches is None
+                            else component_patch_caches[patch_index][
+                                "entropy_valid_mask"
+                            ]
+                            .to(self.device, non_blocking=True)
+                            .unsqueeze(0)
+                            .expand(end - start, -1, -1, -1)
+                        )
                         local_entropy, local_mass = masked_entropy_components(
                             probabilities[
                                 max(0, selected_view - start) :
@@ -3724,12 +3985,12 @@ class VoxTellCMTTA:
                             ]
                             if start <= selected_view < end
                             else probabilities[:1],
-                            input_mask_batch[
+                            entropy_mask_batch[
                                 max(0, selected_view - start) :
                                 max(0, selected_view - start) + 1
                             ]
                             if start <= selected_view < end
-                            else input_mask_batch[:1],
+                            else entropy_mask_batch[:1],
                         )
                         if self.use_d4_local_distill:
                             local_components = d4_local_relation_loss_components(
@@ -5037,6 +5298,7 @@ class VoxTellCMTTA:
         teacher_pseudo_labels: Optional[list[torch.Tensor]] = None,
         case_basename: Optional[str] = None,
         adaptation_step: int = 1,
+        component_teacher_cache: Optional[dict[str, object]] = None,
     ) -> tuple[float, float]:
         """Backpropagate case-level Dice and entropy with one patch graph."""
         if self.pseudo_update_mode == "decoder_masked":
@@ -5077,6 +5339,7 @@ class VoxTellCMTTA:
             teacher_pseudo_labels,
             case_basename,
             adaptation_step,
+            component_teacher_cache,
         )
         self._last_text_rank_region_caches = (
             stats["text_rank_region_caches"]
@@ -5191,6 +5454,11 @@ class VoxTellCMTTA:
         )
 
         total_views = len(params)
+        component_patch_caches = (
+            None
+            if component_teacher_cache is None
+            else component_teacher_cache["patches"]
+        )
         for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
             selected = self._make_view_batch(
                 patch, params, valid_mask, selected_view, selected_view + 1
@@ -5237,6 +5505,16 @@ class VoxTellCMTTA:
                 input_mask_batch = valid_mask.unsqueeze(0).to(
                     self.device, non_blocking=True
                 ).expand(end - start, -1, -1, -1)
+                entropy_mask_batch = (
+                    input_mask_batch
+                    if component_patch_caches is None
+                    else component_patch_caches[patch_index][
+                        "entropy_valid_mask"
+                    ]
+                    .to(self.device, non_blocking=True)
+                    .unsqueeze(0)
+                    .expand(end - start, -1, -1, -1)
+                )
                 with torch.autocast(
                     device_type=self.device.type, enabled=autocast_enabled
                 ):
@@ -5334,7 +5612,7 @@ class VoxTellCMTTA:
                         selected_index = selected_view - start
                         local_entropy_sum, local_entropy_mass = masked_entropy_components(
                             probabilities[selected_index:selected_index + 1],
-                            input_mask_batch[selected_index:selected_index + 1],
+                            entropy_mask_batch[selected_index:selected_index + 1],
                         )
                         local_tensors.append(local_entropy_sum)
                         local_gradients.append(
@@ -5366,6 +5644,8 @@ class VoxTellCMTTA:
             "text_rank_pairs": self.text_rank_pairs,
             "text_rank_seed": self.text_rank_seed,
             "text_rank_diagnostics": self.text_rank_diagnostics,
+            "pseudo_component_filter": self.pseudo_component_filter,
+            "text_rank_negative_source": self.text_rank_negative_source,
             "pseudo_unweighted_soft_dice": float(
                 unweighted_global_dice.detach().cpu()
             ),
@@ -5401,6 +5681,29 @@ class VoxTellCMTTA:
                 stats["d4_local_teacher_small_norm_skipped_count"]
             ),
         }
+        if component_teacher_cache is not None:
+            self._last_pseudo_diagnostics.update(
+                {
+                    "pseudo_component_count": int(
+                        component_teacher_cache["component_count"]
+                    ),
+                    "pseudo_original_foreground_voxels": int(
+                        component_teacher_cache["original_foreground_voxels"]
+                    ),
+                    "pseudo_largest_component_voxels": int(
+                        component_teacher_cache["largest_component_voxels"]
+                    ),
+                    "pseudo_removed_component_voxels": int(
+                        component_teacher_cache["removed_component_voxels"]
+                    ),
+                    "pseudo_component_case_shape": list(
+                        component_teacher_cache["case_shape"]
+                    ),
+                    "pseudo_teacher_had_foreground": bool(
+                        component_teacher_cache["teacher_had_foreground"]
+                    ),
+                }
+            )
         self._last_pseudo_diagnostics.update(stats["pseudo_spatial_diagnostics"])
         if response_diagnostics is not None:
             self._last_pseudo_diagnostics["response_diagnostics"] = (
@@ -5766,6 +6069,7 @@ class VoxTellCMTTA:
             "text_rank_pairs_actual": int(plan["pair_count"]),
             "text_rank_seed": self.text_rank_seed,
             "text_rank_effective_seed": effective_seed,
+            "text_rank_negative_source": self.text_rank_negative_source,
             "text_rank_valid_foreground_voxels": int(
                 plan["foreground_valid_count"]
             ),
@@ -6104,6 +6408,7 @@ class VoxTellCMTTA:
         patches: list[torch.Tensor],
         valid_masks: Optional[list[torch.Tensor]] = None,
         view_params_override: Optional[list[dict[str, float]]] = None,
+        patch_locations: Optional[list[tuple[int, int, int]]] = None,
     ) -> dict:
         """Prepare one case without selecting views or updating any parameter."""
         if not patches:
@@ -6124,6 +6429,23 @@ class VoxTellCMTTA:
                 )
             normalized_masks.append(mask.float().contiguous())
         valid_masks = normalized_masks
+        if patch_locations is None:
+            if self.pseudo_component_filter == "largest":
+                raise ValueError(
+                    "largest component filtering requires whole-case patch_locations"
+                )
+            normalized_locations = None
+        else:
+            if len(patch_locations) != len(patches):
+                raise ValueError("patch_locations must align with case patches")
+            normalized_locations = []
+            for location in patch_locations:
+                if len(location) != 3:
+                    raise ValueError("Each patch location must contain (d,h,w)")
+                normalized = tuple(int(value) for value in location)
+                if any(value < 0 for value in normalized):
+                    raise ValueError("Patch locations must be non-negative")
+                normalized_locations.append(normalized)
         if view_params_override is None:
             params = self._sample_intensity_params(self.num_aug_views)
         else:
@@ -6170,6 +6492,7 @@ class VoxTellCMTTA:
             "historical_cac": historical_quality,
             "weight_historical": weight_historical,
             "long_ctx": long_ctx,
+            "patch_locations": normalized_locations,
         }
 
     def adapt_case(
@@ -6180,10 +6503,13 @@ class VoxTellCMTTA:
         teacher_pseudo_provider=None,
         case_basename: Optional[str] = None,
         adaptation_step: int = 1,
+        patch_locations: Optional[list[tuple[int, int, int]]] = None,
     ) -> dict:
         """Adapt once on one complete case, aggregating all patch gradients."""
         if prepared_case is None:
-            prepared_case = self.prepare_case(patches, valid_masks)
+            prepared_case = self.prepare_case(
+                patches, valid_masks, patch_locations=patch_locations
+            )
         patches = prepared_case["patches"]
         valid_masks = prepared_case["valid_masks"]
         params = prepared_case["params"]
@@ -6194,6 +6520,14 @@ class VoxTellCMTTA:
         )
         weight_historical = prepared_case["weight_historical"]
         long_ctx = prepared_case["long_ctx"]
+        prepared_patch_locations = prepared_case.get("patch_locations")
+        if (
+            self.pseudo_component_filter == "largest"
+            and prepared_patch_locations is None
+        ):
+            raise ValueError(
+                "largest component filtering requires prepared patch locations"
+            )
 
         selected_view, selection_scores = self._select_case_view(
             patches, params, short_ctx, valid_masks
@@ -6207,6 +6541,7 @@ class VoxTellCMTTA:
             else pseudo_view_weights
         )
         teacher_pseudo_labels = None
+        component_teacher_cache = None
         if (
             self.pseudo_update_mode == "original"
             and self.pseudo_teacher_inference == "sliding"
@@ -6246,6 +6581,20 @@ class VoxTellCMTTA:
                         f"Sliding teacher patch label is non-finite at patch {patch_index}"
                     )
                 teacher_pseudo_labels.append(label.detach().cpu())
+        if self.pseudo_component_filter == "largest":
+            component_teacher_cache = self._collect_component_filtered_teacher(
+                patches,
+                valid_masks,
+                prepared_patch_locations,
+                params,
+                selected_view,
+                long_ctx,
+                self.device.type == "cuda",
+            )
+            teacher_pseudo_labels = [
+                cache["teacher_probability_corrected"]
+                for cache in component_teacher_cache["patches"]
+            ]
         short_snapshot = short_ctx.detach().clone()
         short_ctx_value = short_snapshot
         short_current_weight = 1.0 - weight_historical
@@ -6282,6 +6631,8 @@ class VoxTellCMTTA:
             "text_rank_pairs": self.text_rank_pairs,
             "text_rank_seed": self.text_rank_seed,
             "text_rank_diagnostics_enabled": self.text_rank_diagnostics,
+            "pseudo_component_filter": self.pseudo_component_filter,
+            "text_rank_negative_source": self.text_rank_negative_source,
             "use_lora": self.use_lora,
             "lora_rank": self.lora_rank if self.use_lora else None,
             "lora_alpha": self.lora_alpha if self.use_lora else None,
@@ -6305,6 +6656,7 @@ class VoxTellCMTTA:
             teacher_pseudo_labels,
             case_basename,
             adaptation_step,
+            component_teacher_cache,
         )
         sums["soft_dice"] = pseudo_loss
         if self.pseudo_update_mode == "decoder_masked":
@@ -6337,6 +6689,7 @@ class VoxTellCMTTA:
             self.use_d4_local_distill
             or self.pseudo_spatial_weighting == "teacher_student_diff"
             or self.use_text_local_response_distill
+            or self.pseudo_component_filter == "largest"
         ):
             sums.update(self._last_pseudo_diagnostics)
         sums["entropy_loss"] = entropy_loss
@@ -6749,6 +7102,8 @@ class VoxTellCMTTA:
             "text_rank_pairs": self.text_rank_pairs,
             "text_rank_seed": self.text_rank_seed,
             "text_rank_diagnostics": self.text_rank_diagnostics,
+            "pseudo_component_filter": self.pseudo_component_filter,
+            "text_rank_negative_source": self.text_rank_negative_source,
             "response_direction": (
                 None
                 if self._response_direction is None
@@ -6863,6 +7218,19 @@ class VoxTellCMTTA:
         if checkpoint_alignment_configuration != current_alignment_configuration:
             raise ValueError(
                 "Checkpoint alignment-loss configuration does not match the "
+                "current adapter"
+            )
+        checkpoint_component_configuration = (
+            str(state.get("pseudo_component_filter", "none")),
+            str(state.get("text_rank_negative_source", "background")),
+        )
+        current_component_configuration = (
+            self.pseudo_component_filter,
+            self.text_rank_negative_source,
+        )
+        if checkpoint_component_configuration != current_component_configuration:
+            raise ValueError(
+                "Checkpoint component-filter configuration does not match the "
                 "current adapter"
             )
         if self.use_text_local_response_distill:

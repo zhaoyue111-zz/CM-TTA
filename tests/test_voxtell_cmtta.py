@@ -22,6 +22,7 @@ from method.voxtell_cmtta import (
     VoxTellCMTTA,
     avg_entropy,
     build_d4_local_teacher_cache,
+    build_largest_component_teacher_cache,
     case_weighted_mean_from_components,
     case_soft_dice_from_components,
     cac_from_features,
@@ -44,6 +45,7 @@ from method.voxtell_cmtta import (
     soft_dice_loss,
     teacher_student_diff_spatial_weight,
     text_rank_pair_loss,
+    text_rank_regions_from_component_cache,
     tdc_from_components,
     tdc_patch_components,
     weighted_masked_dice_components,
@@ -359,6 +361,185 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
+    @staticmethod
+    def _component_filter_fixture():
+        probabilities = [
+            torch.full((1, 1, 3, 3, 3), 0.1),
+            torch.full((1, 1, 3, 3, 3), 0.2),
+        ]
+        # A two-voxel component crosses the W patch boundary.  The isolated
+        # voxel in patch 0 is E.  The high padded voxel in patch 1 is invalid.
+        probabilities[0][0, 0, 0, 0, 2] = 0.8
+        probabilities[1][0, 0, 0, 0, 0] = 0.7
+        probabilities[0][0, 0, 2, 2, 0] = 0.9
+        probabilities[1][0, 0, 2, 2, 2] = 0.99
+        valid_masks = [torch.ones(3, 3, 3), torch.ones(3, 3, 3)]
+        valid_masks[1][2, 2, 2] = 0.0
+        locations = [(0, 0, 0), (0, 0, 3)]
+        return probabilities, valid_masks, locations
+
+    def test_largest_component_is_case_level_26_connected_and_excludes_padding(self):
+        probabilities, valid_masks, locations = self._component_filter_fixture()
+        cache = build_largest_component_teacher_cache(
+            probabilities, valid_masks, locations
+        )
+        self.assertEqual(cache["case_shape"], (3, 3, 6))
+        self.assertEqual(cache["component_count"], 2)
+        self.assertEqual(cache["original_foreground_voxels"], 3)
+        self.assertEqual(cache["largest_component_voxels"], 2)
+        self.assertEqual(cache["removed_component_voxels"], 1)
+        first, second = cache["patches"]
+        self.assertEqual(first["largest_indices"].tolist(), [2])
+        self.assertEqual(second["largest_indices"].tolist(), [0])
+        self.assertEqual(first["removed_indices"].tolist(), [24])
+        self.assertEqual(second["removed_indices"].numel(), 0)
+        self.assertNotIn(26, second["foreground_indices"].tolist())
+
+    def test_component_filter_only_zeros_removed_and_masks_its_entropy_gradient(self):
+        probabilities, valid_masks, locations = self._component_filter_fixture()
+        cache = build_largest_component_teacher_cache(
+            probabilities, valid_masks, locations
+        )
+        first = cache["patches"][0]
+        corrected = first["teacher_probability_corrected"]
+        original = first["teacher_probability_original"]
+        self.assertEqual(float(corrected[0, 0, 2, 2, 0]), 0.0)
+        self.assertEqual(
+            float(corrected[0, 0, 0, 0, 2]),
+            float(original[0, 0, 0, 0, 2]),
+        )
+        self.assertEqual(
+            float(corrected[0, 0, 1, 1, 1]),
+            float(original[0, 0, 1, 1, 1]),
+        )
+
+        logits = torch.linspace(-1.3, 1.1, 27).reshape(1, 1, 3, 3, 3)
+        logits.requires_grad_(True)
+        entropy_sum, entropy_mass = masked_entropy_components(
+            torch.sigmoid(logits), first["entropy_valid_mask"].unsqueeze(0)
+        )
+        (entropy_sum / entropy_mass).backward()
+        self.assertEqual(float(logits.grad[0, 0, 2, 2, 0]), 0.0)
+        self.assertGreater(float(logits.grad[0, 0, 0, 0, 2].abs()), 0.0)
+
+    def test_removed_component_rank_regions_and_empty_cases(self):
+        probabilities, valid_masks, locations = self._component_filter_fixture()
+        cache = build_largest_component_teacher_cache(
+            probabilities, valid_masks, locations
+        )
+        regions = text_rank_regions_from_component_cache(
+            cache, "removed_components"
+        )
+        plan = sample_text_rank_pairs(regions, 97, seed=31)
+        self.assertEqual(plan["pair_count"], 97)
+        for patch_index, patch_plan in enumerate(plan["per_patch"]):
+            self.assertTrue(
+                set(patch_plan["foreground_flat_indices"].tolist())
+                <= set(cache["patches"][patch_index]["largest_indices"].tolist())
+            )
+            self.assertTrue(
+                set(patch_plan["background_flat_indices"].tolist())
+                <= set(cache["patches"][patch_index]["removed_indices"].tolist())
+            )
+
+        one_component_probability = torch.full((1, 1, 2, 2, 2), 0.2)
+        one_component_probability[0, 0, 0, 0, 0] = 0.8
+        single_component = build_largest_component_teacher_cache(
+            [one_component_probability], [torch.ones(2, 2, 2)], [(0, 0, 0)]
+        )
+        single_regions = text_rank_regions_from_component_cache(
+            single_component, "removed_components"
+        )
+        skipped = sample_text_rank_pairs(single_regions, 16, seed=31)
+        self.assertEqual(skipped["pair_count"], 0)
+        self.assertEqual(skipped["skip_reason"], "no_valid_background")
+
+        no_foreground = build_largest_component_teacher_cache(
+            [torch.full((1, 1, 2, 2, 2), 0.2)],
+            [torch.ones(2, 2, 2)],
+            [(0, 0, 0)],
+        )
+        no_foreground_regions = text_rank_regions_from_component_cache(
+            no_foreground, "removed_components"
+        )
+        skipped = sample_text_rank_pairs(no_foreground_regions, 16, seed=31)
+        self.assertEqual(skipped["pair_count"], 0)
+        self.assertEqual(skipped["skip_reason"], "no_valid_foreground")
+
+    def test_component_filter_ab_uses_identical_dice_entropy_cache(self):
+        probabilities, valid_masks, locations = self._component_filter_fixture()
+        component_cache = build_largest_component_teacher_cache(
+            probabilities, valid_masks, locations
+        )
+        labels = [
+            patch["teacher_probability_corrected"]
+            for patch in component_cache["patches"]
+        ]
+        base_model = TinyTextRankVoxTell()
+        adapter_a = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(
+                alignment_loss="cac",
+                w_cac=0.0,
+                pseudo_component_filter="largest",
+                view_selection_metric="tdc",
+                num_aug_views=1,
+            ),
+        )
+        adapter_b = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(
+                alignment_loss="text_rank",
+                w_cac=0.0,
+                w_text_rank=0.1,
+                pseudo_component_filter="largest",
+                text_rank_negative_source="removed_components",
+                view_selection_metric="tdc",
+                num_aug_views=1,
+            ),
+        )
+        patches = [torch.zeros(1, 3, 3, 3), torch.ones(1, 3, 3, 3)]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+        ]
+        try:
+            statistics = []
+            for adapter in (adapter_a, adapter_b):
+                statistics.append(
+                    adapter._forward_case_supervision_stats(
+                        patches,
+                        valid_masks,
+                        params,
+                        0,
+                        adapter.ctx_delta.detach().clone(),
+                        1.0,
+                        adapter.ctx_delta.detach().clone(),
+                        False,
+                        labels,
+                        component_teacher_cache=component_cache,
+                    )
+                )
+            for key in (
+                "intersection",
+                "prediction_mass",
+                "pseudo_mass",
+                "entropy_sum",
+                "entropy_mass",
+            ):
+                self.assertTrue(torch.equal(statistics[0][key], statistics[1][key]))
+            self.assertEqual(
+                adapter_a.model.forward_call_count,
+                adapter_b.model.forward_call_count,
+            )
+        finally:
+            adapter_a.close()
+            adapter_b.close()
+
     def test_text_rank_d5_hook_reconstructs_logits_and_sampling_excludes_padding(self):
         adapter = VoxTellCMTTA(
             TinyTextRankVoxTell(),
@@ -424,6 +605,9 @@ class VoxTellCMTTATest(unittest.TestCase):
                 text_rank_temperature=0.2,
                 text_rank_pairs=41,
                 text_rank_seed=23,
+                pseudo_component_filter="largest",
+                text_rank_negative_source="removed_components",
+                view_selection_metric="tdc",
             ),
         )
         direct = VoxTellCMTTA(
@@ -437,6 +621,9 @@ class VoxTellCMTTATest(unittest.TestCase):
                 text_rank_temperature=0.2,
                 text_rank_pairs=41,
                 text_rank_seed=23,
+                pseudo_component_filter="largest",
+                text_rank_negative_source="removed_components",
+                view_selection_metric="tdc",
             ),
         )
         patches = [
@@ -444,16 +631,21 @@ class VoxTellCMTTATest(unittest.TestCase):
             torch.linspace(-0.7, 1.3, 8).reshape(1, 2, 2, 2),
         ]
         masks = [torch.ones(2, 2, 2), torch.ones(2, 2, 2)]
-        regions = [
-            {
-                "foreground_indices": torch.tensor([4, 5, 6, 7]),
-                "background_indices": torch.tensor([0, 1, 2, 3]),
-            },
-            {
-                "foreground_indices": torch.tensor([3, 4, 5, 6, 7]),
-                "background_indices": torch.tensor([0, 1, 2]),
-            },
-        ]
+        component_cache = {
+            "patches": [
+                {
+                    "largest_indices": torch.tensor([4, 5, 6, 7]),
+                    "removed_indices": torch.tensor([0, 1, 2, 3]),
+                },
+                {
+                    "largest_indices": torch.tensor([3, 4, 5, 6, 7]),
+                    "removed_indices": torch.tensor([0, 1, 2]),
+                },
+            ]
+        }
+        regions = text_rank_regions_from_component_cache(
+            component_cache, "removed_components"
+        )
         params = [{"scale": 1.0, "offset": 0.0}]
         short_ctx_value = torch.tensor([[0.65, -0.1]])
         short_current_weight = 0.37
@@ -693,6 +885,31 @@ class VoxTellCMTTATest(unittest.TestCase):
             self.assertTrue(state_with_diagnostics["text_rank_diagnostics"])
             diagnostics_off.load_state_dict(state_with_diagnostics)
             self.assertFalse(diagnostics_off.text_rank_diagnostics)
+
+            legacy_state = copy.deepcopy(state_without_diagnostics)
+            legacy_state.pop("pseudo_component_filter")
+            legacy_state.pop("text_rank_negative_source")
+            diagnostics_on.load_state_dict(legacy_state)
+
+            largest = VoxTellCMTTA(
+                TinyTextRankVoxTell(),
+                torch.tensor([[[0.8, -0.25]]]),
+                "cpu",
+                make_args(
+                    **common,
+                    text_rank_diagnostics=False,
+                    pseudo_component_filter="largest",
+                    text_rank_negative_source="removed_components",
+                    view_selection_metric="tdc",
+                ),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ValueError, "component-filter configuration"
+                ):
+                    largest.load_state_dict(legacy_state)
+            finally:
+                largest.close()
         finally:
             diagnostics_off.close()
             diagnostics_on.close()

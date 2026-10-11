@@ -1133,6 +1133,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--pseudo_component_filter",
+        choices=("none", "largest"),
+        default="none",
+        help=(
+            "Optional whole-case 26-connected teacher foreground correction; "
+            "none preserves existing pseudo labels."
+        ),
+    )
+    parser.add_argument(
+        "--text_rank_negative_source",
+        choices=("background", "removed_components"),
+        default="background",
+        help=(
+            "Negative region for text_rank; removed_components requires the "
+            "largest component filter."
+        ),
+    )
+    parser.add_argument(
         "--use_lora",
         action="store_true",
         help=(
@@ -1447,6 +1465,7 @@ def main() -> None:
                 patches,
                 valid_masks,
                 view_params_override=expected_view_params,
+                patch_locations=_locations,
             )
             if (
                 expected_view_params is not None
