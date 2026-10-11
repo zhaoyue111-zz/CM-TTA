@@ -1109,6 +1109,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w_cac", type=float, default=1.0)
     parser.add_argument("--w_entropy", type=float, default=0.1)
     parser.add_argument(
+        "--alignment_loss",
+        choices=("cac", "text_rank"),
+        default="cac",
+        help="Auxiliary alignment objective; cac preserves existing experiments.",
+    )
+    parser.add_argument(
+        "--w_text_rank",
+        type=float,
+        default=0.01,
+        help="Weight of the selected-view D5 text foreground/background rank loss.",
+    )
+    parser.add_argument("--text_rank_margin", type=float, default=0.0)
+    parser.add_argument("--text_rank_temperature", type=float, default=0.1)
+    parser.add_argument("--text_rank_pairs", type=int, default=2048)
+    parser.add_argument("--text_rank_seed", type=int, default=1377)
+    parser.add_argument(
+        "--text_rank_diagnostics",
+        action="store_true",
+        help=(
+            "Record sampled D5 score, einsum reconstruction, and actual "
+            "pre-clipping ctx-gradient diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--use_lora",
         action="store_true",
         help=(

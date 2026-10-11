@@ -29,6 +29,135 @@ D4_FUSION_CHANNELS = 32
 D4_LOCAL_WINDOW_SIZE = 5
 D4_LOCAL_COSINE_EPS = 1e-6
 PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS = 4096
+TEXT_RANK_COSINE_EPS = 1e-8
+
+
+def d5_text_alignment_scores(
+    g5: torch.Tensor,
+    v5: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return FP32 cosine scores and the matching final-einsum dot product.
+
+    ``g5`` is VoxTell's final mask/query embedding ``(B,N,C)`` and ``v5`` is
+    the final decoder-stage feature ``(B,C,D,H,W)``.  The returned dot product
+    is therefore exactly the FP32 reconstruction of the D5 einsum logits.
+    """
+    if g5.ndim != 3 or v5.ndim != 5:
+        raise ValueError("g5/v5 must have shapes (B,N,C) and (B,C,D,H,W)")
+    if g5.shape[0] != v5.shape[0] or g5.shape[2] != v5.shape[1]:
+        raise ValueError("g5/v5 batch or channel dimensions do not match")
+    query = g5.float()
+    voxels = v5.float()
+    dot = torch.einsum("b n c, b c d h w -> b n d h w", query, voxels)
+    query_norm = torch.linalg.vector_norm(query, dim=-1).clamp_min(
+        TEXT_RANK_COSINE_EPS
+    )
+    voxel_norm = torch.linalg.vector_norm(voxels, dim=1).clamp_min(
+        TEXT_RANK_COSINE_EPS
+    )
+    scores = dot / (
+        query_norm[:, :, None, None, None]
+        * voxel_norm[:, None, :, :, :]
+    )
+    return scores, dot
+
+
+def text_rank_pair_loss(
+    foreground_scores: torch.Tensor,
+    background_scores: torch.Tensor,
+    margin: float,
+    temperature: float,
+) -> torch.Tensor:
+    """Mean paired ranking loss; pairs are never collapsed to region means."""
+    if foreground_scores.shape != background_scores.shape:
+        raise ValueError("Foreground/background score arrays must have equal shape")
+    if foreground_scores.ndim != 1 or foreground_scores.numel() == 0:
+        raise ValueError("Text ranking requires a non-empty 1-D pair array")
+    if not np.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError("Text ranking temperature must be finite and positive")
+    return F.softplus(
+        (float(margin) + background_scores - foreground_scores)
+        / float(temperature)
+    ).mean()
+
+
+def sample_text_rank_pairs(
+    region_caches: list[dict[str, torch.Tensor]],
+    num_pairs: int,
+    seed: int,
+) -> dict[str, object]:
+    """Sample whole-case foreground/background positions with replacement.
+
+    Sampling uses only a private CPU generator.  The returned per-patch plan
+    contains stable global pair ids, so statistics and replay use identical
+    voxel pairs without concatenating full-case feature maps.
+    """
+    if num_pairs <= 0:
+        raise ValueError("num_pairs must be positive")
+    foreground_counts = torch.tensor(
+        [int(cache["foreground_indices"].numel()) for cache in region_caches],
+        dtype=torch.long,
+    )
+    background_counts = torch.tensor(
+        [int(cache["background_indices"].numel()) for cache in region_caches],
+        dtype=torch.long,
+    )
+    foreground_total = int(foreground_counts.sum().item())
+    background_total = int(background_counts.sum().item())
+    result: dict[str, object] = {
+        "foreground_valid_count": foreground_total,
+        "background_valid_count": background_total,
+        "pair_count": 0,
+        "seed": int(seed),
+        "per_patch": [
+            {
+                "foreground_pair_ids": torch.empty(0, dtype=torch.long),
+                "foreground_flat_indices": torch.empty(0, dtype=torch.long),
+                "background_pair_ids": torch.empty(0, dtype=torch.long),
+                "background_flat_indices": torch.empty(0, dtype=torch.long),
+            }
+            for _ in region_caches
+        ],
+    }
+    if foreground_total == 0 or background_total == 0:
+        result["skip_reason"] = (
+            "no_valid_foreground" if foreground_total == 0 else "no_valid_background"
+        )
+        return result
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(int(seed))
+    foreground_draws = torch.randint(
+        foreground_total, (num_pairs,), generator=generator
+    )
+    background_draws = torch.randint(
+        background_total, (num_pairs,), generator=generator
+    )
+
+    def assign(
+        draws: torch.Tensor,
+        counts: torch.Tensor,
+        region_name: str,
+    ) -> None:
+        cumulative = counts.cumsum(dim=0)
+        patch_ids = torch.searchsorted(cumulative, draws, right=True)
+        previous = torch.cat((torch.zeros(1, dtype=torch.long), cumulative[:-1]))
+        local_ordinals = draws - previous[patch_ids]
+        for patch_index, cache in enumerate(region_caches):
+            pair_ids = torch.nonzero(patch_ids == patch_index, as_tuple=False).flatten()
+            if pair_ids.numel() == 0:
+                continue
+            candidate_indices = cache[f"{region_name}_indices"].long().cpu()
+            flat_indices = candidate_indices[local_ordinals[pair_ids]]
+            plan = result["per_patch"][patch_index]
+            plan[f"{region_name}_pair_ids"] = pair_ids
+            plan[f"{region_name}_flat_indices"] = flat_indices
+
+    assign(foreground_draws, foreground_counts, "foreground")
+    assign(background_draws, background_counts, "background")
+    result["pair_count"] = int(num_pairs)
+    result["skip_reason"] = None
+    return result
 
 
 class ResponseDiagnosticsAccumulator:
@@ -1610,6 +1739,30 @@ class VoxTellCMTTA:
         self.ema_momentum = float(args.ema_momentum)
         self.w_cac = float(args.w_cac)
         self.w_entropy = float(args.w_entropy)
+        self.alignment_loss = str(getattr(args, "alignment_loss", "cac"))
+        self.w_text_rank = float(getattr(args, "w_text_rank", 0.01))
+        self.text_rank_margin = float(getattr(args, "text_rank_margin", 0.0))
+        self.text_rank_temperature = float(
+            getattr(args, "text_rank_temperature", 0.1)
+        )
+        self.text_rank_pairs = int(getattr(args, "text_rank_pairs", 2048))
+        self.text_rank_seed = int(getattr(args, "text_rank_seed", 1377))
+        self.text_rank_diagnostics = bool(
+            getattr(args, "text_rank_diagnostics", False)
+        )
+        if self.alignment_loss not in ("cac", "text_rank"):
+            raise ValueError("alignment_loss must be 'cac' or 'text_rank'")
+        if not np.isfinite(self.w_text_rank) or self.w_text_rank < 0.0:
+            raise ValueError("w_text_rank must be finite and non-negative")
+        if not np.isfinite(self.text_rank_margin):
+            raise ValueError("text_rank_margin must be finite")
+        if (
+            not np.isfinite(self.text_rank_temperature)
+            or self.text_rank_temperature <= 0.0
+        ):
+            raise ValueError("text_rank_temperature must be finite and positive")
+        if self.text_rank_pairs <= 0:
+            raise ValueError("text_rank_pairs must be positive")
         self.use_d4_local_distill = bool(
             getattr(args, "use_d4_local_distill", False)
         )
@@ -1845,6 +1998,26 @@ class VoxTellCMTTA:
                     "gradient_conflict_diagnostics is not supported with text "
                     "local response distillation"
                 )
+        if self.alignment_loss == "text_rank":
+            if self.pseudo_update_mode != "original":
+                raise ValueError("text_rank alignment requires pseudo_update_mode='original'")
+            if self.pseudo_teacher_inference != "patch":
+                raise ValueError(
+                    "text_rank alignment requires non-overlap patch teacher inference"
+                )
+            if self.use_lora or self.use_d4_local_distill:
+                raise ValueError(
+                    "text_rank alignment is a ctx-only experiment with LoRA and "
+                    "D4 local distillation disabled"
+                )
+            if self.use_text_local_response_distill:
+                raise ValueError(
+                    "text_rank alignment cannot be combined with text response loss"
+                )
+            if self.gradient_conflict_diagnostics:
+                raise ValueError(
+                    "gradient_conflict_diagnostics is not supported with text_rank"
+                )
 
         self._lora_modules: list[
             tuple[str, LoRAPackedQKVMultiheadAttention]
@@ -1887,6 +2060,9 @@ class VoxTellCMTTA:
         self._text_features = None
         self._d4_fusion_features = None
         self._capture_d4_fusion_enabled = False
+        self._d5_alignment_query = None
+        self._d5_alignment_voxels = None
+        self._capture_d5_alignment_enabled = False
         self._hooks = [
             self.model.project_bottleneck_embed.register_forward_hook(
                 self._capture("vision")
@@ -1918,11 +2094,31 @@ class VoxTellCMTTA:
                     self._capture_d4_fusion
                 )
             )
+        if self.alignment_loss == "text_rank":
+            decoder = getattr(base_model, "decoder", None)
+            stages = getattr(decoder, "stages", None)
+            projections = getattr(base_model, "project_to_decoder_channels", None)
+            if stages is None or len(stages) == 0 or projections is None or len(projections) == 0:
+                raise RuntimeError(
+                    "text_rank requires VoxTell's final decoder stage and "
+                    "project_to_decoder_channels[0]"
+                )
+            self._hooks.extend(
+                [
+                    projections[0].register_forward_hook(
+                        self._capture_d5_alignment_query
+                    ),
+                    stages[-1].register_forward_hook(
+                        self._capture_d5_alignment_voxels
+                    ),
+                ]
+            )
         self.last_trace = {}
         self.last_view_selection = {}
         self._last_pseudo_diagnostics = {}
         self._last_decoder_pseudo_cache = None
         self._last_gradient_conflict_diagnostics = None
+        self._last_text_rank_region_caches = None
         self._print_trainable_parameters()
 
     def reset_case_adaptation_state(self) -> None:
@@ -1942,6 +2138,7 @@ class VoxTellCMTTA:
         self.last_trace = {}
         self.last_view_selection = {}
         self._last_gradient_conflict_diagnostics = None
+        self._last_text_rank_region_caches = None
 
     def _capture(self, name):
         def hook(_module, _inputs, output):
@@ -1962,6 +2159,20 @@ class VoxTellCMTTA:
         if concatenated.shape[1] < D4_FUSION_CHANNELS:
             raise RuntimeError("D4 segmentation head input lacks fusion channels")
         self._d4_fusion_features = concatenated[:, -D4_FUSION_CHANNELS:]
+
+    def _capture_d5_alignment_query(self, _module, _inputs, output) -> None:
+        """Capture the query that the final D5 einsum actually consumes."""
+        if self._capture_d5_alignment_enabled:
+            if not torch.is_tensor(output) or output.ndim != 3:
+                raise RuntimeError("Final D5 query projection returned an invalid tensor")
+            self._d5_alignment_query = output
+
+    def _capture_d5_alignment_voxels(self, _module, _inputs, output) -> None:
+        """Capture the final decoder feature immediately before the D5 einsum."""
+        if self._capture_d5_alignment_enabled:
+            if not torch.is_tensor(output) or output.ndim != 5:
+                raise RuntimeError("Final D5 decoder stage returned an invalid tensor")
+            self._d5_alignment_voxels = output
 
     def _initialize_qwen_context(
         self,
@@ -2346,6 +2557,34 @@ class VoxTellCMTTA:
         if logits.ndim != 5:
             raise ValueError(f"VoxTell must return (B,N,D,H,W) logits, got {logits.shape}")
         return logits
+
+    def _forward_with_d5_alignment(
+        self, images: torch.Tensor, ctx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the ordinary forward once and return its exact D5 einsum inputs."""
+        self._d5_alignment_query = None
+        self._d5_alignment_voxels = None
+        self._capture_d5_alignment_enabled = True
+        try:
+            logits = self._forward(images, ctx)
+            query = self._d5_alignment_query
+            voxels = self._d5_alignment_voxels
+            if query is None or voxels is None:
+                raise RuntimeError("D5 alignment hooks did not observe the final einsum")
+            if logits.shape[0] != query.shape[0] or logits.shape[0] != voxels.shape[0]:
+                raise RuntimeError("D5 logits/query/voxel batch dimensions disagree")
+            if query.shape[1] != logits.shape[1]:
+                raise RuntimeError("D5 query count does not match logit channels")
+            if tuple(voxels.shape[2:]) != tuple(logits.shape[2:]):
+                raise RuntimeError(
+                    "D5 final decoder spatial axes do not match returned logits: "
+                    f"{tuple(voxels.shape[2:])} vs {tuple(logits.shape[2:])}"
+                )
+            return logits, query, voxels
+        finally:
+            self._capture_d5_alignment_enabled = False
+            self._d5_alignment_query = None
+            self._d5_alignment_voxels = None
 
     def _initialize_text_response_perturbation(self) -> None:
         """Create one fixed detached direction orthogonal to canonical liver q0."""
@@ -3195,6 +3434,7 @@ class VoxTellCMTTA:
             PSEUDO_SPATIAL_DIAGNOSTIC_HISTOGRAM_BINS, dtype=torch.float64
         )
         response_teacher_caches: list[dict[str, torch.Tensor]] = []
+        text_rank_region_caches: list[dict[str, torch.Tensor]] = []
         response_squared_sum = None
         response_valid_count = 0
         response_teacher_squared_sum = None
@@ -3278,6 +3518,20 @@ class VoxTellCMTTA:
                             "teacher",
                             selected_view,
                         )
+                if self.alignment_loss == "text_rank":
+                    valid_region = input_mask.unsqueeze(1).bool()
+                    foreground_region = (pseudo_label >= 0.5) & valid_region
+                    background_region = (pseudo_label < 0.5) & valid_region
+                    text_rank_region_caches.append(
+                        {
+                            "foreground_indices": torch.nonzero(
+                                foreground_region.reshape(-1), as_tuple=False
+                            ).flatten().cpu(),
+                            "background_indices": torch.nonzero(
+                                background_region.reshape(-1), as_tuple=False
+                            ).flatten().cpu(),
+                        }
+                    )
                 if self.use_d4_local_distill:
                     d4_target, d4_valid = downsample_soft_label_and_valid_mask(
                         pseudo_label,
@@ -3527,6 +3781,11 @@ class VoxTellCMTTA:
             and len(response_teacher_caches) != len(patches)
         ):
             raise RuntimeError("Text response teacher cache is incomplete")
+        if (
+            self.alignment_loss == "text_rank"
+            and len(text_rank_region_caches) != len(patches)
+        ):
+            raise RuntimeError("Text-rank teacher-region cache is incomplete")
         local_diagnostics = summarize_d4_local_diagnostics(
             local_cosine_values,
             local_teacher_norm_values,
@@ -3589,6 +3848,7 @@ class VoxTellCMTTA:
             "response_cache_seed": self.response_seed,
             "response_diagnostic_accumulator": response_diagnostic_accumulator,
             "response_diagnostic_adaptation_step": int(adaptation_step),
+            "text_rank_region_caches": text_rank_region_caches,
             "entropy_sum": entropy_sum,
             "entropy_mass": entropy_mass,
             "d4_local_loss_sum": local_loss_sum,
@@ -4762,6 +5022,11 @@ class VoxTellCMTTA:
             case_basename,
             adaptation_step,
         )
+        self._last_text_rank_region_caches = (
+            stats["text_rank_region_caches"]
+            if self.alignment_loss == "text_rank"
+            else None
+        )
         global_dice_inputs = tuple(
             stats[key].detach().requires_grad_(True)
             for key in ("intersection", "prediction_mass", "pseudo_mass")
@@ -5038,6 +5303,13 @@ class VoxTellCMTTA:
             "response_seed": self.response_seed,
             "response_normalization": self.response_normalization,
             "response_energy_floor": self.response_energy_floor,
+            "alignment_loss": self.alignment_loss,
+            "w_text_rank": self.w_text_rank,
+            "text_rank_margin": self.text_rank_margin,
+            "text_rank_temperature": self.text_rank_temperature,
+            "text_rank_pairs": self.text_rank_pairs,
+            "text_rank_seed": self.text_rank_seed,
+            "text_rank_diagnostics": self.text_rank_diagnostics,
             "pseudo_unweighted_soft_dice": float(
                 unweighted_global_dice.detach().cpu()
             ),
@@ -5403,6 +5675,341 @@ class VoxTellCMTTA:
                 self.scaler.scale(local_objective).backward()
         return float(cac_loss.cpu())
 
+    def _backward_case_text_rank(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        params: list[dict[str, float]],
+        selected_view: int,
+        short_ctx_value: torch.Tensor,
+        short_current_weight: float,
+        autocast_enabled: bool,
+        adaptation_step: int,
+    ) -> dict[str, object]:
+        """Backpropagate one whole-case sampled D5 text/region rank objective."""
+        region_caches = self._last_text_rank_region_caches
+        if not isinstance(region_caches, list) or len(region_caches) != len(patches):
+            raise RuntimeError("Text-rank teacher regions are missing or stale")
+        effective_seed = (
+            self.text_rank_seed
+            + 1_000_003 * int(self.optimizer_step_count)
+            + int(adaptation_step) - 1
+        )
+        plan = sample_text_rank_pairs(
+            region_caches, self.text_rank_pairs, effective_seed
+        )
+        result: dict[str, object] = {
+            "alignment_loss": "text_rank",
+            "text_rank_loss": 0.0,
+            "text_rank_raw_loss": 0.0,
+            "weighted_text_rank_loss": 0.0,
+            "w_text_rank": self.w_text_rank,
+            "text_rank_margin": self.text_rank_margin,
+            "text_rank_temperature": self.text_rank_temperature,
+            "text_rank_pairs_requested": self.text_rank_pairs,
+            "text_rank_pairs_actual": int(plan["pair_count"]),
+            "text_rank_seed": self.text_rank_seed,
+            "text_rank_effective_seed": effective_seed,
+            "text_rank_valid_foreground_voxels": int(
+                plan["foreground_valid_count"]
+            ),
+            "text_rank_valid_background_voxels": int(
+                plan["background_valid_count"]
+            ),
+            "text_rank_skip_reason": plan["skip_reason"],
+        }
+        pair_count = int(plan["pair_count"])
+        if pair_count == 0:
+            if self.text_rank_diagnostics:
+                result["text_rank_diagnostics"] = {
+                    "skipped": True,
+                    "skip_reason": plan["skip_reason"],
+                    "finite_checks": {
+                        "scores": None,
+                        "loss": None,
+                        "score_gradients": None,
+                    },
+                    "gap_interpretation": (
+                        "teacher-defined region matching difference; not a "
+                        "TP/FP/FN discrimination metric"
+                    ),
+                }
+            return result
+
+        foreground_scores = torch.empty(
+            pair_count, device=self.device, dtype=torch.float32
+        )
+        background_scores = torch.empty_like(foreground_scores)
+        foreground_seen = torch.zeros(pair_count, dtype=torch.bool)
+        background_seen = torch.zeros(pair_count, dtype=torch.bool)
+        foreground_v_norms: list[torch.Tensor] = []
+        background_v_norms: list[torch.Tensor] = []
+        sampled_g_norms: list[torch.Tensor] = []
+        reconstruction_absolute_sum = 0.0
+        reconstruction_absolute_max = 0.0
+        reconstruction_element_count = 0
+
+        with torch.no_grad():
+            for patch_index, (patch, valid_mask) in enumerate(
+                zip(patches, valid_masks)
+            ):
+                patch_plan = plan["per_patch"][patch_index]
+                foreground_pair_ids = patch_plan["foreground_pair_ids"]
+                background_pair_ids = patch_plan["background_pair_ids"]
+                if foreground_pair_ids.numel() + background_pair_ids.numel() == 0:
+                    continue
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                with torch.autocast(
+                    device_type=self.device.type, enabled=autocast_enabled
+                ):
+                    student_ctx = short_ctx_value + short_current_weight * (
+                        self.ctx_delta - self.ctx_delta.detach()
+                    )
+                    logits, g5, v5 = self._forward_with_d5_alignment(
+                        selected, student_ctx
+                    )
+                score_grid, reconstructed_logits = d5_text_alignment_scores(g5, v5)
+                if score_grid.shape[1] != 1:
+                    raise RuntimeError(
+                        "text_rank expects the fixed single liver query at D5"
+                    )
+                score_flat = score_grid[:, 0].reshape(-1)
+                voxel_norm_flat = torch.linalg.vector_norm(
+                    v5.float(), dim=1
+                ).reshape(-1)
+                query_norm = torch.linalg.vector_norm(g5[:, 0].float(), dim=-1)
+                reconstruction_error = (
+                    reconstructed_logits[:, :1] - logits[:, :1].float()
+                ).abs()
+                reconstruction_absolute_sum += float(
+                    reconstruction_error.double().sum().cpu()
+                )
+                reconstruction_element_count += int(reconstruction_error.numel())
+                if reconstruction_error.numel() > 0:
+                    reconstruction_absolute_max = max(
+                        reconstruction_absolute_max,
+                        float(reconstruction_error.max().cpu()),
+                    )
+
+                for region_name, destination, seen, norm_values in (
+                    (
+                        "foreground",
+                        foreground_scores,
+                        foreground_seen,
+                        foreground_v_norms,
+                    ),
+                    (
+                        "background",
+                        background_scores,
+                        background_seen,
+                        background_v_norms,
+                    ),
+                ):
+                    pair_ids_cpu = patch_plan[f"{region_name}_pair_ids"]
+                    flat_indices_cpu = patch_plan[f"{region_name}_flat_indices"]
+                    if pair_ids_cpu.numel() == 0:
+                        continue
+                    pair_ids = pair_ids_cpu.to(self.device)
+                    flat_indices = flat_indices_cpu.to(self.device)
+                    destination[pair_ids] = score_flat[flat_indices]
+                    seen[pair_ids_cpu] = True
+                    if self.text_rank_diagnostics:
+                        norm_values.append(voxel_norm_flat[flat_indices].detach().cpu())
+                        sampled_g_norms.append(
+                            query_norm.detach().cpu().expand(pair_ids_cpu.numel())
+                        )
+
+        if not bool(foreground_seen.all()) or not bool(background_seen.all()):
+            raise RuntimeError("Text-rank score collection did not cover every sampled pair")
+        scores_finite = bool(
+            torch.isfinite(foreground_scores).all()
+            and torch.isfinite(background_scores).all()
+        )
+        if not scores_finite:
+            result["text_rank_skip_reason"] = "nonfinite_sampled_scores"
+            if self.text_rank_diagnostics:
+                result["text_rank_diagnostics"] = {
+                    "skipped": True,
+                    "skip_reason": "nonfinite_sampled_scores",
+                    "finite_checks": {
+                        "scores": False,
+                        "loss": None,
+                        "score_gradients": None,
+                    },
+                }
+            return result
+
+        foreground_leaf = foreground_scores.detach().requires_grad_(True)
+        background_leaf = background_scores.detach().requires_grad_(True)
+        raw_loss = text_rank_pair_loss(
+            foreground_leaf,
+            background_leaf,
+            self.text_rank_margin,
+            self.text_rank_temperature,
+        )
+        loss_finite = bool(torch.isfinite(raw_loss))
+        if not loss_finite:
+            result["text_rank_skip_reason"] = "nonfinite_text_rank_loss"
+            if self.text_rank_diagnostics:
+                result["text_rank_diagnostics"] = {
+                    "skipped": True,
+                    "skip_reason": "nonfinite_text_rank_loss",
+                    "finite_checks": {
+                        "scores": True,
+                        "loss": False,
+                        "score_gradients": None,
+                    },
+                }
+            return result
+        foreground_derivative, background_derivative = torch.autograd.grad(
+            raw_loss, (foreground_leaf, background_leaf)
+        )
+        derivatives_finite = bool(
+            torch.isfinite(foreground_derivative).all()
+            and torch.isfinite(background_derivative).all()
+        )
+        if not derivatives_finite:
+            result["text_rank_skip_reason"] = "nonfinite_score_derivatives"
+            if self.text_rank_diagnostics:
+                result["text_rank_diagnostics"] = {
+                    "skipped": True,
+                    "skip_reason": "nonfinite_score_derivatives",
+                    "finite_checks": {
+                        "scores": True,
+                        "loss": True,
+                        "score_gradients": False,
+                    },
+                }
+            return result
+
+        weighted_loss = self.w_text_rank * raw_loss.detach()
+        result.update(
+            {
+                "text_rank_loss": float(raw_loss.detach().cpu()),
+                "text_rank_raw_loss": float(raw_loss.detach().cpu()),
+                "weighted_text_rank_loss": float(weighted_loss.cpu()),
+                "text_rank_skip_reason": None,
+            }
+        )
+
+        # Replay only patches containing sampled positions.  The derivatives
+        # above are those of the one whole-case paired objective, so summing
+        # these local vector-Jacobian products is exactly the global gradient.
+        for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
+            patch_plan = plan["per_patch"][patch_index]
+            foreground_pair_ids_cpu = patch_plan["foreground_pair_ids"]
+            background_pair_ids_cpu = patch_plan["background_pair_ids"]
+            if (
+                foreground_pair_ids_cpu.numel()
+                + background_pair_ids_cpu.numel()
+                == 0
+            ):
+                continue
+            selected = self._make_view_batch(
+                patch, params, valid_mask, selected_view, selected_view + 1
+            ).to(self.device, non_blocking=True)
+            with torch.autocast(
+                device_type=self.device.type, enabled=autocast_enabled
+            ):
+                student_ctx = short_ctx_value + short_current_weight * (
+                    self.ctx_delta - self.ctx_delta.detach()
+                )
+                _logits, g5, v5 = self._forward_with_d5_alignment(
+                    selected, student_ctx
+                )
+            score_flat = d5_text_alignment_scores(g5, v5)[0][:, 0].reshape(-1)
+            local_terms = []
+            if foreground_pair_ids_cpu.numel() > 0:
+                pair_ids = foreground_pair_ids_cpu.to(self.device)
+                flat_indices = patch_plan["foreground_flat_indices"].to(self.device)
+                local_terms.append(
+                    (
+                        score_flat[flat_indices]
+                        * foreground_derivative[pair_ids]
+                        * self.w_text_rank
+                    ).sum()
+                )
+            if background_pair_ids_cpu.numel() > 0:
+                pair_ids = background_pair_ids_cpu.to(self.device)
+                flat_indices = patch_plan["background_flat_indices"].to(self.device)
+                local_terms.append(
+                    (
+                        score_flat[flat_indices]
+                        * background_derivative[pair_ids]
+                        * self.w_text_rank
+                    ).sum()
+                )
+            if local_terms:
+                self.scaler.scale(sum(local_terms)).backward()
+
+        if self.text_rank_diagnostics:
+            foreground_detached = foreground_scores.detach().cpu()
+            background_detached = background_scores.detach().cpu()
+            gap = foreground_detached - background_detached
+
+            def moments(values: torch.Tensor) -> tuple[float, float]:
+                return (
+                    float(values.double().mean()),
+                    float(values.double().std(unbiased=False)),
+                )
+
+            foreground_mean, foreground_std = moments(foreground_detached)
+            background_mean, background_std = moments(background_detached)
+            gap_mean, gap_std = moments(gap)
+            percentiles = torch.quantile(
+                gap.double(), torch.tensor([0.05, 0.5, 0.95], dtype=torch.float64)
+            )
+            foreground_v = torch.cat(foreground_v_norms).double()
+            background_v = torch.cat(background_v_norms).double()
+            g_norms = torch.cat(sampled_g_norms).double()
+            result["text_rank_diagnostics"] = {
+                "skipped": False,
+                "skip_reason": None,
+                "sampled_foreground_cosine_mean": foreground_mean,
+                "sampled_foreground_cosine_std": foreground_std,
+                "sampled_background_cosine_mean": background_mean,
+                "sampled_background_cosine_std": background_std,
+                "gap_mean": gap_mean,
+                "gap_std": gap_std,
+                "gap_p05": float(percentiles[0]),
+                "gap_p50": float(percentiles[1]),
+                "gap_p95": float(percentiles[2]),
+                "gap_le_zero_fraction": float((gap <= 0.0).double().mean()),
+                "gap_lt_margin_fraction": float(
+                    (gap < self.text_rank_margin).double().mean()
+                ),
+                "g5_norm": float(g_norms.mean()),
+                "sampled_foreground_v5_norm_mean": float(foreground_v.mean()),
+                "sampled_background_v5_norm_mean": float(background_v.mean()),
+                "d5_dot_reconstruction_absolute_error_mean": (
+                    reconstruction_absolute_sum
+                    / float(max(1, reconstruction_element_count))
+                ),
+                "d5_dot_reconstruction_absolute_error_max": (
+                    reconstruction_absolute_max
+                ),
+                "d5_dot_reconstruction_comparison_precision": (
+                    "FP32 dot from tensors produced by the unchanged AMP forward "
+                    "versus returned D5 logits cast to FP32"
+                ),
+                "finite_checks": {
+                    "scores": scores_finite,
+                    "loss": loss_finite,
+                    "score_gradients": derivatives_finite,
+                    "ctx_rank_gradient": None,
+                },
+                "gap_interpretation": (
+                    "teacher-defined region matching difference; not a "
+                    "TP/FP/FN discrimination metric"
+                ),
+                "gradient_cosine_interpretation": (
+                    "gradient interaction only; not evidence of prediction-quality gain"
+                ),
+            }
+        return result
+
     def prepare_case(
         self,
         patches: list[torch.Tensor],
@@ -5579,6 +6186,13 @@ class VoxTellCMTTA:
             "response_seed": self.response_seed,
             "response_normalization": self.response_normalization,
             "response_energy_floor": self.response_energy_floor,
+            "alignment_loss": self.alignment_loss,
+            "w_text_rank": self.w_text_rank,
+            "text_rank_margin": self.text_rank_margin,
+            "text_rank_temperature": self.text_rank_temperature,
+            "text_rank_pairs": self.text_rank_pairs,
+            "text_rank_seed": self.text_rank_seed,
+            "text_rank_diagnostics_enabled": self.text_rank_diagnostics,
             "use_lora": self.use_lora,
             "lora_rank": self.lora_rank if self.use_lora else None,
             "lora_alpha": self.lora_alpha if self.use_lora else None,
@@ -5644,17 +6258,120 @@ class VoxTellCMTTA:
             pseudo_loss + self.w_entropy * entropy_loss + local_contribution
         )
 
-        cac_loss = self._backward_case_cac(
-            patches,
-            valid_masks,
-            params,
-            selected_view,
-            short_ctx_value,
-            short_current_weight,
-            autocast_enabled,
-        )
-        sums["cac_loss"] = float(cac_loss)
-        sums["loss"] += self.w_cac * sums["cac_loss"]
+        if self.alignment_loss == "cac":
+            cac_loss = self._backward_case_cac(
+                patches,
+                valid_masks,
+                params,
+                selected_view,
+                short_ctx_value,
+                short_current_weight,
+                autocast_enabled,
+            )
+            sums["cac_loss"] = float(cac_loss)
+            sums["loss"] += self.w_cac * sums["cac_loss"]
+            sums.update(
+                {
+                    "text_rank_loss": 0.0,
+                    "text_rank_raw_loss": 0.0,
+                    "weighted_text_rank_loss": 0.0,
+                    "text_rank_pairs_actual": 0,
+                    "text_rank_skip_reason": "alignment_loss_is_cac",
+                }
+            )
+        else:
+            diagnostic_scale = float(self.scaler.get_scale())
+            base_scaled_gradient = (
+                torch.zeros_like(self.ctx_delta, dtype=torch.float32)
+                if self.ctx_delta.grad is None
+                else self.ctx_delta.grad.detach().float().clone()
+            )
+            text_rank_result = self._backward_case_text_rank(
+                patches,
+                valid_masks,
+                params,
+                selected_view,
+                short_ctx_value,
+                short_current_weight,
+                autocast_enabled,
+                adaptation_step,
+            )
+            sums.update(text_rank_result)
+            sums["cac_loss"] = 0.0
+            sums["loss"] += float(sums["weighted_text_rank_loss"])
+            if self.text_rank_diagnostics:
+                final_scaled_gradient = (
+                    torch.zeros_like(self.ctx_delta, dtype=torch.float32)
+                    if self.ctx_delta.grad is None
+                    else self.ctx_delta.grad.detach().float().clone()
+                )
+                base_gradient = base_scaled_gradient / diagnostic_scale
+                final_gradient = final_scaled_gradient / diagnostic_scale
+                rank_gradient = (
+                    final_scaled_gradient - base_scaled_gradient
+                ) / diagnostic_scale
+                base_norm = float(torch.linalg.vector_norm(base_gradient).cpu())
+                rank_norm = float(torch.linalg.vector_norm(rank_gradient).cpu())
+                final_norm = float(torch.linalg.vector_norm(final_gradient).cpu())
+                if base_norm == 0.0:
+                    norm_ratio = None
+                    norm_ratio_reason = "g_base has zero norm"
+                else:
+                    norm_ratio = rank_norm / base_norm
+                    norm_ratio_reason = None
+                gradient_cosine = self._gradient_cosine(
+                    base_gradient, rank_gradient
+                )
+                if gradient_cosine is None:
+                    if base_norm == 0.0 and rank_norm == 0.0:
+                        cosine_reason = "g_base and g_rank have zero norm"
+                    elif base_norm == 0.0:
+                        cosine_reason = "g_base has zero norm"
+                    elif rank_norm == 0.0:
+                        cosine_reason = "g_rank has zero norm"
+                    else:
+                        cosine_reason = "gradient contains non-finite values"
+                else:
+                    cosine_reason = None
+                rank_diagnostics = sums.get("text_rank_diagnostics")
+                if not isinstance(rank_diagnostics, dict):
+                    rank_diagnostics = {
+                        "skipped": True,
+                        "skip_reason": sums.get("text_rank_skip_reason"),
+                    }
+                    sums["text_rank_diagnostics"] = rank_diagnostics
+                finite_checks = rank_diagnostics.setdefault("finite_checks", {})
+                finite_checks["ctx_rank_gradient"] = bool(
+                    torch.isfinite(rank_gradient).all()
+                )
+                finite_checks["base_gradient"] = bool(
+                    torch.isfinite(base_gradient).all()
+                )
+                finite_checks["final_gradient"] = bool(
+                    torch.isfinite(final_gradient).all()
+                )
+                rank_diagnostics.update(
+                    {
+                        "gradient_scale_observed": diagnostic_scale,
+                        "g_base_norm_before_clipping": base_norm,
+                        "g_rank_norm_before_clipping": rank_norm,
+                        "g_rank_to_g_base_norm_ratio": norm_ratio,
+                        "g_rank_to_g_base_norm_ratio_null_reason": (
+                            norm_ratio_reason
+                        ),
+                        "g_base_g_rank_cosine": gradient_cosine,
+                        "g_base_g_rank_cosine_null_reason": cosine_reason,
+                        "final_gradient_norm_before_clipping": final_norm,
+                        "gradient_units": (
+                            "unscaled GradScaler units, observed before clipping"
+                        ),
+                        "gradient_cosine_interpretation": (
+                            "gradient interaction only; not evidence of "
+                            "prediction-quality gain"
+                        ),
+                    }
+                )
+            self._last_text_rank_region_caches = None
         sums["loss_without_response"] = sums["loss"]
         sums["loss"] += float(
             self._last_pseudo_diagnostics.get("weighted_response_loss", 0.0)
@@ -5791,6 +6508,51 @@ class VoxTellCMTTA:
                 f"normalized={self.last_trace['response_normalized_loss']:.6g} "
                 f"weighted={self.last_trace['weighted_response_loss']:.6g}"
             )
+        if self.alignment_loss == "text_rank":
+            print(
+                "[VoxTell-CM-TTA] text rank: "
+                f"raw={self.last_trace['text_rank_raw_loss']:.6g} "
+                f"weighted={self.last_trace['weighted_text_rank_loss']:.6g} "
+                f"pairs={self.last_trace['text_rank_pairs_actual']} "
+                f"fg={self.last_trace['text_rank_valid_foreground_voxels']} "
+                f"bg={self.last_trace['text_rank_valid_background_voxels']} "
+                f"skip={self.last_trace['text_rank_skip_reason']}"
+            )
+        if self.text_rank_diagnostics:
+            diagnostics = self.last_trace.get("text_rank_diagnostics", {})
+            if diagnostics.get("skipped", False):
+                print(
+                    "[VoxTell-CM-TTA] text rank diagnostics: "
+                    f"skipped={diagnostics.get('skip_reason')}"
+                )
+            else:
+                gradient_cosine = diagnostics.get("g_base_g_rank_cosine")
+                gradient_cosine_text = (
+                    "null"
+                    if gradient_cosine is None
+                    else f"{gradient_cosine:.6g}"
+                )
+                norm_ratio = diagnostics.get("g_rank_to_g_base_norm_ratio")
+                norm_ratio_text = (
+                    "null" if norm_ratio is None else f"{norm_ratio:.6g}"
+                )
+                print(
+                    "[VoxTell-CM-TTA] text rank diagnostics: "
+                    f"fg_cos={diagnostics['sampled_foreground_cosine_mean']:.6g}"
+                    f"±{diagnostics['sampled_foreground_cosine_std']:.6g} "
+                    f"bg_cos={diagnostics['sampled_background_cosine_mean']:.6g}"
+                    f"±{diagnostics['sampled_background_cosine_std']:.6g} "
+                    f"gap={diagnostics['gap_mean']:.6g}"
+                    f"±{diagnostics['gap_std']:.6g} "
+                    f"p05/p50/p95={diagnostics['gap_p05']:.6g}/"
+                    f"{diagnostics['gap_p50']:.6g}/{diagnostics['gap_p95']:.6g} "
+                    f"gap<=0={diagnostics['gap_le_zero_fraction']:.3%} "
+                    f"gap<margin={diagnostics['gap_lt_margin_fraction']:.3%} "
+                    f"|g_base|={diagnostics['g_base_norm_before_clipping']:.6g} "
+                    f"|g_rank|={diagnostics['g_rank_norm_before_clipping']:.6g} "
+                    f"ratio={norm_ratio_text} cosine={gradient_cosine_text} "
+                    f"|g_final|={diagnostics['final_gradient_norm_before_clipping']:.6g}"
+                )
         if self.response_diagnostics:
             diagnostics = self.last_trace.get("response_diagnostics")
             if not isinstance(diagnostics, dict):
@@ -5891,6 +6653,13 @@ class VoxTellCMTTA:
             "response_seed": self.response_seed,
             "response_normalization": self.response_normalization,
             "response_energy_floor": self.response_energy_floor,
+            "alignment_loss": self.alignment_loss,
+            "w_text_rank": self.w_text_rank,
+            "text_rank_margin": self.text_rank_margin,
+            "text_rank_temperature": self.text_rank_temperature,
+            "text_rank_pairs": self.text_rank_pairs,
+            "text_rank_seed": self.text_rank_seed,
+            "text_rank_diagnostics": self.text_rank_diagnostics,
             "response_direction": (
                 None
                 if self._response_direction is None
@@ -5984,6 +6753,29 @@ class VoxTellCMTTA:
         if checkpoint_response_configuration != current_response_configuration:
             raise ValueError(
                 "Checkpoint text response configuration does not match the "
+                "current adapter"
+            )
+        checkpoint_alignment_configuration = (
+            str(state.get("alignment_loss", "cac")),
+            float(state.get("w_text_rank", 0.01)),
+            float(state.get("text_rank_margin", 0.0)),
+            float(state.get("text_rank_temperature", 0.1)),
+            int(state.get("text_rank_pairs", 2048)),
+            int(state.get("text_rank_seed", 1377)),
+            bool(state.get("text_rank_diagnostics", False)),
+        )
+        current_alignment_configuration = (
+            self.alignment_loss,
+            self.w_text_rank,
+            self.text_rank_margin,
+            self.text_rank_temperature,
+            self.text_rank_pairs,
+            self.text_rank_seed,
+            self.text_rank_diagnostics,
+        )
+        if checkpoint_alignment_configuration != current_alignment_configuration:
+            raise ValueError(
+                "Checkpoint alignment-loss configuration does not match the "
                 "current adapter"
             )
         if self.use_text_local_response_distill:

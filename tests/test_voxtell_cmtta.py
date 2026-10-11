@@ -37,9 +37,12 @@ from method.voxtell_cmtta import (
     masked_tversky_loss_from_components,
     masked_dice_components,
     masked_entropy_components,
+    d5_text_alignment_scores,
+    sample_text_rank_pairs,
     select_cac_view,
     soft_dice_loss,
     teacher_student_diff_spatial_weight,
+    text_rank_pair_loss,
     tdc_from_components,
     tdc_patch_components,
     weighted_masked_dice_components,
@@ -227,6 +230,49 @@ class TinyD4FusionVoxTell(TinyVoxTell):
         return d5
 
 
+class TinyTextRankDecoderShell(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.stages = nn.ModuleList([nn.Identity()])
+
+
+class TinyTextRankVoxTell(TinyVoxTell):
+    """Non-degenerate exact D5-einsum double for text-rank protocol tests."""
+
+    def __init__(self):
+        super().__init__(text_dim=2)
+        self.decoder = TinyTextRankDecoderShell()
+        self.project_to_decoder_channels = nn.ModuleList(
+            [nn.Linear(2, 2, bias=False)]
+        )
+        self.forward_call_count = 0
+        with torch.no_grad():
+            self.project_text_embed.weight.copy_(torch.eye(2))
+            self.project_to_decoder_channels[0].weight.copy_(
+                torch.tensor([[1.0, 0.35], [-0.2, 0.9]])
+            )
+
+    def forward(self, image, text_embedding, return_decoder_outputs=False):
+        self.forward_call_count += 1
+        batch, _, depth, height, width = image.shape
+        visual_tokens = image[:, 0].permute(1, 2, 3, 0).reshape(
+            depth * height * width, batch, 1
+        )
+        self.project_bottleneck_embed(visual_tokens)
+        text = text_embedding.squeeze(2).permute(1, 0, 2)
+        projected_text = self.project_text_embed(text)
+        query = self.project_to_decoder_channels[0](
+            projected_text.permute(1, 0, 2)
+        )
+        first = image[:, :1]
+        second = 0.4 * image[:, :1].square() - 0.3
+        voxels = self.decoder.stages[-1](torch.cat((first, second), dim=1))
+        logits = torch.einsum("b c d h w, b n c -> b n d h w", voxels, query)
+        if return_decoder_outputs:
+            return [logits, logits, logits, logits, logits]
+        return logits
+
+
 class TinyQwenTokenizer:
     """Minimal tokenizer exposing the Hugging Face fields used by the adapter."""
 
@@ -305,6 +351,241 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
+    def test_text_rank_d5_hook_reconstructs_logits_and_sampling_excludes_padding(self):
+        adapter = VoxTellCMTTA(
+            TinyTextRankVoxTell(),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(alignment_loss="text_rank", text_rank_pairs=32),
+        )
+        try:
+            image = torch.linspace(-1.0, 1.0, 24).reshape(1, 1, 2, 3, 4)
+            logits, g5, v5 = adapter._forward_with_d5_alignment(
+                image, adapter.ctx_delta
+            )
+            scores, reconstructed = d5_text_alignment_scores(g5, v5)
+            self.assertEqual(tuple(scores.shape), tuple(logits.shape))
+            self.assertTrue(torch.allclose(reconstructed, logits.float(), atol=1e-7))
+
+            # Only these explicit valid-region indices may appear in the plan;
+            # padded indices 1, 3, 5, and 7 are absent from both pools.
+            caches = [
+                {
+                    "foreground_indices": torch.tensor([0, 2]),
+                    "background_indices": torch.tensor([4, 6]),
+                }
+            ]
+            plan = sample_text_rank_pairs(caches, 128, seed=19)
+            sampled = plan["per_patch"][0]
+            self.assertTrue(
+                set(sampled["foreground_flat_indices"].tolist()) <= {0, 2}
+            )
+            self.assertTrue(
+                set(sampled["background_flat_indices"].tolist()) <= {4, 6}
+            )
+        finally:
+            adapter.close()
+
+    def test_text_rank_patch_replay_matches_full_objective_ctx_gradient(self):
+        torch.manual_seed(811)
+        base_model = TinyTextRankVoxTell()
+        replay = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(
+                alignment_loss="text_rank",
+                w_text_rank=0.07,
+                text_rank_margin=0.05,
+                text_rank_temperature=0.2,
+                text_rank_pairs=41,
+                text_rank_seed=23,
+            ),
+        )
+        direct = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(
+                alignment_loss="text_rank",
+                w_text_rank=0.07,
+                text_rank_margin=0.05,
+                text_rank_temperature=0.2,
+                text_rank_pairs=41,
+                text_rank_seed=23,
+            ),
+        )
+        patches = [
+            torch.linspace(-1.2, 0.8, 8).reshape(1, 2, 2, 2),
+            torch.linspace(-0.7, 1.3, 8).reshape(1, 2, 2, 2),
+        ]
+        masks = [torch.ones(2, 2, 2), torch.ones(2, 2, 2)]
+        regions = [
+            {
+                "foreground_indices": torch.tensor([4, 5, 6, 7]),
+                "background_indices": torch.tensor([0, 1, 2, 3]),
+            },
+            {
+                "foreground_indices": torch.tensor([3, 4, 5, 6, 7]),
+                "background_indices": torch.tensor([0, 1, 2]),
+            },
+        ]
+        params = [{"scale": 1.0, "offset": 0.0}]
+        try:
+            replay._last_text_rank_region_caches = regions
+            replay.optimizer.zero_grad(set_to_none=True)
+            replay_result = replay._backward_case_text_rank(
+                patches,
+                masks,
+                params,
+                0,
+                replay.ctx_delta.detach().clone(),
+                1.0,
+                False,
+                1,
+            )
+            replay_gradient = replay.ctx_delta.grad.detach().clone()
+
+            plan = sample_text_rank_pairs(regions, 41, seed=23)
+            foreground = [None] * 41
+            background = [None] * 41
+            direct.optimizer.zero_grad(set_to_none=True)
+            for patch_index, (patch, mask) in enumerate(zip(patches, masks)):
+                selected = direct._make_view_batch(
+                    patch, params, mask, 0, 1
+                ).to(direct.device)
+                logits, g5, v5 = direct._forward_with_d5_alignment(
+                    selected, direct.ctx_delta
+                )
+                del logits
+                flat = d5_text_alignment_scores(g5, v5)[0][:, 0].reshape(-1)
+                patch_plan = plan["per_patch"][patch_index]
+                for region_name, destination in (
+                    ("foreground", foreground),
+                    ("background", background),
+                ):
+                    for pair_id, flat_index in zip(
+                        patch_plan[f"{region_name}_pair_ids"].tolist(),
+                        patch_plan[f"{region_name}_flat_indices"].tolist(),
+                    ):
+                        destination[pair_id] = flat[flat_index]
+            direct_loss = text_rank_pair_loss(
+                torch.stack(foreground),
+                torch.stack(background),
+                0.05,
+                0.2,
+            )
+            (0.07 * direct_loss).backward()
+            self.assertAlmostEqual(
+                replay_result["text_rank_raw_loss"], float(direct_loss.detach()), places=6
+            )
+            self.assertTrue(
+                torch.allclose(replay_gradient, direct.ctx_delta.grad, atol=2e-6, rtol=2e-5)
+            )
+            self.assertTrue(torch.isfinite(replay_gradient).all())
+            self.assertGreater(float(replay_gradient.norm()), 0.0)
+            self.assertTrue(
+                all(parameter.grad is None for parameter in replay.model.parameters())
+            )
+        finally:
+            replay.close()
+            direct.close()
+
+    def test_text_rank_empty_region_skips_and_diagnostics_do_not_change_update(self):
+        common = dict(
+            alignment_loss="text_rank",
+            w_text_rank=0.03,
+            text_rank_pairs=31,
+            text_rank_seed=29,
+            w_cac=0.0,
+            w_entropy=0.0,
+            num_aug_views=1,
+        )
+        base_model = TinyTextRankVoxTell()
+        disabled = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(**common, text_rank_diagnostics=False),
+        )
+        enabled = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.tensor([[[0.8, -0.25]]]),
+            "cpu",
+            make_args(**common, text_rank_diagnostics=True),
+        )
+        patches = [torch.linspace(-1.5, 1.5, 27).reshape(1, 3, 3, 3)]
+        masks = [torch.ones(3, 3, 3)]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": -0.05},
+        ]
+
+        def prepared(adapter):
+            return {
+                "patches": patches,
+                "valid_masks": masks,
+                "params": params,
+                "short_ctx": adapter.ctx_delta.detach().clone(),
+                "current_quality": 0.0,
+                "historical_quality": 0.0,
+                "current_cac": 0.0,
+                "historical_cac": 0.0,
+                "weight_historical": 0.0,
+                "long_ctx": adapter.ctx_delta.detach().clone(),
+            }
+
+        try:
+            for adapter in (disabled, enabled):
+                adapter._select_case_view = lambda *_args, **_kwargs: (
+                    0,
+                    torch.zeros(2),
+                )
+            trace_disabled = disabled.adapt_case(
+                patches, masks, prepared_case=prepared(disabled)
+            )
+            trace_enabled = enabled.adapt_case(
+                patches, masks, prepared_case=prepared(enabled)
+            )
+            self.assertEqual(
+                trace_disabled["text_rank_pairs_actual"],
+                trace_enabled["text_rank_pairs_actual"],
+            )
+            self.assertAlmostEqual(
+                trace_disabled["text_rank_raw_loss"],
+                trace_enabled["text_rank_raw_loss"],
+                places=7,
+            )
+            self.assertTrue(
+                torch.allclose(disabled.ctx_delta, enabled.ctx_delta, atol=1e-7)
+            )
+            self.assertEqual(
+                disabled.model.forward_call_count,
+                enabled.model.forward_call_count,
+            )
+            self.assertTrue(
+                trace_enabled["text_rank_diagnostics"]["finite_checks"][
+                    "ctx_rank_gradient"
+                ]
+            )
+
+            enabled._last_text_rank_region_caches = [
+                {
+                    "foreground_indices": torch.empty(0, dtype=torch.long),
+                    "background_indices": torch.tensor([0]),
+                }
+            ]
+            enabled.optimizer.zero_grad(set_to_none=True)
+            skipped = enabled._backward_case_text_rank(
+                [patches[0]], [masks[0]], [params[0]], 0,
+                enabled.ctx_delta.detach().clone(), 1.0, False, 1,
+            )
+            self.assertEqual(skipped["text_rank_skip_reason"], "no_valid_foreground")
+            self.assertIsNone(enabled.ctx_delta.grad)
+        finally:
+            disabled.close()
+            enabled.close()
+
     def test_lora_initial_zero_delta_matches_baseline_and_targets_cross_attention(self):
         torch.manual_seed(67)
         base_model = TinyLoRAVoxTell()
