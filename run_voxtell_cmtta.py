@@ -1151,8 +1151,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--region_topk_views", type=int, default=3)
-    parser.add_argument("--region_view_support", type=float, default=0.67)
-    parser.add_argument("--region_decoder_support", type=float, default=0.5)
+    parser.add_argument("--region_min_view_votes", type=int, default=2)
+    parser.add_argument("--region_min_decoder_votes", type=int, default=2)
     parser.add_argument("--region_fg_threshold", type=float, default=0.5)
     parser.add_argument("--region_bg_threshold", type=float, default=0.1)
     parser.add_argument(

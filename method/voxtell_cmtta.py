@@ -414,12 +414,12 @@ def build_consensus_component_teacher_cache(
     *,
     topk_view_indices: list[int],
     topk_tdc: list[float],
-    view_support_threshold: float,
-    decoder_support_threshold: float,
+    min_view_votes: int,
+    min_decoder_votes: int,
     foreground_threshold: float,
     background_threshold: float,
 ) -> dict[str, object]:
-    """Create a whole-case component-level reliable/uncertain teacher cache."""
+    """Create whole-case evidence states before labeling separate proposals."""
     normalized_selected = []
     for probability in selected_probabilities:
         probability = torch.as_tensor(probability)
@@ -451,83 +451,158 @@ def build_consensus_component_teacher_cache(
         raise ValueError("Top-k probability, view-index, and TDC counts must match")
     if decoder.shape[0] != 4:
         raise ValueError("Consensus refinement requires selected-view D2-D5 probabilities")
+    if not 1 <= int(min_view_votes) <= int(topk.shape[0]):
+        raise ValueError("min_view_votes must be between one and the top-k view count")
+    if not 1 <= int(min_decoder_votes) <= 4:
+        raise ValueError("min_decoder_votes must be between one and four")
 
     topk_mean = topk.mean(axis=0)
     decoder_mean = decoder.mean(axis=0)
-    view_support = (topk >= foreground_threshold).mean(axis=0)
-    decoder_support = (decoder >= foreground_threshold).mean(axis=0)
-    selected_foreground = selected >= foreground_threshold
-    candidate = valid & (
-        selected_foreground
-        | (view_support >= view_support_threshold)
-        | (decoder_support >= decoder_support_threshold)
+    view_votes = (topk >= foreground_threshold).sum(axis=0, dtype=np.int16)
+    decoder_votes = (decoder >= foreground_threshold).sum(axis=0, dtype=np.int16)
+    view_supported = view_votes >= int(min_view_votes)
+    decoder_supported = decoder_votes >= int(min_decoder_votes)
+    dual_supported = view_supported & decoder_supported
+    dual_unsupported = ~view_supported & ~decoder_supported
+    selected_fg = selected >= foreground_threshold
+    reliable_fg = selected_fg & dual_supported & valid
+    missing_proposal = ~selected_fg & dual_supported & valid
+    unsupported_prediction = selected_fg & dual_unsupported & valid
+    recovered_fg_candidate = np.zeros_like(valid)
+    rejected_fg_candidate = np.zeros_like(valid)
+    uncertain = (view_supported ^ decoder_supported) & valid
+    structure = np.ones((3, 3, 3), dtype=np.uint8)
+    reliable_fg_neighborhood = ndimage.binary_dilation(
+        reliable_fg, structure=structure
     )
-    labels, component_count = ndimage.label(
-        candidate, structure=np.ones((3, 3, 3), dtype=np.uint8)
-    )
-
-    reliable_fg = np.zeros_like(valid)
-    recovered_fn = np.zeros_like(valid)
-    rejected_fp = np.zeros_like(valid)
-    uncertain = np.zeros_like(valid)
     component_records: list[dict[str, object]] = []
-    for component_id in range(1, int(component_count) + 1):
-        region = labels == component_id
+
+    missing_labels, missing_component_count = ndimage.label(
+        missing_proposal, structure=structure
+    )
+    component_id = 0
+    for proposal_id in range(1, int(missing_component_count) + 1):
+        component_id += 1
+        region = missing_labels == proposal_id
         volume = int(region.sum())
         selected_mean = float(selected[region].mean())
-        view_mean = float(view_support[region].mean())
-        decoder_mean_support = float(decoder_support[region].mean())
-        selected_is_foreground = selected_mean >= foreground_threshold
-        view_supported = view_mean >= view_support_threshold
-        decoder_supported = decoder_mean_support >= decoder_support_threshold
-        if view_supported and decoder_supported:
-            if selected_is_foreground:
-                decision = "reliable_fg"
-                reliable_fg[region] = True
-            else:
-                decision = "recovered_fn"
-                recovered_fn[region] = True
-        elif selected_is_foreground and not view_supported and not decoder_supported:
-            decision = "rejected_fp"
-            rejected_fp[region] = True
-        else:
-            decision = "uncertain"
-            uncertain[region] = True
+        adjacent = bool((region & reliable_fg_neighborhood).any())
+        recovered_fg_candidate[region] = True
         component_records.append(
             {
                 "component_id": component_id,
+                "proposal_type": "missing_proposal",
+                "proposal_component_id": proposal_id,
+                "decision": "recovered_fg_candidate",
                 "volume": volume,
+                "adjacent_to_reliable_fg": adjacent,
                 "selected_mean": selected_mean,
-                "view_support": view_mean,
-                "decoder_support": decoder_mean_support,
+                "mean_selected_probability": selected_mean,
+                "mean_view_votes": float(view_votes[region].mean()),
+                "mean_decoder_votes": float(decoder_votes[region].mean()),
+                "corrected_voxel_count": volume,
+                "uncertain_voxel_count": 0,
+            }
+        )
+
+    unsupported_labels, unsupported_component_count = ndimage.label(
+        unsupported_prediction, structure=structure
+    )
+    has_reliable_fg = bool(reliable_fg.any())
+    for proposal_id in range(1, int(unsupported_component_count) + 1):
+        component_id += 1
+        region = unsupported_labels == proposal_id
+        volume = int(region.sum())
+        adjacent = bool((region & reliable_fg_neighborhood).any())
+        if has_reliable_fg and not adjacent:
+            decision = "rejected_fg_candidate"
+            rejected_fg_candidate[region] = True
+            corrected_count = volume
+            uncertain_count = 0
+        else:
+            decision = "uncertain"
+            uncertain[region] = True
+            corrected_count = 0
+            uncertain_count = volume
+        selected_mean = float(selected[region].mean())
+        component_records.append(
+            {
+                "component_id": component_id,
+                "proposal_type": "unsupported_prediction",
+                "proposal_component_id": proposal_id,
                 "decision": decision,
+                "volume": volume,
+                "adjacent_to_reliable_fg": adjacent,
+                "selected_mean": selected_mean,
+                "mean_selected_probability": selected_mean,
+                "mean_view_votes": float(view_votes[region].mean()),
+                "mean_decoder_votes": float(decoder_votes[region].mean()),
+                "corrected_voxel_count": corrected_count,
+                "uncertain_voxel_count": uncertain_count,
             }
         )
 
     reliable_bg = (
         valid
-        & ~candidate
+        & ~selected_fg
         & (selected < background_threshold)
-        & (view_support < view_support_threshold)
-        & (decoder_support < decoder_support_threshold)
+        & ~view_supported
+        & ~decoder_supported
+        & ~missing_proposal
     )
-    assigned = reliable_fg | reliable_bg | recovered_fn | rejected_fp | uncertain
+    assigned = (
+        reliable_fg
+        | reliable_bg
+        | recovered_fg_candidate
+        | rejected_fg_candidate
+        | uncertain
+    )
     uncertain |= valid & ~assigned
-    supervision_valid = reliable_fg | reliable_bg | recovered_fn | rejected_fp
-    corrected = selected.copy()
-    corrected[recovered_fn] = np.maximum(
-        0.5,
-        (selected[recovered_fn] + topk_mean[recovered_fn] + decoder_mean[recovered_fn])
-        / 3.0,
+    state_masks = (
+        reliable_fg,
+        reliable_bg,
+        recovered_fg_candidate,
+        rejected_fg_candidate,
+        uncertain,
     )
-    corrected[rejected_fp] = 0.0
+    state_sum = np.stack(state_masks, axis=0).sum(axis=0)
+    if not np.array_equal(state_sum[valid], np.ones(int(valid.sum()), dtype=state_sum.dtype)):
+        raise AssertionError("Consensus refinement states must be mutually exclusive")
+    if bool((state_sum[~valid] != 0).any()):
+        raise AssertionError("Consensus refinement states must exclude padding")
+
+    supervision_valid = (
+        reliable_fg
+        | reliable_bg
+        | recovered_fg_candidate
+        | rejected_fg_candidate
+    )
+    corrected = selected.copy()
+    fused = (selected + topk_mean + decoder_mean) / 3.0
+    corrected[recovered_fg_candidate] = np.clip(
+        fused[recovered_fg_candidate], 0.5, 1.0
+    )
+    corrected[rejected_fg_candidate] = 0.0
+    if not np.array_equal(corrected[reliable_fg], selected[reliable_fg]):
+        raise AssertionError("Reliable selected foreground probabilities changed")
+
+    fallback_reason = None
+    if int((reliable_fg | recovered_fg_candidate).sum()) == 0:
+        fallback_reason = "no_reliable_foreground"
+    elif int(supervision_valid.sum()) == 0:
+        fallback_reason = "no_supervised_voxels"
+    if fallback_reason is not None:
+        corrected = selected.copy()
+        effective_supervision_valid = valid.copy()
+    else:
+        effective_supervision_valid = supervision_valid
 
     category_masks = {
         "reliable_fg": reliable_fg,
         "reliable_bg": reliable_bg,
         "uncertain": uncertain,
-        "recovered_fn": recovered_fn,
-        "rejected_fp": rejected_fp,
+        "recovered_fg_candidate": recovered_fg_candidate,
+        "rejected_fg_candidate": rejected_fg_candidate,
     }
     valid_voxels = int(valid.sum())
     counts = {name: int(mask.sum()) for name, mask in category_masks.items()}
@@ -541,7 +616,7 @@ def build_consensus_component_teacher_cache(
         selected_patch = torch.from_numpy(_crop_case_field(selected, location, shape))
         corrected_patch = torch.from_numpy(_crop_case_field(corrected, location, shape))
         supervision_patch = torch.from_numpy(
-            _crop_case_field(supervision_valid, location, shape)
+            _crop_case_field(effective_supervision_valid, location, shape)
         ).float()
         patch_caches.append(
             {
@@ -554,16 +629,23 @@ def build_consensus_component_teacher_cache(
     return {
         "patches": patch_caches,
         "case_shape": layout["case_shape"],
-        "component_count": int(component_count),
+        "component_count": int(missing_component_count + unsupported_component_count),
+        "missing_component_count": int(missing_component_count),
+        "unsupported_component_count": int(unsupported_component_count),
         "components": component_records,
         "topk_view_indices": [int(index) for index in topk_view_indices],
         "topk_tdc": [float(value) for value in topk_tdc],
         "valid_voxels": valid_voxels,
         "category_voxel_counts": counts,
         "category_voxel_ratios": ratios,
-        "teacher_foreground_voxels_before": int((selected_foreground & valid).sum()),
+        "corrected_voxel_count": int(
+            (recovered_fg_candidate | rejected_fg_candidate).sum()
+        ) if fallback_reason is None else 0,
+        "uncertain_voxel_count": int(uncertain.sum()),
+        "region_refinement_fallback": fallback_reason,
+        "teacher_foreground_voxels_before": int((selected_fg & valid).sum()),
         "teacher_foreground_voxels_after": int(
-            ((corrected >= foreground_threshold) & supervision_valid).sum()
+            ((corrected >= foreground_threshold) & effective_supervision_valid).sum()
         ),
         "pseudo_region_refinement": "consensus_component",
     }
@@ -2187,11 +2269,11 @@ class VoxTellCMTTA:
             getattr(args, "pseudo_region_refinement", "none")
         )
         self.region_topk_views = int(getattr(args, "region_topk_views", 3))
-        self.region_view_support = float(
-            getattr(args, "region_view_support", 0.67)
+        self.region_min_view_votes = int(
+            getattr(args, "region_min_view_votes", 2)
         )
-        self.region_decoder_support = float(
-            getattr(args, "region_decoder_support", 0.5)
+        self.region_min_decoder_votes = int(
+            getattr(args, "region_min_decoder_votes", 2)
         )
         self.region_fg_threshold = float(
             getattr(args, "region_fg_threshold", 0.5)
@@ -2228,8 +2310,6 @@ class VoxTellCMTTA:
         if self.region_topk_views <= 0:
             raise ValueError("region_topk_views must be positive")
         for name, value in (
-            ("region_view_support", self.region_view_support),
-            ("region_decoder_support", self.region_decoder_support),
             ("region_fg_threshold", self.region_fg_threshold),
             ("region_bg_threshold", self.region_bg_threshold),
         ):
@@ -2447,6 +2527,20 @@ class VoxTellCMTTA:
             raise ValueError(
                 "region_topk_views cannot exceed the total number of case views"
             )
+        if (
+            self.pseudo_region_refinement == "consensus_component"
+            and not 1 <= self.region_min_view_votes <= self.region_topk_views
+        ):
+            raise ValueError(
+                "region_min_view_votes must satisfy 1 <= value <= region_topk_views"
+            )
+        if (
+            self.pseudo_region_refinement == "consensus_component"
+            and not 1 <= self.region_min_decoder_votes <= 4
+        ):
+            raise ValueError(
+                "region_min_decoder_votes must satisfy 1 <= value <= 4"
+            )
         if not 0.0 < self.selection_p <= 1.0:
             raise ValueError("selection_p must be in (0, 1]")
         if self.use_lora:
@@ -2543,6 +2637,10 @@ class VoxTellCMTTA:
             if self.view_selection_metric != "tdc":
                 raise ValueError(
                     "consensus_component refinement requires view_selection_metric='tdc'"
+                )
+            if self.use_entropy_rank:
+                raise ValueError(
+                    "consensus_component refinement requires --no_entropy_rank"
                 )
             if self.pseudo_update_mode != "original":
                 raise ValueError(
@@ -3982,7 +4080,9 @@ class VoxTellCMTTA:
             probabilities, valid_masks, patch_locations
         )
 
-    def _consensus_topk_tdc_views(self) -> tuple[list[int], list[float]]:
+    def _consensus_topk_tdc_views(
+        self, selected_view: int
+    ) -> tuple[list[int], list[float]]:
         """Return stable descending-TDC view ids from the completed selector pass."""
         values = self.last_view_selection.get("tdc")
         if values is None or len(values) != 1 + self.num_aug_views:
@@ -3994,6 +4094,14 @@ class VoxTellCMTTA:
             raise RuntimeError("consensus_component received non-finite TDC scores")
         order = sorted(range(len(values)), key=lambda index: (-scores[index], index))
         topk = order[: self.region_topk_views]
+        if not topk or topk[0] != int(selected_view):
+            raise RuntimeError(
+                "consensus_component selected view is not the stable TDC top-1"
+            )
+        if int(selected_view) not in topk:
+            raise RuntimeError(
+                "consensus_component selected view must be present in top-k TDC views"
+            )
         return topk, [float(scores[index]) for index in topk]
 
     def _collect_consensus_component_teacher(
@@ -4007,7 +4115,7 @@ class VoxTellCMTTA:
         autocast_enabled: bool,
     ) -> dict[str, object]:
         """Collect long-context teacher evidence and refine it case-wide."""
-        topk_views, topk_tdc = self._consensus_topk_tdc_views()
+        topk_views, topk_tdc = self._consensus_topk_tdc_views(selected_view)
         selected_probabilities: list[torch.Tensor] = []
         topk_probabilities: list[torch.Tensor] = []
         decoder_probabilities: list[torch.Tensor] = []
@@ -4016,56 +4124,74 @@ class VoxTellCMTTA:
                 selected = self._make_view_batch(
                     patch, params, valid_mask, selected_view, selected_view + 1
                 ).to(self.device, non_blocking=True)
-                topk_batch = torch.cat(
-                    [
-                        self._make_view_batch(
-                            patch, params, valid_mask, view_id, view_id + 1
-                        )
-                        for view_id in topk_views
-                    ],
-                    dim=0,
-                ).to(self.device, non_blocking=True)
                 with torch.autocast(
                     device_type=self.device.type, enabled=autocast_enabled
                 ):
                     # Keep the primary teacher identical to the existing path:
                     # selected augmented view, long_ctx, ordinary D5 forward.
                     selected_logits = self._forward(selected, long_ctx)
-                    topk_outputs = self._forward_decoder_outputs(topk_batch, long_ctx)
-                    if selected_view in topk_views:
-                        selected_decoder_outputs = [
-                            output[
-                                topk_views.index(selected_view) :
-                                topk_views.index(selected_view) + 1
-                            ]
-                            for output in topk_outputs[:4]
-                        ]
-                    else:
-                        selected_decoder_outputs = self._forward_decoder_outputs(
-                            selected, long_ctx
-                        )[:4]
-                selected_probability = torch.sigmoid(
-                    selected_logits[:, :1]
-                ).detach()
+                    selected_probability = torch.sigmoid(
+                        selected_logits[:, :1]
+                    ).detach().cpu()
                 target_shape = tuple(selected_probability.shape[-3:])
-                topk_d5 = torch.sigmoid(topk_outputs[0][:, :1]).detach()
-                if tuple(topk_d5.shape[-3:]) != target_shape:
-                    topk_d5 = F.interpolate(
-                        topk_d5.float(), size=target_shape, mode="trilinear",
-                        align_corners=False,
-                    )
-                aligned_decoder = []
-                for output in selected_decoder_outputs:
-                    probability = torch.sigmoid(output[:, :1]).detach()
-                    if tuple(probability.shape[-3:]) != target_shape:
-                        probability = F.interpolate(
-                            probability.float(), size=target_shape,
-                            mode="trilinear", align_corners=False,
+                patch_topk_probabilities: list[torch.Tensor] = []
+                selected_decoder_probabilities = None
+                for chunk_start in range(0, len(topk_views), self.view_batch_size):
+                    chunk_views = topk_views[
+                        chunk_start : chunk_start + self.view_batch_size
+                    ]
+                    topk_batch = torch.cat(
+                        [
+                            self._make_view_batch(
+                                patch, params, valid_mask, view_id, view_id + 1
+                            )
+                            for view_id in chunk_views
+                        ],
+                        dim=0,
+                    ).to(self.device, non_blocking=True)
+                    if topk_batch.shape[0] > self.view_batch_size:
+                        raise AssertionError("Top-k teacher batch exceeds view_batch_size")
+                    with torch.autocast(
+                        device_type=self.device.type, enabled=autocast_enabled
+                    ):
+                        chunk_outputs = self._forward_decoder_outputs(
+                            topk_batch, long_ctx
+                        )[:4]
+                        chunk_d5 = torch.sigmoid(chunk_outputs[0][:, :1]).detach()
+                        if tuple(chunk_d5.shape[-3:]) != target_shape:
+                            chunk_d5 = F.interpolate(
+                                chunk_d5.float(), size=target_shape,
+                                mode="trilinear", align_corners=False,
+                            )
+                        chunk_d5_cpu = chunk_d5[:, 0].cpu()
+                        patch_topk_probabilities.extend(
+                            chunk_d5_cpu[index]
+                            for index in range(chunk_d5_cpu.shape[0])
                         )
-                    aligned_decoder.append(probability[0, 0])
-                selected_probabilities.append(selected_probability.cpu())
-                topk_probabilities.append(topk_d5[:, 0].cpu())
-                decoder_probabilities.append(torch.stack(aligned_decoder).cpu())
+                        if selected_view in chunk_views:
+                            selected_offset = chunk_views.index(selected_view)
+                            aligned_decoder = []
+                            for output in chunk_outputs:
+                                probability = torch.sigmoid(
+                                    output[selected_offset : selected_offset + 1, :1]
+                                ).detach()
+                                if tuple(probability.shape[-3:]) != target_shape:
+                                    probability = F.interpolate(
+                                        probability.float(), size=target_shape,
+                                        mode="trilinear", align_corners=False,
+                                    )
+                                aligned_decoder.append(probability[0, 0].cpu())
+                            selected_decoder_probabilities = torch.stack(
+                                aligned_decoder
+                            )
+                    del topk_batch, chunk_outputs, chunk_d5, chunk_d5_cpu
+                if len(patch_topk_probabilities) != len(topk_views):
+                    raise RuntimeError("Top-k teacher probability cache is incomplete")
+                if selected_decoder_probabilities is None:
+                    raise RuntimeError("Selected-view decoder cache is incomplete")
+                selected_probabilities.append(selected_probability)
+                topk_probabilities.append(torch.stack(patch_topk_probabilities))
+                decoder_probabilities.append(selected_decoder_probabilities)
         return build_consensus_component_teacher_cache(
             selected_probabilities,
             topk_probabilities,
@@ -4074,8 +4200,8 @@ class VoxTellCMTTA:
             patch_locations,
             topk_view_indices=topk_views,
             topk_tdc=topk_tdc,
-            view_support_threshold=self.region_view_support,
-            decoder_support_threshold=self.region_decoder_support,
+            min_view_votes=self.region_min_view_votes,
+            min_decoder_votes=self.region_min_decoder_votes,
             foreground_threshold=self.region_fg_threshold,
             background_threshold=self.region_bg_threshold,
         )
@@ -6138,19 +6264,42 @@ class VoxTellCMTTA:
                         "region_reliable_fg_voxels": int(counts["reliable_fg"]),
                         "region_reliable_bg_voxels": int(counts["reliable_bg"]),
                         "region_uncertain_voxels": int(counts["uncertain"]),
-                        "region_recovered_fn_voxels": int(counts["recovered_fn"]),
-                        "region_rejected_fp_voxels": int(counts["rejected_fp"]),
+                        "region_recovered_fg_candidate_voxels": int(
+                            counts["recovered_fg_candidate"]
+                        ),
+                        "region_rejected_fg_candidate_voxels": int(
+                            counts["rejected_fg_candidate"]
+                        ),
                         "region_reliable_fg_ratio": float(ratios["reliable_fg"]),
                         "region_reliable_bg_ratio": float(ratios["reliable_bg"]),
                         "region_uncertain_ratio": float(ratios["uncertain"]),
-                        "region_recovered_fn_ratio": float(ratios["recovered_fn"]),
-                        "region_rejected_fp_ratio": float(ratios["rejected_fp"]),
+                        "region_recovered_fg_candidate_ratio": float(
+                            ratios["recovered_fg_candidate"]
+                        ),
+                        "region_rejected_fg_candidate_ratio": float(
+                            ratios["rejected_fg_candidate"]
+                        ),
                         "region_component_count": int(
                             component_teacher_cache["component_count"]
+                        ),
+                        "region_missing_component_count": int(
+                            component_teacher_cache["missing_component_count"]
+                        ),
+                        "region_unsupported_component_count": int(
+                            component_teacher_cache["unsupported_component_count"]
                         ),
                         "region_components": list(
                             component_teacher_cache["components"]
                         ),
+                        "region_corrected_voxel_count": int(
+                            component_teacher_cache["corrected_voxel_count"]
+                        ),
+                        "region_refinement_uncertain_voxel_count": int(
+                            component_teacher_cache["uncertain_voxel_count"]
+                        ),
+                        "region_refinement_fallback": component_teacher_cache[
+                            "region_refinement_fallback"
+                        ],
                         "region_teacher_foreground_voxels_before": int(
                             component_teacher_cache[
                                 "teacher_foreground_voxels_before"
@@ -7116,8 +7265,8 @@ class VoxTellCMTTA:
             "pseudo_component_filter": self.pseudo_component_filter,
             "pseudo_region_refinement": self.pseudo_region_refinement,
             "region_topk_views": self.region_topk_views,
-            "region_view_support": self.region_view_support,
-            "region_decoder_support": self.region_decoder_support,
+            "region_min_view_votes": self.region_min_view_votes,
+            "region_min_decoder_votes": self.region_min_decoder_votes,
             "region_fg_threshold": self.region_fg_threshold,
             "region_bg_threshold": self.region_bg_threshold,
             "text_rank_negative_source": self.text_rank_negative_source,
@@ -7594,8 +7743,8 @@ class VoxTellCMTTA:
             "pseudo_component_filter": self.pseudo_component_filter,
             "pseudo_region_refinement": self.pseudo_region_refinement,
             "region_topk_views": self.region_topk_views,
-            "region_view_support": self.region_view_support,
-            "region_decoder_support": self.region_decoder_support,
+            "region_min_view_votes": self.region_min_view_votes,
+            "region_min_decoder_votes": self.region_min_decoder_votes,
             "region_fg_threshold": self.region_fg_threshold,
             "region_bg_threshold": self.region_bg_threshold,
             "text_rank_negative_source": self.text_rank_negative_source,
@@ -7731,16 +7880,16 @@ class VoxTellCMTTA:
         checkpoint_region_configuration = (
             str(state.get("pseudo_region_refinement", "none")),
             int(state.get("region_topk_views", 3)),
-            float(state.get("region_view_support", 0.67)),
-            float(state.get("region_decoder_support", 0.5)),
+            int(state.get("region_min_view_votes", 2)),
+            int(state.get("region_min_decoder_votes", 2)),
             float(state.get("region_fg_threshold", 0.5)),
             float(state.get("region_bg_threshold", 0.1)),
         )
         current_region_configuration = (
             self.pseudo_region_refinement,
             self.region_topk_views,
-            self.region_view_support,
-            self.region_decoder_support,
+            self.region_min_view_votes,
+            self.region_min_decoder_votes,
             self.region_fg_threshold,
             self.region_bg_threshold,
         )
