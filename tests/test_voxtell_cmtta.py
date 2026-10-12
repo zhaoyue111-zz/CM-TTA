@@ -22,6 +22,7 @@ from method.voxtell_cmtta import (
     VoxTellCMTTA,
     avg_entropy,
     build_d4_local_teacher_cache,
+    build_consensus_component_teacher_cache,
     build_largest_component_teacher_cache,
     case_weighted_mean_from_components,
     case_soft_dice_from_components,
@@ -539,6 +540,204 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             adapter_a.close()
             adapter_b.close()
+
+    def test_region_refinement_none_is_exact_default_path(self):
+        torch.manual_seed(421)
+        base_model = TinyVoxTell()
+        implicit = VoxTellCMTTA(
+            copy.deepcopy(base_model), torch.ones(1, 1, 2), "cpu", make_args()
+        )
+        explicit = VoxTellCMTTA(
+            copy.deepcopy(base_model),
+            torch.ones(1, 1, 2),
+            "cpu",
+            make_args(pseudo_region_refinement="none"),
+        )
+        patches = [torch.linspace(-1.0, 1.0, 8).reshape(1, 2, 2, 2)]
+        masks = [torch.ones(2, 2, 2)]
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 0.9, "offset": 0.1},
+            {"scale": 1.1, "offset": -0.1},
+        ]
+        labels = [torch.sigmoid(torch.linspace(-0.7, 0.9, 8)).reshape(1, 1, 2, 2, 2)]
+        try:
+            outputs = []
+            for adapter in (implicit, explicit):
+                adapter.optimizer.zero_grad(set_to_none=True)
+                losses = adapter._backward_case_supervision(
+                    patches,
+                    masks,
+                    params,
+                    0,
+                    adapter.ctx_delta.detach().clone(),
+                    1.0,
+                    adapter.ctx_delta.detach().clone(),
+                    False,
+                    teacher_pseudo_labels=labels,
+                )
+                outputs.append((losses, adapter.ctx_delta.grad.detach().clone()))
+            self.assertEqual(implicit.pseudo_region_refinement, "none")
+            self.assertEqual(outputs[0][0], outputs[1][0])
+            self.assertTrue(torch.equal(outputs[0][1], outputs[1][1]))
+        finally:
+            implicit.close()
+            explicit.close()
+
+    @staticmethod
+    def _build_consensus_fixture():
+        selected = torch.full((1, 1, 1, 1, 9), 0.05)
+        topk = torch.full((3, 1, 1, 9), 0.05)
+        decoder = torch.full((4, 1, 1, 9), 0.05)
+        # selected-only candidate: both evidence sources reject it.
+        selected[0, 0, 0, 0, 0] = 0.9
+        # selected miss: both sources support recovery.
+        selected[0, 0, 0, 0, 3] = 0.2
+        topk[:, 0, 0, 3] = 0.9
+        decoder[:, 0, 0, 3] = 0.8
+        # view-only evidence: must remain uncertain.
+        selected[0, 0, 0, 0, 6] = 0.2
+        topk[:, 0, 0, 6] = 0.9
+        return build_consensus_component_teacher_cache(
+            [selected],
+            [topk],
+            [decoder],
+            [torch.ones(1, 1, 9)],
+            [(0, 0, 0)],
+            topk_view_indices=[2, 1, 0],
+            topk_tdc=[0.9, 0.8, 0.7],
+            view_support_threshold=0.67,
+            decoder_support_threshold=0.5,
+            foreground_threshold=0.5,
+            background_threshold=0.1,
+        )
+
+    def test_consensus_component_rejects_recovers_and_marks_single_support_uncertain(self):
+        cache = self._build_consensus_fixture()
+        decisions = {
+            record["decision"]: record for record in cache["components"]
+        }
+        self.assertEqual(cache["component_count"], 3)
+        self.assertEqual(decisions["rejected_fp"]["volume"], 1)
+        self.assertEqual(decisions["recovered_fn"]["volume"], 1)
+        self.assertEqual(decisions["uncertain"]["volume"], 1)
+        patch_cache = cache["patches"][0]
+        corrected = patch_cache["teacher_probability_corrected"][0, 0, 0, 0]
+        valid = patch_cache["pseudo_valid_mask"][0, 0]
+        self.assertEqual(float(corrected[0]), 0.0)
+        self.assertGreaterEqual(float(corrected[3]), 0.5)
+        self.assertEqual(float(valid[0]), 1.0)
+        self.assertEqual(float(valid[3]), 1.0)
+        self.assertEqual(float(valid[6]), 0.0)
+        self.assertEqual(cache["teacher_foreground_voxels_before"], 1)
+        self.assertEqual(cache["teacher_foreground_voxels_after"], 1)
+
+    def test_consensus_component_merges_across_patch_boundary_and_excludes_padding(self):
+        selected = [
+            torch.full((1, 1, 1, 1, 3), 0.05),
+            torch.full((1, 1, 1, 1, 3), 0.05),
+        ]
+        topk = [
+            torch.full((3, 1, 1, 3), 0.05),
+            torch.full((3, 1, 1, 3), 0.05),
+        ]
+        decoder = [
+            torch.full((4, 1, 1, 3), 0.05),
+            torch.full((4, 1, 1, 3), 0.05),
+        ]
+        for field in (selected[0][0, 0], topk[0], decoder[0]):
+            field[..., 0, 0, 2] = 0.9
+        for field in (selected[1][0, 0], topk[1], decoder[1]):
+            field[..., 0, 0, 0] = 0.9
+            field[..., 0, 0, 2] = 0.99
+        valid_masks = [torch.ones(1, 1, 3), torch.ones(1, 1, 3)]
+        valid_masks[1][0, 0, 2] = 0.0
+        cache = build_consensus_component_teacher_cache(
+            selected,
+            topk,
+            decoder,
+            valid_masks,
+            [(0, 0, 0), (0, 0, 3)],
+            topk_view_indices=[0, 1, 2],
+            topk_tdc=[0.9, 0.8, 0.7],
+            view_support_threshold=0.67,
+            decoder_support_threshold=0.5,
+            foreground_threshold=0.5,
+            background_threshold=0.1,
+        )
+        self.assertEqual(cache["case_shape"], (1, 1, 6))
+        self.assertEqual(cache["component_count"], 1)
+        self.assertEqual(cache["components"][0]["volume"], 2)
+        self.assertEqual(cache["category_voxel_counts"]["reliable_fg"], 2)
+        self.assertEqual(cache["valid_voxels"], 5)
+
+    def test_consensus_uncertain_voxels_do_not_contribute_to_losses(self):
+        cache = self._build_consensus_fixture()["patches"][0]
+        logits = torch.linspace(-1.1, 1.3, 9).reshape(1, 1, 1, 1, 9)
+        logits.requires_grad_(True)
+        probabilities = torch.sigmoid(logits)
+        dice = masked_dice_components(
+            probabilities,
+            cache["teacher_probability_corrected"],
+            cache["pseudo_valid_mask"].unsqueeze(0).unsqueeze(0),
+        )
+        dice_loss = case_soft_dice_from_components(
+            dice["intersection"], dice["prediction_mass"], dice["pseudo_mass"]
+        )
+        entropy_sum, entropy_mass = masked_entropy_components(
+            probabilities, cache["entropy_valid_mask"].unsqueeze(0).unsqueeze(0)
+        )
+        (dice_loss + entropy_sum.sum() / entropy_mass.sum()).backward()
+        self.assertEqual(float(logits.grad[0, 0, 0, 0, 6]), 0.0)
+        self.assertGreater(float(logits.grad[0, 0, 0, 0, 1].abs()), 0.0)
+
+    def test_consensus_refinement_trace_and_configuration_guards(self):
+        common = dict(
+            num_aug_views=2,
+            view_selection_metric="tdc",
+            use_entropy_rank=False,
+            pseudo_update_mode="original",
+            pseudo_teacher_inference="patch",
+            pseudo_region_refinement="consensus_component",
+            region_topk_views=3,
+            w_cac=0.0,
+        )
+        adapter = VoxTellCMTTA(
+            TinyMultiscaleVoxTell(), torch.ones(1, 1, 2), "cpu", make_args(**common)
+        )
+        patches = [torch.ones(1, 2, 2, 2)]
+        masks = [torch.ones(2, 2, 2)]
+        try:
+            prepared = adapter.prepare_case(
+                patches, masks, patch_locations=[(0, 0, 0)]
+            )
+            trace = adapter.adapt_case(patches, masks, prepared_case=prepared)
+            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertEqual(trace["region_component_count"], 1)
+            self.assertEqual(trace["region_reliable_fg_voxels"], 8)
+            self.assertEqual(len(trace["region_topk_view_indices"]), 3)
+            self.assertEqual(len(trace["region_topk_tdc"]), 3)
+            self.assertEqual(trace["region_components"][0]["volume"], 8)
+            self.assertEqual(trace["region_components"][0]["decision"], "reliable_fg")
+        finally:
+            adapter.close()
+
+        invalid_overrides = (
+            {"pseudo_component_filter": "largest"},
+            {"alignment_loss": "text_rank"},
+            {"response_weight": 0.01},
+            {"use_lora": True},
+            {"use_d4_local_distill": True},
+        )
+        for override in invalid_overrides:
+            invalid = {**common, **override}
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                VoxTellCMTTA(
+                    TinyMultiscaleVoxTell(),
+                    torch.ones(1, 1, 2),
+                    "cpu",
+                    make_args(**invalid),
+                )
 
     def test_text_rank_d5_hook_reconstructs_logits_and_sampling_excludes_padding(self):
         adapter = VoxTellCMTTA(

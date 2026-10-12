@@ -1142,6 +1142,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--pseudo_region_refinement",
+        choices=("none", "consensus_component"),
+        default="none",
+        help=(
+            "Optional whole-case three-state teacher-region refinement; none "
+            "preserves the existing supervision path."
+        ),
+    )
+    parser.add_argument("--region_topk_views", type=int, default=3)
+    parser.add_argument("--region_view_support", type=float, default=0.67)
+    parser.add_argument("--region_decoder_support", type=float, default=0.5)
+    parser.add_argument("--region_fg_threshold", type=float, default=0.5)
+    parser.add_argument("--region_bg_threshold", type=float, default=0.1)
+    parser.add_argument(
         "--text_rank_negative_source",
         choices=("background", "removed_components"),
         default="background",

@@ -213,48 +213,51 @@ def sample_text_rank_pairs(
     return result
 
 
-def build_largest_component_teacher_cache(
-    teacher_probabilities: list[torch.Tensor],
+def _normalize_case_patch_field(
+    value: torch.Tensor, spatial_shape: tuple[int, int, int], name: str
+) -> torch.Tensor:
+    """Normalize one CPU patch field while retaining optional leading axes."""
+    value = torch.as_tensor(value).detach().cpu().float()
+    if value.ndim < 3 or tuple(value.shape[-3:]) != spatial_shape:
+        raise ValueError(
+            f"{name} must end in spatial shape {spatial_shape}, got {tuple(value.shape)}"
+        )
+    return value
+
+
+def stitch_nonoverlap_case_fields(
+    patch_fields: dict[str, list[torch.Tensor]],
     valid_masks: list[torch.Tensor],
     patch_locations: list[tuple[int, int, int]],
 ) -> dict[str, object]:
-    """Build one 26-connected whole-case teacher component correction.
+    """Stitch aligned non-overlap fields into one valid-aware (D,H,W) case.
 
-    Inputs and returned per-patch tensors live on CPU.  Patch coordinates are
-    used directly, so components crossing patch faces/edges/corners remain
-    connected and padding never participates in labeling.
+    This is the shared coordinate path for both legacy largest-component
+    filtering and consensus-component refinement.  Leading field axes (for
+    example view or decoder level) are preserved; padding is represented only
+    by the returned valid mask and never enters connected-component analysis.
     """
-    if not (
-        len(teacher_probabilities) == len(valid_masks) == len(patch_locations)
+    patch_count = len(valid_masks)
+    if patch_count == 0:
+        raise ValueError("Whole-case stitching requires at least one patch")
+    if len(patch_locations) != patch_count or any(
+        len(values) != patch_count for values in patch_fields.values()
     ):
-        raise ValueError(
-            "Teacher probabilities, valid masks, and patch locations must align"
-        )
-    if not teacher_probabilities:
-        raise ValueError("Component correction requires at least one patch")
-    normalized_probabilities: list[torch.Tensor] = []
+        raise ValueError("Patch fields, valid masks, and locations must align")
+
     normalized_masks: list[torch.Tensor] = []
     normalized_locations: list[tuple[int, int, int]] = []
+    normalized_fields = {name: [] for name in patch_fields}
     case_shape = [0, 0, 0]
-    for patch_index, (probability, valid_mask, location) in enumerate(
-        zip(teacher_probabilities, valid_masks, patch_locations)
+    leading_shapes: dict[str, tuple[int, ...]] = {}
+    for patch_index, (valid_mask, location) in enumerate(
+        zip(valid_masks, patch_locations)
     ):
-        probability = torch.as_tensor(probability).detach().cpu().float()
-        if probability.ndim == 4:
-            probability = probability.unsqueeze(0)
-        if probability.ndim != 5 or tuple(probability.shape[:2]) != (1, 1):
-            raise ValueError(
-                f"Teacher patch {patch_index} must have shape (1,1,D,H,W)"
-            )
         valid_mask = torch.as_tensor(valid_mask).detach().cpu().bool()
         if valid_mask.ndim == 4 and valid_mask.shape[0] == 1:
             valid_mask = valid_mask[0]
-        if valid_mask.ndim != 3 or tuple(valid_mask.shape) != tuple(
-            probability.shape[2:]
-        ):
-            raise ValueError(
-                f"Valid mask {patch_index} does not match its teacher patch"
-            )
+        if valid_mask.ndim != 3:
+            raise ValueError(f"Valid mask {patch_index} must have shape (D,H,W)")
         if len(location) != 3:
             raise ValueError("Each patch location must contain (d,h,w)")
         location = tuple(int(value) for value in location)
@@ -262,15 +265,26 @@ def build_largest_component_teacher_cache(
             raise ValueError("Patch locations must be non-negative")
         for axis, (start, size) in enumerate(zip(location, valid_mask.shape)):
             case_shape[axis] = max(case_shape[axis], start + int(size))
-        normalized_probabilities.append(probability)
         normalized_masks.append(valid_mask)
         normalized_locations.append(location)
+        for name, values in patch_fields.items():
+            field = _normalize_case_patch_field(
+                values[patch_index], tuple(valid_mask.shape), name
+            )
+            leading = tuple(field.shape[:-3])
+            if name in leading_shapes and leading_shapes[name] != leading:
+                raise ValueError(f"{name} leading dimensions differ across patches")
+            leading_shapes[name] = leading
+            normalized_fields[name].append(field)
 
-    foreground_case = np.zeros(tuple(case_shape), dtype=np.bool_)
     valid_case = np.zeros(tuple(case_shape), dtype=np.bool_)
     occupied_case = np.zeros(tuple(case_shape), dtype=np.bool_)
-    for probability, valid_mask, location in zip(
-        normalized_probabilities, normalized_masks, normalized_locations
+    case_fields = {
+        name: np.zeros((*leading_shapes[name], *case_shape), dtype=np.float32)
+        for name in patch_fields
+    }
+    for patch_index, (valid_mask, location) in enumerate(
+        zip(normalized_masks, normalized_locations)
     ):
         slices = tuple(
             slice(start, start + size)
@@ -281,9 +295,52 @@ def build_largest_component_teacher_cache(
         occupied_case[slices] = True
         valid_numpy = valid_mask.numpy()
         valid_case[slices] = valid_numpy
-        foreground_case[slices] = (
-            probability[0, 0].numpy() >= 0.5
-        ) & valid_numpy
+        for name in patch_fields:
+            case_fields[name][(..., *slices)] = normalized_fields[name][
+                patch_index
+            ].numpy()
+    return {
+        "fields": case_fields,
+        "valid": valid_case,
+        "case_shape": tuple(case_shape),
+        "masks": normalized_masks,
+        "locations": normalized_locations,
+        "normalized_fields": normalized_fields,
+    }
+
+
+def _crop_case_field(
+    case_field: np.ndarray,
+    location: tuple[int, int, int],
+    spatial_shape: tuple[int, int, int],
+) -> np.ndarray:
+    slices = tuple(
+        slice(start, start + size) for start, size in zip(location, spatial_shape)
+    )
+    return case_field[(..., *slices)].copy()
+
+
+def build_largest_component_teacher_cache(
+    teacher_probabilities: list[torch.Tensor],
+    valid_masks: list[torch.Tensor],
+    patch_locations: list[tuple[int, int, int]],
+) -> dict[str, object]:
+    """Build one 26-connected whole-case teacher component correction."""
+    normalized_probabilities = []
+    for probability in teacher_probabilities:
+        probability = torch.as_tensor(probability)
+        if probability.ndim == 4:
+            probability = probability.unsqueeze(0)
+        normalized_probabilities.append(probability)
+    layout = stitch_nonoverlap_case_fields(
+        {"selected": normalized_probabilities}, valid_masks, patch_locations
+    )
+    selected_field = layout["fields"]["selected"]
+    if selected_field.ndim != 5 or tuple(selected_field.shape[:2]) != (1, 1):
+        raise ValueError("Teacher probability patches must have singleton leading axes")
+    selected_case = selected_field[0, 0]
+    valid_case = layout["valid"]
+    foreground_case = (selected_case >= 0.5) & valid_case
 
     original_foreground_count = int(foreground_case.sum())
     largest_case = np.zeros_like(foreground_case)
@@ -301,16 +358,19 @@ def build_largest_component_teacher_cache(
 
     patch_caches: list[dict[str, torch.Tensor]] = []
     for probability, valid_mask, location in zip(
-        normalized_probabilities, normalized_masks, normalized_locations
+        layout["normalized_fields"]["selected"],
+        layout["masks"],
+        layout["locations"],
     ):
-        slices = tuple(
-            slice(start, start + size)
-            for start, size in zip(location, valid_mask.shape)
+        largest_patch = torch.from_numpy(
+            _crop_case_field(largest_case, location, tuple(valid_mask.shape))
         )
-        largest_patch = torch.from_numpy(largest_case[slices].copy())
-        removed_patch = torch.from_numpy(removed_case[slices].copy())
-        original_foreground = (probability[0, 0] >= 0.5) & valid_mask
-        background_patch = (probability[0, 0] < 0.5) & valid_mask
+        removed_patch = torch.from_numpy(
+            _crop_case_field(removed_case, location, tuple(valid_mask.shape))
+        )
+        probability_3d = probability[0, 0]
+        original_foreground = (probability_3d >= 0.5) & valid_mask
+        background_patch = (probability_3d < 0.5) & valid_mask
         corrected_probability = probability.clone()
         corrected_probability[0, 0][removed_patch] = 0.0
         entropy_valid = valid_mask & ~removed_patch
@@ -319,6 +379,7 @@ def build_largest_component_teacher_cache(
                 "teacher_probability_original": probability,
                 "teacher_probability_corrected": corrected_probability,
                 "entropy_valid_mask": entropy_valid.float(),
+                "pseudo_valid_mask": valid_mask.float(),
                 "foreground_indices": torch.nonzero(
                     original_foreground.reshape(-1), as_tuple=False
                 ).flatten(),
@@ -335,12 +396,176 @@ def build_largest_component_teacher_cache(
         )
     return {
         "patches": patch_caches,
-        "case_shape": tuple(case_shape),
+        "case_shape": layout["case_shape"],
         "component_count": int(component_count),
         "original_foreground_voxels": original_foreground_count,
         "largest_component_voxels": int(largest_case.sum()),
         "removed_component_voxels": int(removed_case.sum()),
         "teacher_had_foreground": original_foreground_count > 0,
+    }
+
+
+def build_consensus_component_teacher_cache(
+    selected_probabilities: list[torch.Tensor],
+    topk_probabilities: list[torch.Tensor],
+    decoder_probabilities: list[torch.Tensor],
+    valid_masks: list[torch.Tensor],
+    patch_locations: list[tuple[int, int, int]],
+    *,
+    topk_view_indices: list[int],
+    topk_tdc: list[float],
+    view_support_threshold: float,
+    decoder_support_threshold: float,
+    foreground_threshold: float,
+    background_threshold: float,
+) -> dict[str, object]:
+    """Create a whole-case component-level reliable/uncertain teacher cache."""
+    normalized_selected = []
+    for probability in selected_probabilities:
+        probability = torch.as_tensor(probability)
+        if probability.ndim == 4:
+            probability = probability.unsqueeze(0)
+        normalized_selected.append(probability)
+    layout = stitch_nonoverlap_case_fields(
+        {
+            "selected": normalized_selected,
+            "topk": topk_probabilities,
+            "decoder": decoder_probabilities,
+        },
+        valid_masks,
+        patch_locations,
+    )
+    selected_field = layout["fields"]["selected"]
+    topk = layout["fields"]["topk"]
+    decoder = layout["fields"]["decoder"]
+    valid = layout["valid"]
+    if (
+        selected_field.ndim != 5
+        or tuple(selected_field.shape[:2]) != (1, 1)
+        or topk.ndim != 4
+        or decoder.ndim != 4
+    ):
+        raise ValueError("Consensus fields must be selected[DHW], topk[K,DHW], decoder[L,DHW]")
+    selected = selected_field[0, 0]
+    if topk.shape[0] != len(topk_view_indices) or len(topk_tdc) != len(topk_view_indices):
+        raise ValueError("Top-k probability, view-index, and TDC counts must match")
+    if decoder.shape[0] != 4:
+        raise ValueError("Consensus refinement requires selected-view D2-D5 probabilities")
+
+    topk_mean = topk.mean(axis=0)
+    decoder_mean = decoder.mean(axis=0)
+    view_support = (topk >= foreground_threshold).mean(axis=0)
+    decoder_support = (decoder >= foreground_threshold).mean(axis=0)
+    selected_foreground = selected >= foreground_threshold
+    candidate = valid & (
+        selected_foreground
+        | (view_support >= view_support_threshold)
+        | (decoder_support >= decoder_support_threshold)
+    )
+    labels, component_count = ndimage.label(
+        candidate, structure=np.ones((3, 3, 3), dtype=np.uint8)
+    )
+
+    reliable_fg = np.zeros_like(valid)
+    recovered_fn = np.zeros_like(valid)
+    rejected_fp = np.zeros_like(valid)
+    uncertain = np.zeros_like(valid)
+    component_records: list[dict[str, object]] = []
+    for component_id in range(1, int(component_count) + 1):
+        region = labels == component_id
+        volume = int(region.sum())
+        selected_mean = float(selected[region].mean())
+        view_mean = float(view_support[region].mean())
+        decoder_mean_support = float(decoder_support[region].mean())
+        selected_is_foreground = selected_mean >= foreground_threshold
+        view_supported = view_mean >= view_support_threshold
+        decoder_supported = decoder_mean_support >= decoder_support_threshold
+        if view_supported and decoder_supported:
+            if selected_is_foreground:
+                decision = "reliable_fg"
+                reliable_fg[region] = True
+            else:
+                decision = "recovered_fn"
+                recovered_fn[region] = True
+        elif selected_is_foreground and not view_supported and not decoder_supported:
+            decision = "rejected_fp"
+            rejected_fp[region] = True
+        else:
+            decision = "uncertain"
+            uncertain[region] = True
+        component_records.append(
+            {
+                "component_id": component_id,
+                "volume": volume,
+                "selected_mean": selected_mean,
+                "view_support": view_mean,
+                "decoder_support": decoder_mean_support,
+                "decision": decision,
+            }
+        )
+
+    reliable_bg = (
+        valid
+        & ~candidate
+        & (selected < background_threshold)
+        & (view_support < view_support_threshold)
+        & (decoder_support < decoder_support_threshold)
+    )
+    assigned = reliable_fg | reliable_bg | recovered_fn | rejected_fp | uncertain
+    uncertain |= valid & ~assigned
+    supervision_valid = reliable_fg | reliable_bg | recovered_fn | rejected_fp
+    corrected = selected.copy()
+    corrected[recovered_fn] = np.maximum(
+        0.5,
+        (selected[recovered_fn] + topk_mean[recovered_fn] + decoder_mean[recovered_fn])
+        / 3.0,
+    )
+    corrected[rejected_fp] = 0.0
+
+    category_masks = {
+        "reliable_fg": reliable_fg,
+        "reliable_bg": reliable_bg,
+        "uncertain": uncertain,
+        "recovered_fn": recovered_fn,
+        "rejected_fp": rejected_fp,
+    }
+    valid_voxels = int(valid.sum())
+    counts = {name: int(mask.sum()) for name, mask in category_masks.items()}
+    ratios = {
+        name: (count / float(valid_voxels) if valid_voxels else 0.0)
+        for name, count in counts.items()
+    }
+    patch_caches = []
+    for valid_mask, location in zip(layout["masks"], layout["locations"]):
+        shape = tuple(valid_mask.shape)
+        selected_patch = torch.from_numpy(_crop_case_field(selected, location, shape))
+        corrected_patch = torch.from_numpy(_crop_case_field(corrected, location, shape))
+        supervision_patch = torch.from_numpy(
+            _crop_case_field(supervision_valid, location, shape)
+        ).float()
+        patch_caches.append(
+            {
+                "teacher_probability_original": selected_patch[None, None],
+                "teacher_probability_corrected": corrected_patch[None, None],
+                "pseudo_valid_mask": supervision_patch,
+                "entropy_valid_mask": supervision_patch.clone(),
+            }
+        )
+    return {
+        "patches": patch_caches,
+        "case_shape": layout["case_shape"],
+        "component_count": int(component_count),
+        "components": component_records,
+        "topk_view_indices": [int(index) for index in topk_view_indices],
+        "topk_tdc": [float(value) for value in topk_tdc],
+        "valid_voxels": valid_voxels,
+        "category_voxel_counts": counts,
+        "category_voxel_ratios": ratios,
+        "teacher_foreground_voxels_before": int((selected_foreground & valid).sum()),
+        "teacher_foreground_voxels_after": int(
+            ((corrected >= foreground_threshold) & supervision_valid).sum()
+        ),
+        "pseudo_region_refinement": "consensus_component",
     }
 
 
@@ -1958,6 +2183,22 @@ class VoxTellCMTTA:
         self.pseudo_component_filter = str(
             getattr(args, "pseudo_component_filter", "none")
         )
+        self.pseudo_region_refinement = str(
+            getattr(args, "pseudo_region_refinement", "none")
+        )
+        self.region_topk_views = int(getattr(args, "region_topk_views", 3))
+        self.region_view_support = float(
+            getattr(args, "region_view_support", 0.67)
+        )
+        self.region_decoder_support = float(
+            getattr(args, "region_decoder_support", 0.5)
+        )
+        self.region_fg_threshold = float(
+            getattr(args, "region_fg_threshold", 0.5)
+        )
+        self.region_bg_threshold = float(
+            getattr(args, "region_bg_threshold", 0.1)
+        )
         self.text_rank_negative_source = str(
             getattr(args, "text_rank_negative_source", "background")
         )
@@ -1980,6 +2221,22 @@ class VoxTellCMTTA:
             )
         if self.pseudo_component_filter not in ("none", "largest"):
             raise ValueError("pseudo_component_filter must be 'none' or 'largest'")
+        if self.pseudo_region_refinement not in ("none", "consensus_component"):
+            raise ValueError(
+                "pseudo_region_refinement must be 'none' or 'consensus_component'"
+            )
+        if self.region_topk_views <= 0:
+            raise ValueError("region_topk_views must be positive")
+        for name, value in (
+            ("region_view_support", self.region_view_support),
+            ("region_decoder_support", self.region_decoder_support),
+            ("region_fg_threshold", self.region_fg_threshold),
+            ("region_bg_threshold", self.region_bg_threshold),
+        ):
+            if not np.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1]")
+        if self.region_bg_threshold >= self.region_fg_threshold:
+            raise ValueError("region_bg_threshold must be less than region_fg_threshold")
         if self.text_rank_negative_source not in (
             "background",
             "removed_components",
@@ -2183,6 +2440,13 @@ class VoxTellCMTTA:
                 )
         if self.num_aug_views < 1:
             raise ValueError("num_aug_views must be at least 1")
+        if (
+            self.pseudo_region_refinement == "consensus_component"
+            and self.region_topk_views > 1 + self.num_aug_views
+        ):
+            raise ValueError(
+                "region_topk_views cannot exceed the total number of case views"
+            )
         if not 0.0 < self.selection_p <= 1.0:
             raise ValueError("selection_p must be in (0, 1]")
         if self.use_lora:
@@ -2274,6 +2538,42 @@ class VoxTellCMTTA:
                 raise ValueError(
                     "gradient_conflict_diagnostics is not supported with largest "
                     "component filtering"
+                )
+        if self.pseudo_region_refinement == "consensus_component":
+            if self.view_selection_metric != "tdc":
+                raise ValueError(
+                    "consensus_component refinement requires view_selection_metric='tdc'"
+                )
+            if self.pseudo_update_mode != "original":
+                raise ValueError(
+                    "consensus_component refinement requires pseudo_update_mode='original'"
+                )
+            if self.pseudo_teacher_inference != "patch":
+                raise ValueError(
+                    "consensus_component refinement requires pseudo_teacher_inference='patch'"
+                )
+            if self.pseudo_component_filter != "none":
+                raise ValueError(
+                    "consensus_component refinement cannot be combined with "
+                    "largest-component filtering"
+                )
+            if self.alignment_loss == "text_rank":
+                raise ValueError(
+                    "consensus_component refinement cannot be combined with text_rank"
+                )
+            if self.use_lora or self.use_d4_local_distill:
+                raise ValueError(
+                    "consensus_component refinement is ctx-only and requires LoRA "
+                    "and D4 local distillation disabled"
+                )
+            if self.use_text_local_response_distill:
+                raise ValueError(
+                    "consensus_component refinement cannot be combined with text response loss"
+                )
+            if self.gradient_conflict_diagnostics:
+                raise ValueError(
+                    "gradient_conflict_diagnostics is not supported with "
+                    "consensus_component refinement"
                 )
 
         self._lora_modules: list[
@@ -3682,6 +3982,104 @@ class VoxTellCMTTA:
             probabilities, valid_masks, patch_locations
         )
 
+    def _consensus_topk_tdc_views(self) -> tuple[list[int], list[float]]:
+        """Return stable descending-TDC view ids from the completed selector pass."""
+        values = self.last_view_selection.get("tdc")
+        if values is None or len(values) != 1 + self.num_aug_views:
+            raise RuntimeError(
+                "consensus_component refinement requires one TDC value per view"
+            )
+        scores = np.asarray(values, dtype=np.float64)
+        if not np.isfinite(scores).all():
+            raise RuntimeError("consensus_component received non-finite TDC scores")
+        order = sorted(range(len(values)), key=lambda index: (-scores[index], index))
+        topk = order[: self.region_topk_views]
+        return topk, [float(scores[index]) for index in topk]
+
+    def _collect_consensus_component_teacher(
+        self,
+        patches: list[torch.Tensor],
+        valid_masks: list[torch.Tensor],
+        patch_locations: list[tuple[int, int, int]],
+        params: list[dict[str, float]],
+        selected_view: int,
+        long_ctx: torch.Tensor,
+        autocast_enabled: bool,
+    ) -> dict[str, object]:
+        """Collect long-context teacher evidence and refine it case-wide."""
+        topk_views, topk_tdc = self._consensus_topk_tdc_views()
+        selected_probabilities: list[torch.Tensor] = []
+        topk_probabilities: list[torch.Tensor] = []
+        decoder_probabilities: list[torch.Tensor] = []
+        with torch.no_grad(), self.lora_mode(False):
+            for patch, valid_mask in zip(patches, valid_masks):
+                selected = self._make_view_batch(
+                    patch, params, valid_mask, selected_view, selected_view + 1
+                ).to(self.device, non_blocking=True)
+                topk_batch = torch.cat(
+                    [
+                        self._make_view_batch(
+                            patch, params, valid_mask, view_id, view_id + 1
+                        )
+                        for view_id in topk_views
+                    ],
+                    dim=0,
+                ).to(self.device, non_blocking=True)
+                with torch.autocast(
+                    device_type=self.device.type, enabled=autocast_enabled
+                ):
+                    # Keep the primary teacher identical to the existing path:
+                    # selected augmented view, long_ctx, ordinary D5 forward.
+                    selected_logits = self._forward(selected, long_ctx)
+                    topk_outputs = self._forward_decoder_outputs(topk_batch, long_ctx)
+                    if selected_view in topk_views:
+                        selected_decoder_outputs = [
+                            output[
+                                topk_views.index(selected_view) :
+                                topk_views.index(selected_view) + 1
+                            ]
+                            for output in topk_outputs[:4]
+                        ]
+                    else:
+                        selected_decoder_outputs = self._forward_decoder_outputs(
+                            selected, long_ctx
+                        )[:4]
+                selected_probability = torch.sigmoid(
+                    selected_logits[:, :1]
+                ).detach()
+                target_shape = tuple(selected_probability.shape[-3:])
+                topk_d5 = torch.sigmoid(topk_outputs[0][:, :1]).detach()
+                if tuple(topk_d5.shape[-3:]) != target_shape:
+                    topk_d5 = F.interpolate(
+                        topk_d5.float(), size=target_shape, mode="trilinear",
+                        align_corners=False,
+                    )
+                aligned_decoder = []
+                for output in selected_decoder_outputs:
+                    probability = torch.sigmoid(output[:, :1]).detach()
+                    if tuple(probability.shape[-3:]) != target_shape:
+                        probability = F.interpolate(
+                            probability.float(), size=target_shape,
+                            mode="trilinear", align_corners=False,
+                        )
+                    aligned_decoder.append(probability[0, 0])
+                selected_probabilities.append(selected_probability.cpu())
+                topk_probabilities.append(topk_d5[:, 0].cpu())
+                decoder_probabilities.append(torch.stack(aligned_decoder).cpu())
+        return build_consensus_component_teacher_cache(
+            selected_probabilities,
+            topk_probabilities,
+            decoder_probabilities,
+            valid_masks,
+            patch_locations,
+            topk_view_indices=topk_views,
+            topk_tdc=topk_tdc,
+            view_support_threshold=self.region_view_support,
+            decoder_support_threshold=self.region_decoder_support,
+            foreground_threshold=self.region_fg_threshold,
+            background_threshold=self.region_bg_threshold,
+        )
+
     def _forward_case_supervision_stats(
         self,
         patches: list[torch.Tensor],
@@ -3745,11 +4143,12 @@ class VoxTellCMTTA:
         if component_patch_caches is not None and len(component_patch_caches) != len(patches):
             raise ValueError("Component teacher cache does not align with case patches")
         component_text_rank_caches = (
-            None
-            if component_teacher_cache is None
-            else text_rank_regions_from_component_cache(
+            text_rank_regions_from_component_cache(
                 component_teacher_cache, self.text_rank_negative_source
             )
+            if component_teacher_cache is not None
+            and self.alignment_loss == "text_rank"
+            else None
         )
         with torch.no_grad():
             for patch_index, (patch, valid_mask) in enumerate(zip(patches, valid_masks)):
@@ -3895,10 +4294,19 @@ class VoxTellCMTTA:
                         else:
                             student_logits = self._forward(view_batch, student_ctx)
                         probabilities = torch.sigmoid(student_logits[:, :1])
+                        pseudo_mask_batch = (
+                            input_mask_batch
+                            if component_patch_caches is None
+                            else component_patch_caches[patch_index]
+                            .get("pseudo_valid_mask", valid_mask)
+                            .to(self.device, non_blocking=True)
+                            .unsqueeze(0)
+                            .expand(end - start, -1, -1, -1)
+                        )
                         unweighted_local_dice = masked_dice_components(
                             probabilities,
                             pseudo_label,
-                            input_mask_batch.unsqueeze(1),
+                            pseudo_mask_batch.unsqueeze(1),
                         )
                         if self.pseudo_spatial_weighting == "teacher_student_diff":
                             if start != 0 and len(spatial_weight_caches) <= patch_index:
@@ -3912,7 +4320,7 @@ class VoxTellCMTTA:
                                     original_student,
                                     self.pseudo_spatial_lambda,
                                 )
-                                valid_spatial = input_mask.unsqueeze(1).bool()
+                                valid_spatial = pseudo_mask_batch[:1].unsqueeze(1).bool()
                                 valid_diff = (
                                     (pseudo_label.float() - original_student.float())
                                     .abs()[valid_spatial]
@@ -3953,7 +4361,7 @@ class VoxTellCMTTA:
                                 local_dice = weighted_masked_dice_components(
                                     probabilities,
                                     pseudo_label,
-                                    input_mask_batch.unsqueeze(1) * spatial_weight,
+                                    pseudo_mask_batch.unsqueeze(1) * spatial_weight,
                                 )
                         else:
                             local_dice = unweighted_local_dice
@@ -5515,6 +5923,15 @@ class VoxTellCMTTA:
                     .unsqueeze(0)
                     .expand(end - start, -1, -1, -1)
                 )
+                pseudo_mask_batch = (
+                    input_mask_batch
+                    if component_patch_caches is None
+                    else component_patch_caches[patch_index]
+                    .get("pseudo_valid_mask", valid_mask)
+                    .to(self.device, non_blocking=True)
+                    .unsqueeze(0)
+                    .expand(end - start, -1, -1, -1)
+                )
                 with torch.autocast(
                     device_type=self.device.type, enabled=autocast_enabled
                 ):
@@ -5544,13 +5961,13 @@ class VoxTellCMTTA:
                         local_dice = weighted_masked_dice_components(
                             probabilities,
                             pseudo_label,
-                            input_mask_batch.unsqueeze(1) * spatial_weight,
+                            pseudo_mask_batch.unsqueeze(1) * spatial_weight,
                         )
                     else:
                         local_dice = masked_dice_components(
                             probabilities,
                             pseudo_label,
-                            input_mask_batch.unsqueeze(1),
+                            pseudo_mask_batch.unsqueeze(1),
                         )
                     local_tensors = [
                         local_dice["intersection"],
@@ -5645,6 +6062,7 @@ class VoxTellCMTTA:
             "text_rank_seed": self.text_rank_seed,
             "text_rank_diagnostics": self.text_rank_diagnostics,
             "pseudo_component_filter": self.pseudo_component_filter,
+            "pseudo_region_refinement": self.pseudo_region_refinement,
             "text_rank_negative_source": self.text_rank_negative_source,
             "pseudo_unweighted_soft_dice": float(
                 unweighted_global_dice.detach().cpu()
@@ -5682,8 +6100,8 @@ class VoxTellCMTTA:
             ),
         }
         if component_teacher_cache is not None:
-            self._last_pseudo_diagnostics.update(
-                {
+            if self.pseudo_component_filter == "largest":
+                self._last_pseudo_diagnostics.update({
                     "pseudo_component_count": int(
                         component_teacher_cache["component_count"]
                     ),
@@ -5702,8 +6120,52 @@ class VoxTellCMTTA:
                     "pseudo_teacher_had_foreground": bool(
                         component_teacher_cache["teacher_had_foreground"]
                     ),
-                }
-            )
+                })
+            elif self.pseudo_region_refinement == "consensus_component":
+                counts = component_teacher_cache["category_voxel_counts"]
+                ratios = component_teacher_cache["category_voxel_ratios"]
+                self._last_pseudo_diagnostics.update(
+                    {
+                        "region_topk_view_indices": list(
+                            component_teacher_cache["topk_view_indices"]
+                        ),
+                        "region_topk_tdc": list(component_teacher_cache["topk_tdc"]),
+                        "region_valid_voxels": int(
+                            component_teacher_cache["valid_voxels"]
+                        ),
+                        "region_voxel_counts": dict(counts),
+                        "region_voxel_ratios": dict(ratios),
+                        "region_reliable_fg_voxels": int(counts["reliable_fg"]),
+                        "region_reliable_bg_voxels": int(counts["reliable_bg"]),
+                        "region_uncertain_voxels": int(counts["uncertain"]),
+                        "region_recovered_fn_voxels": int(counts["recovered_fn"]),
+                        "region_rejected_fp_voxels": int(counts["rejected_fp"]),
+                        "region_reliable_fg_ratio": float(ratios["reliable_fg"]),
+                        "region_reliable_bg_ratio": float(ratios["reliable_bg"]),
+                        "region_uncertain_ratio": float(ratios["uncertain"]),
+                        "region_recovered_fn_ratio": float(ratios["recovered_fn"]),
+                        "region_rejected_fp_ratio": float(ratios["rejected_fp"]),
+                        "region_component_count": int(
+                            component_teacher_cache["component_count"]
+                        ),
+                        "region_components": list(
+                            component_teacher_cache["components"]
+                        ),
+                        "region_teacher_foreground_voxels_before": int(
+                            component_teacher_cache[
+                                "teacher_foreground_voxels_before"
+                            ]
+                        ),
+                        "region_teacher_foreground_voxels_after": int(
+                            component_teacher_cache[
+                                "teacher_foreground_voxels_after"
+                            ]
+                        ),
+                        "region_component_case_shape": list(
+                            component_teacher_cache["case_shape"]
+                        ),
+                    }
+                )
         self._last_pseudo_diagnostics.update(stats["pseudo_spatial_diagnostics"])
         if response_diagnostics is not None:
             self._last_pseudo_diagnostics["response_diagnostics"] = (
@@ -6430,9 +6892,12 @@ class VoxTellCMTTA:
             normalized_masks.append(mask.float().contiguous())
         valid_masks = normalized_masks
         if patch_locations is None:
-            if self.pseudo_component_filter == "largest":
+            if (
+                self.pseudo_component_filter == "largest"
+                or self.pseudo_region_refinement == "consensus_component"
+            ):
                 raise ValueError(
-                    "largest component filtering requires whole-case patch_locations"
+                    "Whole-case component refinement requires patch_locations"
                 )
             normalized_locations = None
         else:
@@ -6522,11 +6987,14 @@ class VoxTellCMTTA:
         long_ctx = prepared_case["long_ctx"]
         prepared_patch_locations = prepared_case.get("patch_locations")
         if (
-            self.pseudo_component_filter == "largest"
+            (
+                self.pseudo_component_filter == "largest"
+                or self.pseudo_region_refinement == "consensus_component"
+            )
             and prepared_patch_locations is None
         ):
             raise ValueError(
-                "largest component filtering requires prepared patch locations"
+                "Whole-case component refinement requires prepared patch locations"
             )
 
         selected_view, selection_scores = self._select_case_view(
@@ -6595,6 +7063,20 @@ class VoxTellCMTTA:
                 cache["teacher_probability_corrected"]
                 for cache in component_teacher_cache["patches"]
             ]
+        elif self.pseudo_region_refinement == "consensus_component":
+            component_teacher_cache = self._collect_consensus_component_teacher(
+                patches,
+                valid_masks,
+                prepared_patch_locations,
+                params,
+                selected_view,
+                long_ctx,
+                self.device.type == "cuda",
+            )
+            teacher_pseudo_labels = [
+                cache["teacher_probability_corrected"]
+                for cache in component_teacher_cache["patches"]
+            ]
         short_snapshot = short_ctx.detach().clone()
         short_ctx_value = short_snapshot
         short_current_weight = 1.0 - weight_historical
@@ -6632,6 +7114,12 @@ class VoxTellCMTTA:
             "text_rank_seed": self.text_rank_seed,
             "text_rank_diagnostics_enabled": self.text_rank_diagnostics,
             "pseudo_component_filter": self.pseudo_component_filter,
+            "pseudo_region_refinement": self.pseudo_region_refinement,
+            "region_topk_views": self.region_topk_views,
+            "region_view_support": self.region_view_support,
+            "region_decoder_support": self.region_decoder_support,
+            "region_fg_threshold": self.region_fg_threshold,
+            "region_bg_threshold": self.region_bg_threshold,
             "text_rank_negative_source": self.text_rank_negative_source,
             "use_lora": self.use_lora,
             "lora_rank": self.lora_rank if self.use_lora else None,
@@ -6690,6 +7178,7 @@ class VoxTellCMTTA:
             or self.pseudo_spatial_weighting == "teacher_student_diff"
             or self.use_text_local_response_distill
             or self.pseudo_component_filter == "largest"
+            or self.pseudo_region_refinement == "consensus_component"
         ):
             sums.update(self._last_pseudo_diagnostics)
         sums["entropy_loss"] = entropy_loss
@@ -7103,6 +7592,12 @@ class VoxTellCMTTA:
             "text_rank_seed": self.text_rank_seed,
             "text_rank_diagnostics": self.text_rank_diagnostics,
             "pseudo_component_filter": self.pseudo_component_filter,
+            "pseudo_region_refinement": self.pseudo_region_refinement,
+            "region_topk_views": self.region_topk_views,
+            "region_view_support": self.region_view_support,
+            "region_decoder_support": self.region_decoder_support,
+            "region_fg_threshold": self.region_fg_threshold,
+            "region_bg_threshold": self.region_bg_threshold,
             "text_rank_negative_source": self.text_rank_negative_source,
             "response_direction": (
                 None
@@ -7232,6 +7727,33 @@ class VoxTellCMTTA:
             raise ValueError(
                 "Checkpoint component-filter configuration does not match the "
                 "current adapter"
+            )
+        checkpoint_region_configuration = (
+            str(state.get("pseudo_region_refinement", "none")),
+            int(state.get("region_topk_views", 3)),
+            float(state.get("region_view_support", 0.67)),
+            float(state.get("region_decoder_support", 0.5)),
+            float(state.get("region_fg_threshold", 0.5)),
+            float(state.get("region_bg_threshold", 0.1)),
+        )
+        current_region_configuration = (
+            self.pseudo_region_refinement,
+            self.region_topk_views,
+            self.region_view_support,
+            self.region_decoder_support,
+            self.region_fg_threshold,
+            self.region_bg_threshold,
+        )
+        if (
+            checkpoint_region_configuration[0] != current_region_configuration[0]
+            or (
+                self.pseudo_region_refinement != "none"
+                and checkpoint_region_configuration != current_region_configuration
+            )
+        ):
+            raise ValueError(
+                "Checkpoint pseudo-region refinement configuration does not "
+                "match the current adapter"
             )
         if self.use_text_local_response_distill:
             checkpoint_direction = state.get("response_direction")
