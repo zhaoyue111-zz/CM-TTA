@@ -16,6 +16,7 @@ from data.voxtell_192 import (
     TARGET_SHAPE,
     bbox_slices,
     load_case_artifact,
+    load_preprocessed_directory,
     load_preprocessed_manifest,
     make_single_spatial_patch,
     restore_probability_to_original,
@@ -85,7 +86,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Four isolated selector runs on offline whole-case VoxTell 192^3 data"
     )
-    parser.add_argument("--preprocessed-manifest", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--preprocessed-dir",
+        help="Directory containing offline .npz artifacts (manifest-free input)",
+    )
+    source.add_argument(
+        "--preprocessed-manifest",
+        help="Optional legacy preprocessed manifest JSON",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--voxtell-root", default="../VoxTell_from_disk")
     parser.add_argument("--model-dir", default=None)
@@ -747,7 +756,10 @@ def main() -> None:
         raise FileExistsError(f"Refusing to overwrite existing output directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    entries = load_preprocessed_manifest(args.preprocessed_manifest)
+    if args.preprocessed_manifest:
+        entries = load_preprocessed_manifest(args.preprocessed_manifest)
+    else:
+        entries = load_preprocessed_directory(args.preprocessed_dir)
     case_ids = [entry.case_id for entry in entries]
     view_manifest_path = (
         Path(args.view_params_manifest).expanduser().resolve()

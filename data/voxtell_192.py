@@ -1,4 +1,4 @@
-"""Manifest-driven offline data path for whole-case 192^3 VoxTell runs.
+"""Offline data path for whole-case 192^3 VoxTell runs.
 
 The adaptation path in :mod:`run_voxtell_192_comparison` only consumes the
 arrays written here.  In particular it never crops, normalizes, or resizes a
@@ -75,6 +75,56 @@ def load_source_manifest(path: str | Path, *, require_files: bool = True) -> lis
     return cases
 
 
+def load_source_directory(
+    images_dir: str | Path,
+    labels_dir: str | Path | None = None,
+) -> list[SourceCase]:
+    """Discover ``*.nii.gz`` images and same-named labels without a manifest.
+
+    When ``labels_dir`` is omitted, ``/path/to/images`` is paired with its
+    sibling ``/path/to/labels`` directory. Files are sorted by their path
+    relative to ``images_dir`` so preprocessing order is deterministic.
+    """
+    image_root = Path(images_dir).expanduser().resolve()
+    if not image_root.is_dir():
+        raise NotADirectoryError(f"Images directory does not exist: {image_root}")
+    label_root = (
+        Path(labels_dir).expanduser().resolve()
+        if labels_dir is not None
+        else image_root.parent / "labels"
+    )
+    if not label_root.is_dir():
+        raise NotADirectoryError(f"Labels directory does not exist: {label_root}")
+
+    image_paths = sorted(
+        (path for path in image_root.rglob("*.nii.gz") if path.is_file()),
+        key=lambda path: path.relative_to(image_root).as_posix(),
+    )
+    if not image_paths:
+        raise ValueError(f"No *.nii.gz images found under {image_root}")
+
+    cases: list[SourceCase] = []
+    seen_case_ids: set[str] = set()
+    for image_path in image_paths:
+        relative_path = image_path.relative_to(image_root)
+        gt_path = label_root / relative_path
+        if not gt_path.is_file():
+            raise FileNotFoundError(
+                f"GT corresponding to image {image_path} does not exist: {gt_path}"
+            )
+        relative_name = relative_path.as_posix()
+        case_id = relative_name[: -len(".nii.gz")]
+        if "/" in case_id:
+            case_id = case_id.replace("/", "__")
+        if not case_id:
+            raise ValueError(f"Could not derive case_id from image path: {image_path}")
+        if case_id in seen_case_ids:
+            raise ValueError(f"Duplicate derived case_id in images directory: {case_id}")
+        seen_case_ids.add(case_id)
+        cases.append(SourceCase(case_id, image_path, gt_path))
+    return cases
+
+
 def load_preprocessed_manifest(
     path: str | Path, *, require_files: bool = True
 ) -> list[PreprocessedCase]:
@@ -103,6 +153,53 @@ def load_preprocessed_manifest(
                 if not file_path.is_file():
                     raise FileNotFoundError(f"{name} for {case_id} does not exist: {file_path}")
         cases.append(PreprocessedCase(case_id, artifact, image_path, gt_path))
+    return cases
+
+
+def load_preprocessed_directory(
+    directory: str | Path, *, require_files: bool = True
+) -> list[PreprocessedCase]:
+    """Discover offline ``.npz`` artifacts without a preprocessed manifest."""
+    root = Path(directory).expanduser().resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(f"Preprocessed directory does not exist: {root}")
+    artifact_paths = sorted(
+        (path for path in root.rglob("*.npz") if path.is_file()),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    if not artifact_paths:
+        raise ValueError(f"No preprocessed *.npz artifacts found under {root}")
+
+    cases: list[PreprocessedCase] = []
+    seen: set[str] = set()
+    for artifact_path in artifact_paths:
+        try:
+            with np.load(artifact_path, allow_pickle=False) as archive:
+                required = {"case_id", "image_path", "gt_path"}
+                missing = sorted(required.difference(archive.files))
+                if missing:
+                    raise ValueError(
+                        f"Offline artifact {artifact_path} lacks metadata fields: {missing}"
+                    )
+                case_id = str(archive["case_id"].item())
+                image_path = Path(str(archive["image_path"].item()))
+                gt_path = Path(str(archive["gt_path"].item()))
+        except (OSError, ValueError, KeyError) as error:
+            if isinstance(error, ValueError) and str(error).startswith("Offline artifact"):
+                raise
+            raise ValueError(f"Could not read offline artifact metadata: {artifact_path}") from error
+        if not case_id:
+            raise ValueError(f"Offline artifact has an empty case_id: {artifact_path}")
+        if case_id in seen:
+            raise ValueError(f"Duplicate case_id in preprocessed directory: {case_id}")
+        seen.add(case_id)
+        if require_files:
+            for name, source_path in (("source image", image_path), ("source GT", gt_path)):
+                if not source_path.is_file():
+                    raise FileNotFoundError(
+                        f"{name} for {case_id} does not exist: {source_path}"
+                    )
+        cases.append(PreprocessedCase(case_id, artifact_path, image_path, gt_path))
     return cases
 
 

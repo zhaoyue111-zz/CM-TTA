@@ -16,7 +16,9 @@ from data.voxtell_192 import (
     bbox_slices,
     crop_with_bbox,
     load_case_artifact,
+    load_preprocessed_directory,
     load_preprocessed_manifest,
+    load_source_directory,
     make_single_spatial_patch,
     preprocess_source_case,
     restore_probability_to_original,
@@ -141,6 +143,75 @@ def _summary_case(offset=0.0):
     row.update({field: index / 20.0 + offset for index, field in enumerate(fields)})
     row["foreground_erased_by_resize"] = False
     return row
+
+
+def test_source_directory_pairs_images_with_same_named_labels_without_manifest():
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        images_dir = root / "images"
+        labels_dir = root / "labels"
+        images_dir.mkdir()
+        labels_dir.mkdir()
+        for filename in ("0002.nii.gz", "0001.nii.gz"):
+            (images_dir / filename).touch()
+            (labels_dir / filename).touch()
+
+        cases = load_source_directory(images_dir)
+
+        assert [case.case_id for case in cases] == ["0001", "0002"]
+        assert [case.image_path for case in cases] == [
+            images_dir / "0001.nii.gz",
+            images_dir / "0002.nii.gz",
+        ]
+        assert [case.gt_path for case in cases] == [
+            labels_dir / "0001.nii.gz",
+            labels_dir / "0002.nii.gz",
+        ]
+
+
+def test_source_directory_reports_missing_same_named_label():
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        images_dir = root / "images"
+        labels_dir = root / "labels"
+        images_dir.mkdir()
+        labels_dir.mkdir()
+        (images_dir / "missing-label.nii.gz").touch()
+
+        try:
+            load_source_directory(images_dir)
+        except FileNotFoundError as error:
+            assert str(labels_dir / "missing-label.nii.gz") in str(error)
+        else:
+            raise AssertionError("Directory discovery accepted an image without its GT")
+
+
+def test_preprocessed_directory_discovers_artifacts_without_manifest():
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        source_image = root / "images" / "0001.nii.gz"
+        source_gt = root / "labels" / "0001.nii.gz"
+        source_image.parent.mkdir()
+        source_gt.parent.mkdir()
+        source_image.touch()
+        source_gt.touch()
+        artifact_dir = root / "offline" / "cases"
+        artifact_dir.mkdir(parents=True)
+        artifact_path = artifact_dir / "0001.npz"
+        np.savez(
+            artifact_path,
+            case_id=np.asarray("0001"),
+            image_path=np.asarray(str(source_image)),
+            gt_path=np.asarray(str(source_gt)),
+        )
+
+        entries = load_preprocessed_directory(root / "offline")
+
+        assert len(entries) == 1
+        assert entries[0].case_id == "0001"
+        assert entries[0].artifact_path == artifact_path
+        assert entries[0].image_path == source_image
+        assert entries[0].gt_path == source_gt
 
 
 def test_offline_preprocessing_is_exact_192_binary_and_records_geometry():
