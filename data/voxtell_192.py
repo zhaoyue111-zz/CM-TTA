@@ -204,6 +204,37 @@ def read_ras_case(
     return image, gt, properties
 
 
+def foreground_count_metadata(
+    case_id: str,
+    original_gt: np.ndarray,
+    cropped_gt: np.ndarray,
+    gt_192: np.ndarray,
+) -> dict[str, int | bool]:
+    """Validate that a positive foreground survives crop and nearest resize."""
+    original_count = int(np.count_nonzero(original_gt))
+    cropped_count = int(np.count_nonzero(cropped_gt))
+    resized_count = int(np.count_nonzero(gt_192))
+    erased_by_crop = original_count > 0 and cropped_count == 0
+    erased_by_resize = original_count > 0 and resized_count == 0
+    if erased_by_crop:
+        raise ValueError(
+            f"Case {case_id}: original GT has {original_count} foreground voxels "
+            "but the image-derived crop erased all foreground"
+        )
+    if erased_by_resize:
+        raise ValueError(
+            f"Case {case_id}: original GT has {original_count} foreground voxels "
+            "but nearest resizing to 192^3 erased all foreground"
+        )
+    return {
+        "original_foreground_voxel_count": original_count,
+        "cropped_foreground_voxel_count": cropped_count,
+        "gt_192_foreground_voxel_count": resized_count,
+        "foreground_erased_by_crop": erased_by_crop,
+        "foreground_erased_by_resize": erased_by_resize,
+    }
+
+
 def preprocess_source_case(
     case: SourceCase,
     output_dir: str | Path,
@@ -225,6 +256,9 @@ def preprocess_source_case(
         raise RuntimeError("Offline GT is not uint8 (1,192,192,192)")
     if not set(np.unique(gt_192)).issubset({0, 1}):
         raise RuntimeError("Nearest-resized GT is not binary")
+    foreground_metadata = foreground_count_metadata(
+        case.case_id, binary_gt, gt_crop, gt_192
+    )
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -233,6 +267,7 @@ def preprocess_source_case(
         artifact_path,
         image_192=image_192,
         gt_192=gt_192,
+        gt_cropped_native=gt_crop.astype(np.uint8, copy=False),
         image_cropped_native=normalized_crop.astype(np.float32, copy=False),
         original_shape=np.asarray(original_shape, dtype=np.int64),
         bbox=np.asarray(bbox, dtype=np.int64),
@@ -240,6 +275,21 @@ def preprocess_source_case(
         image_path=np.asarray(str(case.image_path.resolve())),
         gt_path=np.asarray(str(case.gt_path.resolve())),
         foreground_labels=np.asarray(labels, dtype=np.int64),
+        original_foreground_voxel_count=np.asarray(
+            foreground_metadata["original_foreground_voxel_count"], dtype=np.int64
+        ),
+        cropped_foreground_voxel_count=np.asarray(
+            foreground_metadata["cropped_foreground_voxel_count"], dtype=np.int64
+        ),
+        gt_192_foreground_voxel_count=np.asarray(
+            foreground_metadata["gt_192_foreground_voxel_count"], dtype=np.int64
+        ),
+        foreground_erased_by_crop=np.asarray(
+            foreground_metadata["foreground_erased_by_crop"], dtype=np.bool_
+        ),
+        foreground_erased_by_resize=np.asarray(
+            foreground_metadata["foreground_erased_by_resize"], dtype=np.bool_
+        ),
         original_affine=np.asarray(
             properties["nibabel_stuff"]["original_affine"], dtype=np.float64
         ),
@@ -257,6 +307,7 @@ def preprocess_source_case(
         "cropped_shape": list(normalized_crop.shape[-3:]),
         "target_shape": list(TARGET_SHAPE),
         "foreground_labels": list(labels),
+        **foreground_metadata,
     }
 
 
@@ -269,6 +320,24 @@ def load_case_artifact(case: PreprocessedCase | str | Path) -> dict:
     result["gt_path"] = Path(str(result["gt_path"].item()))
     result["original_shape"] = tuple(int(value) for value in result["original_shape"])
     result["bbox"] = [[int(value) for value in axis] for axis in result["bbox"]]
+    required_foreground_fields = (
+        "original_foreground_voxel_count",
+        "cropped_foreground_voxel_count",
+        "gt_192_foreground_voxel_count",
+        "foreground_erased_by_crop",
+        "foreground_erased_by_resize",
+        "gt_cropped_native",
+    )
+    missing = [field for field in required_foreground_fields if field not in result]
+    if missing:
+        raise ValueError(
+            f"Offline artifact {artifact_path} lacks foreground safeguards {missing}; "
+            "rerun preprocess_voxtell_192.py"
+        )
+    for field in required_foreground_fields[:3]:
+        result[field] = int(result[field].item())
+    for field in required_foreground_fields[3:5]:
+        result[field] = bool(result[field].item())
     image_192 = result["image_192"]
     gt_192 = result["gt_192"]
     if image_192.shape != (1, *TARGET_SHAPE) or image_192.dtype != np.float32:
@@ -280,6 +349,35 @@ def load_case_artifact(case: PreprocessedCase | str | Path) -> dict:
     expected_crop = tuple(end - start for start, end in result["bbox"])
     if tuple(result["image_cropped_native"].shape[-3:]) != expected_crop:
         raise ValueError(f"Offline native crop/bbox mismatch in {artifact_path}")
+    cropped_gt = result["gt_cropped_native"]
+    if tuple(cropped_gt.shape[-3:]) != expected_crop:
+        raise ValueError(f"Offline native GT crop/bbox mismatch in {artifact_path}")
+    if cropped_gt.dtype != np.uint8 or not set(np.unique(cropped_gt)).issubset({0, 1}):
+        raise ValueError(f"Offline native cropped GT is not binary uint8 in {artifact_path}")
+    observed_cropped = int(np.count_nonzero(cropped_gt))
+    observed_192 = int(np.count_nonzero(gt_192))
+    if observed_cropped != result["cropped_foreground_voxel_count"]:
+        raise ValueError(f"Offline cropped foreground count mismatch in {artifact_path}")
+    if observed_192 != result["gt_192_foreground_voxel_count"]:
+        raise ValueError(f"Offline 192^3 foreground count mismatch in {artifact_path}")
+    original_count = result["original_foreground_voxel_count"]
+    if original_count < 0:
+        raise ValueError(f"Offline original foreground count is negative in {artifact_path}")
+    expected_erased_by_crop = original_count > 0 and observed_cropped == 0
+    expected_erased_by_resize = original_count > 0 and observed_192 == 0
+    if expected_erased_by_crop:
+        raise ValueError(
+            f"Case {result['case_id']}: offline image crop erased all foreground"
+        )
+    if expected_erased_by_resize:
+        raise ValueError(
+            f"Case {result['case_id']}: offline nearest resize erased all foreground"
+        )
+    if (
+        expected_erased_by_crop != result["foreground_erased_by_crop"]
+        or expected_erased_by_resize != result["foreground_erased_by_resize"]
+    ):
+        raise ValueError(f"Offline foreground-erasure flags mismatch in {artifact_path}")
     return result
 
 
@@ -315,4 +413,3 @@ def restore_probability_to_original(
     full = np.zeros(tuple(int(value) for value in original_shape), dtype=np.float32)
     full[bbox_slices(bbox)] = restored_crop
     return full
-

@@ -59,6 +59,9 @@ DISABLED_EXPERIMENTAL_PATHS = (
 )
 
 SUMMARY_CASE_FIELDS = (
+    "original_foreground_voxel_count",
+    "cropped_foreground_voxel_count",
+    "gt_192_foreground_voxel_count",
     "all_views_max_Dice",
     "all_views_max_mIoU",
     "selected_view_Dice",
@@ -255,8 +258,16 @@ def adapt_prepared_case(adapter: VoxTellCMTTA, prepared: dict, case_id: str) -> 
         patch_locations=prepared["patch_locations"],
     )
     step_delta = int(adapter.optimizer_step_count) - before_steps
-    if step_delta != 1 or int(trace["optimizer_steps_for_case"]) != 1:
-        raise RuntimeError(f"Case {case_id} did not execute exactly one optimizer step")
+    successful_steps = int(trace.get("successful_optimizer_steps_for_case", 0))
+    if (
+        step_delta != 1
+        or int(trace["optimizer_steps_for_case"]) != 1
+        or successful_steps != 1
+        or bool(trace["optimizer_step_skipped"])
+    ):
+        raise RuntimeError(
+            f"Case {case_id} did not complete exactly one successful optimizer step"
+        )
     if int(trace.get("spatial_patch_count", trace["num_patches"])) != 1:
         raise RuntimeError(f"Case {case_id} did not use exactly one spatial patch")
     if adapter.long_delta is None:
@@ -313,23 +324,28 @@ def load_original_binary_gt(gt_path: Path, foreground_labels: list[int]) -> np.n
 
 def evaluate_probability(probability: np.ndarray, target: np.ndarray) -> dict[str, float]:
     """Threshold only at the evaluation boundary."""
+    if int(np.count_nonzero(target)) == 0:
+        raise ValueError(
+            "Empty evaluation GT is not allowed in the whole-case 192 experiment"
+        )
     return binary_metrics(np.asarray(probability) >= 0.5, np.asarray(target) > 0)
 
 
-def evaluate_pre_student_views(
+def evaluate_selection_context_views(
     predictor,
     image_192: np.ndarray,
     gt_192: np.ndarray,
-    text_feature: torch.Tensor,
+    selection_text_feature: torch.Tensor,
     view_params: list[dict[str, float]],
 ) -> list[dict]:
+    """Evaluate all views with the exact prepared short context used by selection."""
     rows = []
     for view_index, param in enumerate(view_params):
         view = image_192 if view_index == 0 else (
             image_192 * float(param["scale"]) + float(param["offset"])
         )
         probability = predict_official_probability(
-            predictor, view, text_feature, assert_one_window=True
+            predictor, view, selection_text_feature, assert_one_window=True
         )
         metrics = evaluate_probability(probability, gt_192[0])
         rows.append(
@@ -337,11 +353,39 @@ def evaluate_pre_student_views(
                 "view_index": view_index,
                 "scale": float(param["scale"]),
                 "offset": float(param["offset"]),
-                "pre_student_192_Dice": metrics["Dice"],
-                "pre_student_192_mIoU": metrics["mIoU"],
+                "selection_context_192_Dice": metrics["Dice"],
+                "selection_context_192_mIoU": metrics["mIoU"],
             }
         )
     return rows
+
+
+def summarize_selection_context_views(
+    view_metrics: list[dict], selected_view: int
+) -> dict[str, float | int | bool]:
+    """Compute oracle/selection diagnostics from short-context view metrics only."""
+    dice_values = np.asarray(
+        [row["selection_context_192_Dice"] for row in view_metrics],
+        dtype=np.float64,
+    )
+    miou_values = np.asarray(
+        [row["selection_context_192_mIoU"] for row in view_metrics],
+        dtype=np.float64,
+    )
+    if not 0 <= int(selected_view) < len(view_metrics):
+        raise IndexError("selected_view is outside the selection-context metrics")
+    oracle_best_view = int(np.argmax(dice_values))
+    return {
+        "oracle_best_view": oracle_best_view,
+        "all_views_max_Dice": float(dice_values.max()),
+        "all_views_max_mIoU": float(miou_values.max()),
+        "selected_view_Dice": float(dice_values[selected_view]),
+        "selected_view_mIoU": float(miou_values[selected_view]),
+        "selected_view_hits_oracle": int(selected_view) == oracle_best_view,
+        "selected_view_Dice_regret_to_oracle": float(
+            dice_values.max() - dice_values[selected_view]
+        ),
+    }
 
 
 def summarize_cases(cases: list[dict]) -> dict:
@@ -358,6 +402,12 @@ def summarize_cases(cases: list[dict]) -> dict:
             "selected_view_oracle_hit_rate": float(hits / len(cases)),
             "mean_selected_view_Dice_regret_to_oracle": float(
                 np.mean([float(row["selected_view_Dice_regret_to_oracle"]) for row in cases])
+            ),
+            "foreground_erased_by_resize_case_count": int(
+                sum(bool(row["foreground_erased_by_resize"]) for row in cases)
+            ),
+            "foreground_erased_by_resize_case_rate": float(
+                np.mean([bool(row["foreground_erased_by_resize"]) for row in cases])
             ),
         }
     )
@@ -439,6 +489,22 @@ def run_configuration(
                     f"Foreground labels differ from offline preprocessing for {entry.case_id}: "
                     f"artifact={artifact_labels}, CLI={base_args.foreground_labels}"
                 )
+            original_gt = load_original_binary_gt(
+                entry.gt_path, base_args.foreground_labels
+            )
+            if tuple(original_gt.shape) != artifact["original_shape"]:
+                raise ValueError(f"Original GT/recovery shape mismatch for {entry.case_id}")
+            observed_original_foreground = int(np.count_nonzero(original_gt))
+            if observed_original_foreground != artifact["original_foreground_voxel_count"]:
+                raise ValueError(
+                    f"Original foreground count mismatch for {entry.case_id}: "
+                    f"artifact={artifact['original_foreground_voxel_count']}, "
+                    f"observed={observed_original_foreground}"
+                )
+            if observed_original_foreground == 0:
+                raise ValueError(
+                    f"Case {entry.case_id}: empty original GT is excluded from metrics"
+                )
             params = shared_view_params[entry.case_id]
             prepared = prepare_adaptation_case(adapter, artifact["image_192"], params)
 
@@ -446,11 +512,23 @@ def run_configuration(
             pre_student_delta = adapter.ctx_delta.detach().clone()
             with torch.no_grad():
                 pre_student_text = adapter._encode_ctx(pre_student_delta).detach()
+                selection_text = adapter._encode_ctx(
+                    prepared["short_ctx"].detach()
+                ).detach()
 
             # Evaluation-only GT. It is not present in either adapter call above/below.
             gt_192 = artifact["gt_192"]
-            view_metrics = evaluate_pre_student_views(
-                predictor, artifact["image_192"], gt_192, pre_student_text, params
+            view_metrics = evaluate_selection_context_views(
+                predictor, artifact["image_192"], gt_192, selection_text, params
+            )
+            pre_student_probability = predict_official_probability(
+                predictor,
+                artifact["image_192"],
+                pre_student_text,
+                assert_one_window=True,
+            )
+            pre_student_metrics = evaluate_probability(
+                pre_student_probability, gt_192[0]
             )
             trace = adapt_prepared_case(adapter, prepared, entry.case_id)
 
@@ -467,13 +545,9 @@ def run_configuration(
             selected_view = int(trace["selected_view"])
             selection = trace["view_selection"]
             selected_score = float(selection["selection_scores"][selected_view])
-            dice_values = np.asarray(
-                [row["pre_student_192_Dice"] for row in view_metrics], dtype=np.float64
+            selection_outcomes = summarize_selection_context_views(
+                view_metrics, selected_view
             )
-            miou_values = np.asarray(
-                [row["pre_student_192_mIoU"] for row in view_metrics], dtype=np.float64
-            )
-            oracle_best_view = int(np.argmax(dice_values))
 
             post_student_probability = predict_official_probability(
                 predictor, artifact["image_192"], post_student_text, assert_one_window=True
@@ -485,10 +559,6 @@ def run_configuration(
                 predictor, artifact["image_192"], post_teacher_text, assert_one_window=True
             )
             post_teacher_192_metrics = evaluate_probability(post_teacher_192_probability, gt_192[0])
-
-            original_gt = load_original_binary_gt(entry.gt_path, base_args.foreground_labels)
-            if tuple(original_gt.shape) != artifact["original_shape"]:
-                raise ValueError(f"Original GT/recovery shape mismatch for {entry.case_id}")
 
             # Teacher A: official 50%-overlap/Gaussian path on the saved native crop.
             native_probability = predict_official_probability(
@@ -504,25 +574,28 @@ def run_configuration(
             )
             restored_metrics = evaluate_probability(probability_192_to_original, original_gt)
 
-            pre_student_metrics = {
-                "Dice": float(view_metrics[0]["pre_student_192_Dice"]),
-                "mIoU": float(view_metrics[0]["pre_student_192_mIoU"]),
-            }
             row = {
                 "case_id": entry.case_id,
                 "execution_order": execution_order,
+                "original_foreground_voxel_count": artifact[
+                    "original_foreground_voxel_count"
+                ],
+                "cropped_foreground_voxel_count": artifact[
+                    "cropped_foreground_voxel_count"
+                ],
+                "gt_192_foreground_voxel_count": artifact[
+                    "gt_192_foreground_voxel_count"
+                ],
+                "foreground_erased_by_resize": artifact[
+                    "foreground_erased_by_resize"
+                ],
                 "view_params": [dict(param) for param in params],
-                "pre_student_view_metrics_192": view_metrics,
-                "oracle_best_view": oracle_best_view,
-                "all_views_max_Dice": float(dice_values.max()),
-                "all_views_max_mIoU": float(miou_values.max()),
+                "selection_context_view_metrics_192": view_metrics,
+                "selection_prompt_source": "prepared_case.short_ctx",
                 "selected_view": selected_view,
                 "selected_view_selection_metric": selector["view_selection_metric"],
                 "selected_view_score": selected_score,
-                "selected_view_Dice": float(dice_values[selected_view]),
-                "selected_view_mIoU": float(miou_values[selected_view]),
-                "selected_view_hits_oracle": selected_view == oracle_best_view,
-                "selected_view_Dice_regret_to_oracle": float(dice_values.max() - dice_values[selected_view]),
+                **selection_outcomes,
                 "pre_student_192_Dice": pre_student_metrics["Dice"],
                 "pre_student_192_mIoU": pre_student_metrics["mIoU"],
                 "post_student_192_Dice": post_student_metrics["Dice"],
@@ -536,9 +609,13 @@ def run_configuration(
                 "post_teacher_192_to_original_Dice": restored_metrics["Dice"],
                 "post_teacher_192_to_original_mIoU": restored_metrics["mIoU"],
                 "optimizer_steps_for_case": int(trace["optimizer_steps_for_case"]),
+                "successful_optimizer_steps_for_case": int(
+                    trace["successful_optimizer_steps_for_case"]
+                ),
                 "spatial_patch_count": int(trace.get("spatial_patch_count", trace["num_patches"])),
                 "amp_optimizer_step_skipped": bool(trace["optimizer_step_skipped"]),
                 "pre_student_text_state": "adapter.ctx_delta before optimizer.step",
+                "pre_student_prompt_source": "adapter.ctx_delta before optimizer.step",
                 "post_student_text_state": "adapter.ctx_delta after optimizer.step",
                 "post_teacher_text_state": "adapter.long_delta after original LSPM/EMA update",
                 "post_teacher_uses_adapter_long_delta": True,
@@ -550,7 +627,11 @@ def run_configuration(
                 ),
                 "adaptation_trace": trace,
             }
-            if row["optimizer_steps_for_case"] != 1 or row["spatial_patch_count"] != 1:
+            if (
+                row["successful_optimizer_steps_for_case"] != 1
+                or row["amp_optimizer_step_skipped"]
+                or row["spatial_patch_count"] != 1
+            ):
                 raise RuntimeError(f"Protocol assertion failed for {entry.case_id}")
             case_rows.append(row)
 

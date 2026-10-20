@@ -3205,6 +3205,21 @@ class VoxTellCMTTA:
         if leaked:
             raise RuntimeError(f"Frozen model parameters received gradients: {leaked[:5]}")
 
+    def _perform_successful_optimizer_step(self, scale_before_step: float) -> bool:
+        """Run one scaled step and count it only after GradScaler confirms success."""
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        scale_after_step = float(self.scaler.get_scale())
+        optimizer_step_skipped = scale_after_step < float(scale_before_step)
+        if optimizer_step_skipped:
+            self.optimizer.zero_grad(set_to_none=True)
+            raise RuntimeError(
+                "GradScaler skipped the optimizer step after AMP overflow; "
+                "the case was not adapted and LSPM/EMA state was not updated"
+            )
+        self.optimizer_step_count += 1
+        return False
+
     def _text_input(self, text_features: torch.Tensor, batch_size: int) -> torch.Tensor:
         return text_features.expand(batch_size, -1, -1).unsqueeze(2)
 
@@ -7518,17 +7533,9 @@ class VoxTellCMTTA:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-        scale_after_step = float(self.scaler.get_scale())
-        optimizer_step_skipped = scale_after_step < scale_before_step
-        if optimizer_step_skipped:
-            warnings.warn(
-                "GradScaler skipped the optimizer step after AMP overflow",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        self.optimizer_step_count += 1
+        optimizer_step_skipped = self._perform_successful_optimizer_step(
+            scale_before_step
+        )
 
         if self.pseudo_update_mode == "decoder_masked":
             post_diagnostics = self._selected_prompt_region_diagnostics(
@@ -7572,6 +7579,7 @@ class VoxTellCMTTA:
             "num_patches": len(patches),
             "spatial_patch_count": len(patches),
             "optimizer_steps_for_case": 1,
+            "successful_optimizer_steps_for_case": 1,
             "optimizer_step_skipped": optimizer_step_skipped,
             "current_quality": current_quality,
             "historical_quality": historical_quality,

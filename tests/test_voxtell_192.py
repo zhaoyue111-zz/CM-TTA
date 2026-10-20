@@ -3,6 +3,7 @@ import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import nibabel as nib
 import numpy as np
@@ -28,10 +29,12 @@ from run_voxtell_192_comparison import (
     assert_fresh_adapter,
     generate_view_params_manifest,
     frozen_model_version_signature,
+    evaluate_selection_context_views,
     load_view_params_manifest,
     official_window_count,
     prepare_adaptation_case,
     summarize_cases,
+    summarize_selection_context_views,
     write_combined_outputs,
 )
 from method.voxtell_cmtta import VoxTellCMTTA
@@ -68,6 +71,8 @@ class _SpyAdapter:
         self.long_delta = torch.ones(1)
         return {
             "optimizer_steps_for_case": 1,
+            "successful_optimizer_steps_for_case": 1,
+            "optimizer_step_skipped": False,
             "spatial_patch_count": len(patches),
             "num_patches": len(patches),
         }
@@ -113,6 +118,9 @@ def _summary_case(offset=0.0):
         "selected_view_Dice_regret_to_oracle": 0.1 + offset,
     }
     fields = (
+        "original_foreground_voxel_count",
+        "cropped_foreground_voxel_count",
+        "gt_192_foreground_voxel_count",
         "all_views_max_Dice",
         "all_views_max_mIoU",
         "selected_view_Dice",
@@ -131,6 +139,7 @@ def _summary_case(offset=0.0):
         "student_192_mIoU_change",
     )
     row.update({field: index / 20.0 + offset for index, field in enumerate(fields)})
+    row["foreground_erased_by_resize"] = False
     return row
 
 
@@ -158,6 +167,12 @@ def test_offline_preprocessing_is_exact_192_binary_and_records_geometry():
         assert artifact["gt_192"].shape == (1, 192, 192, 192)
         assert artifact["gt_192"].dtype == np.uint8
         assert set(np.unique(artifact["gt_192"])) == {0, 1}
+        assert artifact["original_foreground_voxel_count"] == int(
+            np.count_nonzero(gt == 7)
+        )
+        assert artifact["cropped_foreground_voxel_count"] > 0
+        assert artifact["gt_192_foreground_voxel_count"] > 0
+        assert artifact["foreground_erased_by_resize"] is False
         assert np.allclose(artifact["original_affine"], affine)
         assert tuple(row["cropped_shape"]) == tuple(
             stop - start for start, stop in artifact["bbox"]
@@ -196,12 +211,125 @@ def test_one_optimizer_step_and_gt_never_enters_adapter_calls():
     prepared = prepare_adaptation_case(adapter, image, params)
     trace = adapt_prepared_case(adapter, prepared, "case-a")
     assert trace["optimizer_steps_for_case"] == 1
+    assert trace["successful_optimizer_steps_for_case"] == 1
     assert adapter.optimizer_step_count == 1
     for call in adapter.prepare_calls + adapter.adapt_calls:
         positional, masks, kwargs = call
         assert all(value is not gt_sentinel for value in positional)
         assert all(value is not gt_sentinel for value in masks)
         assert all(value is not gt_sentinel for value in kwargs.values())
+
+
+def test_selection_metrics_use_short_ctx_when_raw_ctx_delta_differs():
+    image = np.zeros((1, 1, 1, 1), dtype=np.float32)
+    gt = np.ones((1, 1, 1, 1), dtype=np.uint8)
+    params = [
+        {"scale": 1.0, "offset": 0.0},
+        {"scale": 1.0, "offset": 1.0},
+    ]
+    raw_ctx_text = torch.tensor([[[1.0]]])
+    short_ctx_text = torch.tensor([[[2.0]]])
+
+    def fake_probability(_predictor, view, text_feature, **_kwargs):
+        is_augmented = float(np.asarray(view).mean()) > 0.5
+        uses_short = float(text_feature.item()) == 2.0
+        foreground = is_augmented if uses_short else not is_augmented
+        return np.ones((1, 1, 1), dtype=np.float32) if foreground else np.zeros(
+            (1, 1, 1), dtype=np.float32
+        )
+
+    with patch(
+        "run_voxtell_192_comparison.predict_official_probability",
+        side_effect=fake_probability,
+    ):
+        short_metrics = evaluate_selection_context_views(
+            object(), image, gt, short_ctx_text, params
+        )
+        raw_metrics = evaluate_selection_context_views(
+            object(), image, gt, raw_ctx_text, params
+        )
+    short_outcomes = summarize_selection_context_views(short_metrics, selected_view=1)
+    raw_outcomes = summarize_selection_context_views(raw_metrics, selected_view=1)
+    assert short_outcomes["oracle_best_view"] == 1
+    assert short_outcomes["selected_view_Dice"] == 1.0
+    assert short_outcomes["selected_view_Dice_regret_to_oracle"] == 0.0
+    assert raw_outcomes["oracle_best_view"] == 0
+    assert raw_outcomes["selected_view_Dice"] == 0.0
+
+
+def test_preprocessing_fails_when_positive_gt_is_erased_by_192_resize():
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        image = np.ones((4, 4, 4), dtype=np.float32)
+        gt = np.zeros_like(image, dtype=np.uint8)
+        gt[1, 1, 1] = 9
+        image_path = root / "image.nii.gz"
+        gt_path = root / "gt.nii.gz"
+        nib.save(nib.Nifti1Image(image, np.eye(4)), image_path)
+        nib.save(nib.Nifti1Image(gt, np.eye(4)), gt_path)
+        empty_image = np.zeros((1, *TARGET_SHAPE), dtype=np.float32)
+        empty_gt = np.zeros((1, *TARGET_SHAPE), dtype=np.uint8)
+        try:
+            with patch(
+                "data.voxtell_192.resize_image_and_gt",
+                return_value=(empty_image, empty_gt),
+            ):
+                preprocess_source_case(
+                    SourceCase("tiny-tumor", image_path, gt_path),
+                    root / "offline",
+                    [9],
+                )
+        except ValueError as error:
+            assert "tiny-tumor" in str(error)
+            assert "erased all foreground" in str(error)
+        else:
+            raise AssertionError("Preprocessing accepted a foreground-erased GT")
+
+
+def test_amp_skipped_step_does_not_commit_success_count_or_lspm_state():
+    class SkippingScaler:
+        def __init__(self):
+            self.scale = 1024.0
+
+        def step(self, _optimizer):
+            return None
+
+        def update(self):
+            self.scale = 512.0
+
+        def get_scale(self):
+            return self.scale
+
+    class FakeOptimizer:
+        def __init__(self):
+            self.zero_grad_calls = 0
+
+        def zero_grad(self, set_to_none=False):
+            assert set_to_none is True
+            self.zero_grad_calls += 1
+
+    short_delta = torch.tensor([1.0])
+    long_delta = torch.tensor([2.0])
+    memory = ["unchanged"]
+    dummy = types.SimpleNamespace(
+        scaler=SkippingScaler(),
+        optimizer=FakeOptimizer(),
+        optimizer_step_count=3,
+        short_delta=short_delta,
+        long_delta=long_delta,
+        short_memory=memory,
+    )
+    try:
+        VoxTellCMTTA._perform_successful_optimizer_step(dummy, 1024.0)
+    except RuntimeError as error:
+        assert "not adapted" in str(error)
+    else:
+        raise AssertionError("AMP-skipped optimizer step did not fail")
+    assert dummy.optimizer_step_count == 3
+    assert dummy.short_delta is short_delta
+    assert dummy.long_delta is long_delta
+    assert dummy.short_memory is memory and dummy.short_memory == ["unchanged"]
+    assert dummy.optimizer.zero_grad_calls == 1
 
 
 def test_four_configs_share_order_and_params_but_adapter_states_are_isolated():
@@ -267,8 +395,12 @@ def test_summary_is_recomputed_as_case_macro_average():
     assert summary["case_count"] == 2
     assert summary["selected_view_oracle_hit_count"] == 1
     assert summary["selected_view_oracle_hit_rate"] == 0.5
-    assert np.isclose(summary["mean_all_views_max_Dice"], 0.1)
+    assert np.isclose(
+        summary["mean_all_views_max_Dice"],
+        np.mean([row["all_views_max_Dice"] for row in rows]),
+    )
     assert np.isclose(summary["mean_selected_view_Dice_regret_to_oracle"], 0.2)
+    assert summary["foreground_erased_by_resize_case_count"] == 0
 
 
 def test_combined_outputs_align_cases_and_include_each_final_macro_average():

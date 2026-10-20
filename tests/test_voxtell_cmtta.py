@@ -1623,12 +1623,15 @@ class VoxTellCMTTATest(unittest.TestCase):
                 "torch.nn.utils.clip_grad_norm_"
             ) as clip_grad:
                 warnings.simplefilter("always")
-                trace = adapter.adapt_case(
-                    [patch_tensor], [valid], prepared_case=prepared
-                )
-            self.assertTrue(trace["optimizer_step_skipped"])
+                with self.assertRaisesRegex(RuntimeError, "LSPM/EMA state was not updated"):
+                    adapter.adapt_case(
+                        [patch_tensor], [valid], prepared_case=prepared
+                    )
             self.assertEqual(adapter.scaler.get_scale(), 4.0)
-            self.assertEqual(trace["optimizer_steps_for_case"], 1)
+            self.assertEqual(adapter.optimizer_step_count, 0)
+            self.assertIsNone(adapter.short_delta)
+            self.assertIsNone(adapter.long_delta)
+            self.assertEqual(len(adapter.short_memory), 0)
             clip_grad.assert_not_called()
             self.assertTrue(
                 any("non-finite trainable gradient" in str(item.message) for item in caught)
@@ -4794,7 +4797,7 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             adapter.close()
 
-    def test_amp_skipped_step_does_not_require_ctx_value_change(self):
+    def test_amp_skipped_step_fails_without_committing_lspm_state(self):
         class SkippedScaler:
             def __init__(self):
                 self.scale_value = 8.0
@@ -4819,12 +4822,12 @@ class VoxTellCMTTATest(unittest.TestCase):
         )
         adapter.scaler = SkippedScaler()
         try:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                trace = adapter.adapt_case([torch.zeros(1, 2, 2, 2)])
-            self.assertTrue(trace["optimizer_step_skipped"])
-            self.assertEqual(trace["optimizer_steps_for_case"], 1)
-            self.assertTrue(any("skipped" in str(item.message) for item in caught))
+            with self.assertRaisesRegex(RuntimeError, "LSPM/EMA state was not updated"):
+                adapter.adapt_case([torch.zeros(1, 2, 2, 2)])
+            self.assertEqual(adapter.optimizer_step_count, 0)
+            self.assertIsNone(adapter.short_delta)
+            self.assertIsNone(adapter.long_delta)
+            self.assertEqual(len(adapter.short_memory), 0)
         finally:
             adapter.close()
 
