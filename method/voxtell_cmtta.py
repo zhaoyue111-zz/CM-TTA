@@ -2215,6 +2215,9 @@ class VoxTellCMTTA:
             raise ValueError("n_ctx must be positive")
         self._fixed_token_embeddings = None
         self._fixed_attention_mask = None
+        # Historical name retained as a private compatibility alias.  The
+        # indices now refer to the configured prompt (for example
+        # ``liver cancer``), not specifically to the word ``liver``.
         self._liver_token_indices = None
 
         if self.qwen_text_encoder is not None:
@@ -2836,8 +2839,8 @@ class VoxTellCMTTA:
         formatted_text_prompt: Optional[str],
     ) -> None:
         """Build fixed Qwen inputs and zero-initialized token deltas."""
-        if self.text_prompt != "liver":
-            raise ValueError('VoxTell CM-TTA fixes the text prompt to "liver"')
+        if not self.text_prompt.strip():
+            raise ValueError("VoxTell CM-TTA requires a non-empty text prompt")
         if formatted_text_prompt is None:
             try:
                 from voxtell.utils.text_embedding import wrap_with_instruction
@@ -2862,7 +2865,7 @@ class VoxTellCMTTA:
             )
         except (TypeError, ValueError):
             # Slow tokenizers do not expose offset mappings. The token-id
-            # subsequence fallback below still locates the fixed liver token.
+            # subsequence fallback below still locates the configured prompt.
             tokenized = tokenizer(
                 [formatted_prompt],
                 padding=True,
@@ -2889,12 +2892,12 @@ class VoxTellCMTTA:
         query_start = formatted_prompt.rfind(self.text_prompt)
         query_end = query_start + len(self.text_prompt)
         offsets = tokenized.get("offset_mapping")
-        liver_indices = []
+        prompt_indices = []
         if offsets is not None and query_start >= 0:
             for index, (start, end) in enumerate(torch.as_tensor(offsets)[0].tolist()):
                 if end > start and start < query_end and end > query_start:
-                    liver_indices.append(index)
-        if not liver_indices:
+                    prompt_indices.append(index)
+        if not prompt_indices:
             active_indices = torch.nonzero(attention_mask[0], as_tuple=False).flatten().tolist()
             active_ids = input_ids[0, active_indices].tolist()
             query_token_candidates = []
@@ -2907,13 +2910,14 @@ class VoxTellCMTTA:
             for query_tokens in query_token_candidates:
                 for start in range(max(0, len(active_ids) - len(query_tokens) + 1)):
                     if active_ids[start:start + len(query_tokens)] == query_tokens:
-                        liver_indices = active_indices[start:start + len(query_tokens)]
+                        prompt_indices = active_indices[start:start + len(query_tokens)]
                         break
-                if liver_indices:
+                if prompt_indices:
                     break
-        if not liver_indices:
+        if not prompt_indices:
             raise ValueError(
-                "Could not locate all fixed 'liver' tokens in the wrapped Qwen prompt"
+                f"Could not locate configured prompt tokens for {self.text_prompt!r} "
+                "in the wrapped Qwen prompt"
             )
 
         embedding_dim = int(token_embedding.embedding_dim)
@@ -2923,9 +2927,9 @@ class VoxTellCMTTA:
                     "Non-zero initial ctx is incompatible with zero-initialized ctx_delta"
                 )
         self._liver_token_indices = torch.tensor(
-            liver_indices, device=self.device, dtype=torch.long
+            prompt_indices, device=self.device, dtype=torch.long
         )
-        self.n_ctx = len(liver_indices)
+        self.n_ctx = len(prompt_indices)
         delta = torch.zeros(
             (self.n_ctx, embedding_dim), device=self.device, dtype=torch.float32
         )
@@ -2933,7 +2937,7 @@ class VoxTellCMTTA:
         self.initial_ctx_delta = delta.clone()
 
     def _encode_ctx(self, ctx_delta: torch.Tensor) -> torch.Tensor:
-        """Encode fixed wrapped ``liver`` tokens plus position-local deltas."""
+        """Encode fixed wrapped prompt tokens plus position-local deltas."""
         if self.qwen_text_encoder is None:
             return ctx_delta.unsqueeze(0) if ctx_delta.ndim == 2 else ctx_delta
         if ctx_delta.ndim == 2:
@@ -7566,6 +7570,7 @@ class VoxTellCMTTA:
             "view_selection": dict(self.last_view_selection),
             "num_views": 1 + self.num_aug_views,
             "num_patches": len(patches),
+            "spatial_patch_count": len(patches),
             "optimizer_steps_for_case": 1,
             "optimizer_step_skipped": optimizer_step_skipped,
             "current_quality": current_quality,
@@ -7914,7 +7919,7 @@ class VoxTellCMTTA:
         delta = state["ctx_delta"].to(self.device)
         if tuple(delta.shape) != tuple(self.ctx_delta.shape):
             raise ValueError(
-                "ctx_delta shape does not match the current tokenizer-derived liver token count: "
+                "ctx_delta shape does not match the current tokenizer-derived prompt token count: "
                 f"checkpoint={tuple(delta.shape)}, current={tuple(self.ctx_delta.shape)}"
             )
         self.ctx_delta.data.copy_(delta)
