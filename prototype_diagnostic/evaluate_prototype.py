@@ -6,12 +6,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data.voxtell_p0 import load_ras_image, load_ras_label
 from prototype_diagnostic.extract_features import SlidingD5FeatureExtractor, prepare_case
 from prototype_diagnostic.utils import (
     bbox_slices,
     binary_ranking_metrics,
     distribution_stats,
+    foreground_mask,
+    load_ras_image,
+    load_ras_label_values,
     restore_crop,
     save_case_figure,
     save_float_nifti_model_space,
@@ -98,11 +100,14 @@ def evaluate_query_case(
     *,
     topk: int,
     voxel_chunk_size: int,
+    foreground_labels: list[int] | tuple[int, ...] = (1,),
 ) -> dict[str, object]:
     name = image_path.name
     prepared = prepare_case(predictor, image_path)
     extractor = SlidingD5FeatureExtractor(predictor)
     extracted = extractor.extract(prepared.data, text_embedding)
+    if extracted.feature is None:
+        raise RuntimeError("D5 feature hook returned no query feature")
     similarity_max, similarity_topk, match_info = prototype_similarity_maps(
         extracted.feature,
         bank["prototypes"],
@@ -111,7 +116,9 @@ def evaluate_query_case(
         voxel_chunk_size=voxel_chunk_size,
     )
 
-    target_full = np.squeeze(load_ras_label(str(label_path))).astype(bool)
+    target_full = foreground_mask(
+        load_ras_label_values(label_path), foreground_labels
+    )
     if target_full.shape != prepared.original_shape:
         raise ValueError(
             f"GT/source shape mismatch for {name}: {target_full.shape} vs "
@@ -138,6 +145,7 @@ def evaluate_query_case(
 
     metrics: dict[str, object] = {
         "case_name": name,
+        "foreground_labels": [int(value) for value in foreground_labels],
         "gt_foreground_voxels": int(target.sum()),
         "gt_foreground_voxels_outside_preprocessed_crop": outside_crop_foreground,
         "evaluated_voxels": int(target.size),

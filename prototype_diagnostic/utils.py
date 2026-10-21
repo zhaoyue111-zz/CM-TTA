@@ -12,11 +12,82 @@ import nibabel as nib
 import numpy as np
 import torch
 from nibabel.orientations import axcodes2ornt, io_orientation, ornt_transform
+from nnunetv2.imageio.nibabel_reader_writer import NibabelIOWithReorient
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 
 PERCENTILES = (5, 25, 50, 75, 95)
 RANK_FRACTIONS = (0.001, 0.005, 0.01, 0.02, 0.05, 0.10)
+
+
+def _split_case_name(case: object) -> str:
+    if isinstance(case, Mapping):
+        case = case.get("case_name", case.get("name", case.get("case")))
+    if case is None:
+        raise ValueError("Each test case must be a filename or case mapping")
+    return case_name(str(case))
+
+
+def resolve_image_label_dirs(data_dir: str | Path) -> tuple[Path, Path]:
+    """Resolve flat HBP or legacy P0 paths without importing project data code."""
+    root = Path(data_dir).expanduser()
+    candidates = (
+        (root / "images" / "P0", root / "labels" / "P0"),
+        (root / "images", root / "labels"),
+    )
+    for image_dir, label_dir in candidates:
+        if image_dir.is_dir() and label_dir.is_dir():
+            return image_dir, label_dir
+    searched = ", ".join(f"({image}, {label})" for image, label in candidates)
+    raise FileNotFoundError(f"No compatible image/label layout found; checked {searched}")
+
+
+def read_test_entries(
+    data_dir: str | Path, split_file: str | Path
+) -> list[tuple[Path, Path]]:
+    """Read only split test cases from flat or legacy P0 directory layouts."""
+    split_path = Path(split_file).expanduser()
+    if not split_path.exists():
+        raise FileNotFoundError(f"Split file does not exist: {split_path}")
+    payload = json.loads(split_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("test_cases"), list):
+        raise ValueError(f"{split_path} must contain a test_cases list")
+    image_dir, label_dir = resolve_image_label_dirs(data_dir)
+    entries: list[tuple[Path, Path]] = []
+    for raw_case in payload["test_cases"]:
+        name = _split_case_name(raw_case)
+        image_path = image_dir / name
+        label_path = label_dir / name
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Test image does not exist: {image_path}")
+        if not label_path.is_file():
+            raise FileNotFoundError(f"Test label does not exist: {label_path}")
+        entries.append((image_path, label_path))
+    if not entries:
+        raise ValueError("The test split is empty")
+    return entries
+
+
+def load_ras_image(path: str | Path) -> np.ndarray:
+    return NibabelIOWithReorient().read_images([str(path)])[0]
+
+
+def load_ras_label_values(path: str | Path) -> np.ndarray:
+    """Load integer label IDs in the same RAS/model-space order as the image."""
+    label = np.squeeze(NibabelIOWithReorient().read_images([str(path)])[0])
+    if label.ndim != 3:
+        raise ValueError(f"Expected a 3-D label at {path}, got {label.shape}")
+    rounded = np.rint(label)
+    if not np.allclose(label, rounded):
+        raise ValueError(f"Label contains non-integer values: {path}")
+    return rounded.astype(np.int64, copy=False)
+
+
+def foreground_mask(label: np.ndarray, foreground_labels: Sequence[int]) -> np.ndarray:
+    labels = tuple(int(value) for value in foreground_labels)
+    if not labels:
+        raise ValueError("foreground_labels must contain at least one integer")
+    return np.isin(np.asarray(label), labels)
 
 
 def seed_everything(seed: int) -> None:

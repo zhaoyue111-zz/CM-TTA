@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
+import torch.nn.functional as F
 from acvl_utils.cropping_and_padding.padding import pad_nd_image
 from nnunetv2.inference.sliding_window_prediction import compute_gaussian
 
-from data.voxtell_p0 import load_ras_image
 from method.voxtell_cmtta import VoxTellCMTTA
+from prototype_diagnostic.utils import load_ras_image
 
 
 D5_PREHEAD_MODULE = "network.decoder.stages[-1]"
@@ -27,9 +28,10 @@ class PreparedCase:
 
 @dataclass
 class ExtractedVolume:
-    feature: torch.Tensor
+    feature: torch.Tensor | None
     logits: torch.Tensor
     probability: torch.Tensor
+    decoder_logits: tuple[torch.Tensor, ...] | None = None
 
 
 def build_predictor(
@@ -161,7 +163,12 @@ class SlidingD5FeatureExtractor:
         self._printed = False
 
     def extract(
-        self, input_image: torch.Tensor, text_embedding: torch.Tensor
+        self,
+        input_image: torch.Tensor,
+        text_embedding: torch.Tensor,
+        *,
+        capture_feature: bool = True,
+        return_decoder_logits: bool = False,
     ) -> ExtractedVolume:
         if input_image.ndim != 4:
             raise ValueError(f"Expected input (C,D,H,W), got {tuple(input_image.shape)}")
@@ -188,6 +195,7 @@ class SlidingD5FeatureExtractor:
         logits_sum = torch.zeros(padded_shape, dtype=torch.float32)
         denominator = torch.zeros(padded_shape, dtype=torch.float32)
         feature_sum: torch.Tensor | None = None
+        decoder_sums: list[torch.Tensor] | None = None
         captured: list[torch.Tensor] = []
 
         def capture(_module, _inputs, output):
@@ -197,7 +205,7 @@ class SlidingD5FeatureExtractor:
                 )
             captured.append(output.detach())
 
-        handle = self.hook_module.register_forward_hook(capture)
+        handle = self.hook_module.register_forward_hook(capture) if capture_feature else None
         try:
             for tile_index, slicer in enumerate(slicers):
                 tile = padded[slicer][None].to(self.device, non_blocking=True)
@@ -206,19 +214,28 @@ class SlidingD5FeatureExtractor:
                     device_type=self.device.type,
                     enabled=self.device.type == "cuda",
                 ):
-                    output = network(tile, text_embedding.to(self.device))
-                if isinstance(output, (list, tuple)):
-                    output = output[0]
-                if not torch.is_tensor(output) or output.ndim != 5:
+                    if return_decoder_logits:
+                        output = network(
+                            tile,
+                            text_embedding.to(self.device),
+                            return_decoder_outputs=True,
+                        )
+                    else:
+                        output = network(tile, text_embedding.to(self.device))
+                decoder_outputs = list(output) if isinstance(output, (list, tuple)) else [output]
+                if return_decoder_logits and len(decoder_outputs) < 4:
+                    raise RuntimeError("VoxTell did not return D5-D2 decoder outputs")
+                final_output = decoder_outputs[0]
+                if not torch.is_tensor(final_output) or final_output.ndim != 5:
                     raise RuntimeError("VoxTell forward did not return 5-D D5 logits")
-                if len(captured) != 1:
+                if capture_feature and len(captured) != 1:
                     raise RuntimeError(
                         f"Expected one {D5_PREHEAD_MODULE} activation per tile, got {len(captured)}"
                     )
-                patch_feature = captured[0][0].float().cpu()
-                patch_logits = output[0, 0].float().cpu()
+                patch_feature = captured[0][0].float().cpu() if capture_feature else None
+                patch_logits = final_output[0, 0].float().cpu()
                 tile_shape = tuple(int(s.stop - s.start) for s in slicer[1:])
-                if tuple(patch_feature.shape[1:]) != tile_shape:
+                if patch_feature is not None and tuple(patch_feature.shape[1:]) != tile_shape:
                     raise RuntimeError(
                         "D5 pre-head feature is not full-resolution/aligned with the tile: "
                         f"feature={tuple(patch_feature.shape)} tile={tile_shape}"
@@ -227,40 +244,92 @@ class SlidingD5FeatureExtractor:
                     raise RuntimeError(
                         f"D5 logits shape {tuple(patch_logits.shape)} != tile {tile_shape}"
                     )
-                if feature_sum is None:
+                if patch_feature is not None and feature_sum is None:
                     feature_sum = torch.zeros(
                         (int(patch_feature.shape[0]), *padded_shape), dtype=torch.float32
                     )
-                feature_sum[(slice(None), *slicer[1:])] += patch_feature * gaussian.unsqueeze(0)
+                if patch_feature is not None:
+                    feature_sum[(slice(None), *slicer[1:])] += (
+                        patch_feature * gaussian.unsqueeze(0)
+                    )
                 logits_sum[slicer[1:]] += patch_logits * gaussian
                 denominator[slicer[1:]] += gaussian
 
+                if return_decoder_logits:
+                    resized = []
+                    for level_output in decoder_outputs[:4]:
+                        if not torch.is_tensor(level_output) or level_output.ndim != 5:
+                            raise RuntimeError("Decoder output must have shape (B,N,D,H,W)")
+                        level_logits = level_output[:, :1].float()
+                        if tuple(level_logits.shape[2:]) != tile_shape:
+                            level_logits = F.interpolate(
+                                level_logits,
+                                size=tile_shape,
+                                mode="trilinear",
+                                align_corners=False,
+                            )
+                        resized.append(level_logits[0, 0].cpu())
+                    if decoder_sums is None:
+                        decoder_sums = [
+                            torch.zeros(padded_shape, dtype=torch.float32)
+                            for _ in resized
+                        ]
+                    for accumulator, level_logits in zip(decoder_sums, resized):
+                        accumulator[slicer[1:]] += level_logits * gaussian
+
                 if self.print_shapes and not self._printed and tile_index == 0:
+                    feature_shape = tuple(captured[0].shape) if captured else None
+                    decoder_shapes = (
+                        [tuple(value.shape) for value in decoder_outputs[:4]]
+                        if return_decoder_logits
+                        else None
+                    )
                     print(
                         "[prototype-diagnostic] first tensors: "
                         f"preprocessed={tuple(input_image.shape)} "
                         f"padded={tuple(padded.shape)} tile={tuple(tile.shape)} "
-                        f"D5_prehead={tuple(captured[0].shape)} "
-                        f"D5_logits={tuple(output.shape)}"
+                        f"D5_prehead={feature_shape} "
+                        f"D5_logits={tuple(final_output.shape)} "
+                        f"decoder_D5_to_D2={decoder_shapes}"
                     )
         finally:
-            handle.remove()
+            if handle is not None:
+                handle.remove()
 
-        if feature_sum is None or not slicers:
+        if not slicers or (capture_feature and feature_sum is None):
             raise RuntimeError("Sliding-window inference produced no tiles")
         if bool((denominator <= 0).any()):
             raise RuntimeError("Sliding-window Gaussian denominator contains uncovered voxels")
-        feature_sum.div_(denominator.unsqueeze(0))
+        if feature_sum is not None:
+            feature_sum.div_(denominator.unsqueeze(0))
         logits_sum.div_(denominator)
+        if decoder_sums is not None:
+            for accumulator in decoder_sums:
+                accumulator.div_(denominator)
         crop = tuple(revert_padding[1:])
-        feature = feature_sum[(slice(None), *crop)].contiguous()
+        feature = (
+            feature_sum[(slice(None), *crop)].contiguous()
+            if feature_sum is not None
+            else None
+        )
         logits = logits_sum[crop].contiguous()
         probability = torch.sigmoid(logits)
+        fused_decoder = (
+            tuple(accumulator[crop].contiguous() for accumulator in decoder_sums)
+            if decoder_sums is not None
+            else None
+        )
         if self.print_shapes and not self._printed:
             print(
                 "[prototype-diagnostic] first fused tensors: "
-                f"feature={tuple(feature.shape)} logits={tuple(logits.shape)} "
+                f"feature={tuple(feature.shape) if feature is not None else None} "
+                f"logits={tuple(logits.shape)} "
                 f"probability={tuple(probability.shape)} tiles={len(slicers)}"
             )
             self._printed = True
-        return ExtractedVolume(feature=feature, logits=logits, probability=probability)
+        return ExtractedVolume(
+            feature=feature,
+            logits=logits,
+            probability=probability,
+            decoder_logits=fused_decoder,
+        )

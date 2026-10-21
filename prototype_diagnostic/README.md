@@ -27,23 +27,32 @@ removed using `pad_nd_image`'s returned slices; no spatial reshape is used.
 ## Prototype bank
 
 Memory cases are chosen either explicitly with `--memory_cases` or by descending
-unaugmented-view TDC from `--results_json`. The latter must be a TDC run whose case
-trace contains `adaptation_trace.view_selection.tdc`. If that results file contains
-`view_params`, the exact scale/offset views are replayed. Otherwise the original
-CM-TTA view sampler is called under a deterministic per-case seed.
+source-model TDC. TDC is always recomputed here with the same frozen VoxTell, fixed
+prompt and views used for feature extraction. For every view, D5-D2 logits are
+restored over the complete preprocessed case with the same sliding-window Gaussian
+fusion, then reduced by CM-TTA's `tdc_patch_components`/`tdc_from_components`.
+`source_tdc.json` records each case's original-view, view-mean and view-maximum TDC;
+memory ranking defaults to `original_tdc`.
+
+`--results_json` is optional and is used **only** to replay
+`adaptation_trace.view_params`. Its saved TDC and adapted model/ctx state are ignored.
+Cases without replay parameters use the original CM-TTA intensity sampler under a
+deterministic per-case seed.
 
 For each memory case, hard foreground masks from all views are combined into a
 voxel support fraction. Voxels at or above `--view_support` are split with 26-connected
 3-D components. Small components are dropped, optional erosion defines a core, and
-the mean D5 feature over the core is L2-normalized. No label is read or consulted.
+each view's D5 feature is first L2-normalized along the channel dimension at every
+voxel. Normalized view features are averaged, the core is spatially averaged, and
+the final region vector is L2-normalized again. No label is read or consulted.
 
 Each saved prototype contains `feature`, `case_name`, `region_id`, `region_size`,
 `tdc`, and `view_support_mean` (plus `core_size`).
 
 ## Example
 
-Run from the CM-TTA repository root after a TDC experiment has produced
-`outputs/HBP_nonoverlap_original/tdc/results.json`:
+Run from the CM-TTA repository root. The existing results file below is optional and
+only makes this diagnostic reuse exactly the same augmentation parameters:
 
 ```bash
 python -m prototype_diagnostic.run_diagnostic \
@@ -53,6 +62,7 @@ python -m prototype_diagnostic.run_diagnostic \
   --model_dir /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk/model \
   --text_model /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk/model/Qwen3-Embedding-4B \
   --prompt "liver cancer" \
+  --foreground_labels 1 \
   --results_json outputs/HBP_nonoverlap_original/tdc/results.json \
   --memory_top_ratio 0.2 \
   --num_views 10 \
@@ -61,20 +71,23 @@ python -m prototype_diagnostic.run_diagnostic \
   --core_erosion 1 \
   --topk 5 \
   --device cuda:0 \
-  --text_device cuda:1 \
-  --text_dtype float16 \
+  --text_device cpu \
   --output_dir prototype_diagnostic/outputs/HBP_tdc_prototypes \
   --fail_if_output_exists
 ```
 
-To choose memory cases manually, omit `--results_json` if TDC/view metadata is not
-needed and pass, for example, `--memory_cases case_a.nii.gz case_b.nii.gz`.
+To choose memory cases manually, pass, for example,
+`--memory_cases case_a.nii.gz case_b.nii.gz`. Omitting `--results_json` generates a
+deterministic view set locally. Source TDC is still reported for every split case.
 `--query_cases` can restrict evaluation; otherwise split test cases are evaluated in
-their original order.
+their original order. `--foreground_labels` accepts one or more integer IDs (for
+example `--foreground_labels 1 3`) and is used only after bank construction.
 
 ## Outputs and interpretation
 
 - `prototype_bank.pt`: region prototypes and bank provenance.
+- `source_tdc.json`: source-state per-view TDC plus original/mean/max summaries and
+  the exact ranking value.
 - `per_case_metrics.csv`: flattened per-case distributions, AUROC/AUPRC, and rank
   enrichment.
 - `summary.json`: all cases plus separate `pred_fg_voxels > 0` and
@@ -97,4 +110,3 @@ The recovery hypothesis is supported when zero-foreground cases still show:
 It is weakened or rejected when prototype AUROC remains near/below 0.5, gaps are
 non-positive, and top-ranked similarity voxels do not enrich GT foreground—especially
 when this persists in the `zero_foreground_cases` group.
-

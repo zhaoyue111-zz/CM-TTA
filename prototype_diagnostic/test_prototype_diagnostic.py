@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import nibabel as nib
 import numpy as np
@@ -15,13 +16,18 @@ from torch import nn
 from prototype_diagnostic.build_bank import (
     _component_regions,
     _eroded_core,
-    load_results_metadata,
+    aggregate_normalized_view_features,
+    compute_source_tdc_for_case,
+    load_view_params_replay,
+    region_prototype,
     select_memory_cases,
 )
 from prototype_diagnostic.evaluate_prototype import prototype_similarity_maps
-from prototype_diagnostic.extract_features import SlidingD5FeatureExtractor
+from prototype_diagnostic.extract_features import ExtractedVolume, SlidingD5FeatureExtractor
 from prototype_diagnostic.utils import (
     binary_ranking_metrics,
+    foreground_mask,
+    read_test_entries,
     restore_crop,
     save_float_nifti_model_space,
     top_fraction_enrichment,
@@ -38,9 +44,10 @@ class _TinyNetwork(nn.Module):
                 torch.tensor([[[[[1.0]]]], [[[[2.0]]]]])
             )
 
-    def forward(self, image, _text_embedding):
+    def forward(self, image, _text_embedding, return_decoder_outputs=False):
         feature = self.decoder.stages[-1](image)
-        return feature[:, :1]
+        logits = feature[:, :1]
+        return [logits, logits, logits, logits] if return_decoder_outputs else logits
 
 
 class _TinyPredictor:
@@ -73,6 +80,17 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         self.assertTrue(torch.allclose(result.feature[1], data[0] * 2, atol=1e-5))
         self.assertTrue(torch.allclose(result.logits, data[0], atol=1e-5))
 
+        decoder_result = extractor.extract(
+            data,
+            torch.zeros(1, 1, 2),
+            capture_feature=False,
+            return_decoder_logits=True,
+        )
+        self.assertIsNone(decoder_result.feature)
+        self.assertEqual(len(decoder_result.decoder_logits), 4)
+        for logits in decoder_result.decoder_logits:
+            self.assertTrue(torch.allclose(logits, data[0], atol=1e-5))
+
     def test_connected_components_and_erosion_are_three_dimensional(self):
         mask = np.zeros((7, 7, 7), dtype=bool)
         mask[1:6, 1:6, 1:6] = True
@@ -104,7 +122,7 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         self.assertTrue(torch.allclose(maximum, torch.tensor([[[0.0, 1.0]]])))
         self.assertTrue(torch.equal(maximum, topk))
 
-    def test_tdc_screening_uses_original_view_and_stable_order(self):
+    def test_results_json_only_replays_views_and_source_tdc_controls_ranking(self):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "results.json"
             path.write_text(
@@ -132,13 +150,94 @@ class PrototypeDiagnosticTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            tdc, views, order = load_results_metadata(path)
+            views, order = load_view_params_replay(path)
+            source_tdc = {
+                "a.nii.gz": {"memory_ranking_value": 0.9},
+                "b.nii.gz": {"memory_ranking_value": 0.1},
+            }
             selected = select_memory_cases(
-                ["a.nii.gz", "b.nii.gz"], None, tdc, 0.5, order
+                ["a.nii.gz", "b.nii.gz"], None, source_tdc, 0.5
             )
-        self.assertEqual(tdc, {"a.nii.gz": 0.6, "b.nii.gz": 0.8})
-        self.assertEqual(selected, ["b.nii.gz"])
+        self.assertEqual(order, ["a.nii.gz", "b.nii.gz"])
+        self.assertEqual(selected, ["a.nii.gz"])
         self.assertEqual(len(views["a.nii.gz"]), 2)
+
+    def test_source_tdc_is_recomputed_for_every_view(self):
+        class StubExtractor:
+            def __init__(self):
+                self.calls = 0
+
+            def extract(self, _image, _text, **kwargs):
+                self.calls += 1
+                self.assert_flags = kwargs
+                logits = tuple(torch.ones(2, 2, 2) for _ in range(4))
+                return ExtractedVolume(
+                    feature=None,
+                    logits=logits[0],
+                    probability=torch.sigmoid(logits[0]),
+                    decoder_logits=logits,
+                )
+
+        extractor = StubExtractor()
+        prepared = SimpleNamespace(
+            image_path=Path("case.nii.gz"), data=torch.zeros(1, 2, 2, 2)
+        )
+        params = [
+            {"scale": 1.0, "offset": 0.0},
+            {"scale": 1.1, "offset": 0.0},
+            {"scale": 0.9, "offset": 0.1},
+        ]
+        result = compute_source_tdc_for_case(
+            prepared, params, extractor, torch.zeros(1, 1, 2)
+        )
+        self.assertEqual(extractor.calls, len(params))
+        self.assertEqual(result["view_count"], len(params))
+        self.assertEqual(len(result["views"]), len(params))
+        self.assertEqual(result["original_tdc"], 1.0)
+        self.assertEqual(result["mean_tdc"], 1.0)
+        self.assertEqual(result["max_tdc"], 1.0)
+        self.assertEqual(result["memory_ranking_value"], result["original_tdc"])
+        self.assertEqual(
+            extractor.assert_flags,
+            {"capture_feature": False, "return_decoder_logits": True},
+        )
+
+    def test_voxel_normalized_region_prototype_has_unit_norm(self):
+        first = torch.zeros(2, 1, 1, 2)
+        second = torch.zeros_like(first)
+        first[0] = 100.0
+        second[1] = 0.01
+        feature_mean = aggregate_normalized_view_features([first, second])
+        prototype = region_prototype(
+            feature_mean, np.ones((1, 1, 2), dtype=bool)
+        )
+        self.assertTrue(torch.allclose(prototype.norm(), torch.tensor(1.0)))
+        self.assertTrue(
+            torch.allclose(
+                prototype, torch.tensor([2**-0.5, 2**-0.5]), atol=1e-6
+            )
+        )
+
+    def test_foreground_labels_support_multiple_explicit_ids(self):
+        label = np.array([[[0, 1, 2, 3]]])
+        selected = foreground_mask(label, [1, 3])
+        self.assertTrue(np.array_equal(selected, np.array([[[False, True, False, True]]])))
+
+    def test_flat_layout_reader_is_local_and_independent(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "images").mkdir()
+            (root / "labels").mkdir()
+            (root / "images" / "case_a.nii.gz").touch()
+            (root / "labels" / "case_a.nii.gz").touch()
+            split = root / "split.json"
+            split.write_text(
+                json.dumps({"test_cases": [{"case_name": "case_a"}]}),
+                encoding="utf-8",
+            )
+            entries = read_test_entries(root, split)
+        self.assertEqual(entries[0][0], root / "images" / "case_a.nii.gz")
+        self.assertEqual(entries[0][1], root / "labels" / "case_a.nii.gz")
 
     def test_metrics_and_crop_restoration(self):
         target = np.array([0, 0, 1, 1], dtype=bool)

@@ -9,10 +9,11 @@ import torch
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from data.voxtell_p0 import read_test_entries
 from prototype_diagnostic.build_bank import (
     build_prototype_bank,
-    load_results_metadata,
+    load_view_params_replay,
+    recompute_source_tdc,
+    resolve_view_params,
     select_memory_cases,
 )
 from prototype_diagnostic.evaluate_prototype import (
@@ -20,7 +21,13 @@ from prototype_diagnostic.evaluate_prototype import (
     summarize_query_groups,
 )
 from prototype_diagnostic.extract_features import build_predictor, embed_prompt
-from prototype_diagnostic.utils import case_name, seed_everything, write_csv, write_json
+from prototype_diagnostic.utils import (
+    case_name,
+    read_test_entries,
+    seed_everything,
+    write_csv,
+    write_json,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -36,10 +43,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model_dir", required=True)
     parser.add_argument("--text_model", required=True)
     parser.add_argument("--prompt", required=True)
-    parser.add_argument("--results_json", default=None)
+    parser.add_argument(
+        "--results_json",
+        default=None,
+        help=(
+            "Optional results.json used only to replay adaptation_trace.view_params; "
+            "its TDC/model state is never used for ranking."
+        ),
+    )
     parser.add_argument("--memory_cases", nargs="+", default=None)
     parser.add_argument("--memory_top_ratio", type=float, default=0.2)
     parser.add_argument("--query_cases", nargs="+", default=None)
+    parser.add_argument(
+        "--foreground_labels",
+        type=int,
+        nargs="+",
+        default=[1],
+        help="One or more integer GT labels counted as foreground during evaluation only.",
+    )
     parser.add_argument("--num_views", type=int, default=10)
     parser.add_argument("--view_support", type=float, default=0.8)
     parser.add_argument("--min_region_voxels", type=int, default=64)
@@ -84,10 +105,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     if not args.prompt.strip():
         raise ValueError("--prompt must not be empty")
-    if args.memory_cases is None and args.results_json is None:
-        raise ValueError("Provide --memory_cases or --results_json for TDC screening")
     if args.num_views < 1 or args.topk < 1 or args.voxel_chunk_size < 1:
         raise ValueError("num_views, topk and voxel_chunk_size must be positive")
+    if not args.foreground_labels:
+        raise ValueError("--foreground_labels must not be empty")
 
     output_dir = Path(args.output_dir)
     if args.fail_if_output_exists and output_dir.exists():
@@ -101,26 +122,14 @@ def main(argv: list[str] | None = None) -> None:
 
     entries = read_test_entries(args.data_dir, args.split_file)
     entries_by_name = {image.name: (image, label) for image, label in entries}
-    tdc_by_case, replay_views, results_order = load_results_metadata(args.results_json)
-    memory_cases = select_memory_cases(
-        entries_by_name,
-        args.memory_cases,
-        tdc_by_case,
-        args.memory_top_ratio,
-        results_order,
-    )
     query_cases = _select_named_entries(entries, args.query_cases)
-
-    config = {
-        **vars(args),
-        "resolved_memory_cases": memory_cases,
-        "resolved_query_cases": query_cases,
-        "split_case_order": list(entries_by_name),
-        "diagnostic_only": True,
-        "uses_ground_truth_for_bank": False,
-        "leave_one_case_out": True,
-    }
-    write_json(output_dir / "config.json", config)
+    replay_views, replay_results_order = load_view_params_replay(args.results_json)
+    view_params_by_case = resolve_view_params(
+        entries_by_name,
+        replay_views,
+        num_views=args.num_views,
+        seed=args.seed,
+    )
 
     predictor = build_predictor(
         args.voxtell_root,
@@ -137,20 +146,59 @@ def main(argv: list[str] | None = None) -> None:
         f"text_embedding={tuple(text_embedding.shape)}"
     )
 
+    source_tdc_by_case = recompute_source_tdc(
+        predictor,
+        text_embedding,
+        entries_by_name,
+        entries_by_name,
+        view_params_by_case,
+    )
+    source_tdc_path = output_dir / "source_tdc.json"
+    write_json(
+        source_tdc_path,
+        {
+            "model_state": "frozen source VoxTell",
+            "prompt": args.prompt,
+            "ranking_metric": "original_tdc",
+            "results_json_usage": "view_params replay only",
+            "case_order": list(entries_by_name),
+            "cases": [source_tdc_by_case[name] for name in entries_by_name],
+        },
+    )
+    memory_cases = select_memory_cases(
+        entries_by_name,
+        args.memory_cases,
+        source_tdc_by_case,
+        args.memory_top_ratio,
+    )
+    config = {
+        **vars(args),
+        "resolved_memory_cases": memory_cases,
+        "resolved_query_cases": query_cases,
+        "split_case_order": list(entries_by_name),
+        "results_json_case_order": replay_results_order,
+        "results_json_usage": "view_params replay only",
+        "source_tdc_recomputed": True,
+        "memory_ranking_metric": "original_tdc",
+        "diagnostic_only": True,
+        "uses_ground_truth_for_bank": False,
+        "leave_one_case_out": True,
+    }
+    write_json(output_dir / "config.json", config)
+
     bank_path = output_dir / "prototype_bank.pt"
     bank = build_prototype_bank(
         predictor,
         text_embedding,
         entries_by_name,
         memory_cases,
-        tdc_by_case,
-        replay_views,
+        source_tdc_by_case,
+        view_params_by_case,
         bank_path,
         num_views=args.num_views,
         view_support=args.view_support,
         min_region_voxels=args.min_region_voxels,
         core_erosion=args.core_erosion,
-        seed=args.seed,
     )
     prototype_source_cases = {
         str(item["case_name"]) for item in bank["prototypes"]
@@ -180,6 +228,7 @@ def main(argv: list[str] | None = None) -> None:
             cases_output,
             topk=args.topk,
             voxel_chunk_size=args.voxel_chunk_size,
+            foreground_labels=args.foreground_labels,
         )
         rows.append(metrics)
         print(
@@ -194,6 +243,9 @@ def main(argv: list[str] | None = None) -> None:
     summary.update(
         {
             "prototype_bank_path": str(bank_path),
+            "source_tdc_path": str(source_tdc_path),
+            "source_tdc_model_state": "frozen source VoxTell",
+            "memory_ranking_metric": "original_tdc",
             "prototype_count": len(bank["prototypes"]),
             "memory_case_count": len(memory_cases),
             "query_case_count": len(query_cases),
