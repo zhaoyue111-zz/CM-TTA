@@ -35,6 +35,8 @@ from run_voxtell_192_comparison import (
     load_view_params_manifest,
     official_window_count,
     prepare_adaptation_case,
+    resolve_text_dtype,
+    select_test_split_entries,
     summarize_cases,
     summarize_selection_context_views,
     write_combined_outputs,
@@ -212,6 +214,68 @@ def test_preprocessed_directory_discovers_artifacts_without_manifest():
         assert entries[0].artifact_path == artifact_path
         assert entries[0].image_path == source_image
         assert entries[0].gt_path == source_gt
+
+
+def test_test_split_selects_by_original_path_and_preserves_split_order():
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        images = root / "images"
+        labels = root / "labels"
+        artifacts = root / "offline"
+        images.mkdir()
+        labels.mkdir()
+        artifacts.mkdir()
+        entries = []
+        for case_id in ("train", "test-b", "test-a"):
+            image_path = images / f"{case_id}.nii.gz"
+            gt_path = labels / f"{case_id}.nii.gz"
+            artifact_path = artifacts / f"{case_id}.npz"
+            image_path.touch()
+            gt_path.touch()
+            artifact_path.touch()
+            entries.append(
+                PreprocessedCase(case_id, artifact_path, image_path, gt_path)
+            )
+        split_path = root / "split.json"
+        split_path.write_text(
+            json.dumps(
+                {
+                    "train_cases": [str(images / "train.nii.gz")],
+                    "test_cases": [
+                        str(images / "test-a.nii.gz"),
+                        str(images / "test-b.nii.gz"),
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        selected = select_test_split_entries(entries, split_path)
+
+        assert [entry.case_id for entry in selected] == ["test-a", "test-b"]
+
+
+def test_test_split_rejects_missing_preprocessed_artifact():
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        missing_path = root / "images" / "missing.nii.gz"
+        split_path = root / "split.json"
+        split_path.write_text(
+            json.dumps({"test_cases": [str(missing_path)]}), encoding="utf-8"
+        )
+        try:
+            select_test_split_entries([], split_path)
+        except ValueError as error:
+            assert "no preprocessed artifact" in str(error)
+            assert str(missing_path) in str(error)
+        else:
+            raise AssertionError("Missing test artifact was silently ignored")
+
+
+def test_text_dtype_auto_uses_fp16_only_on_cuda():
+    assert resolve_text_dtype("auto", torch.device("cuda:1")) == torch.float16
+    assert resolve_text_dtype("auto", torch.device("cpu")) is None
+    assert resolve_text_dtype("float32", torch.device("cuda:1")) == torch.float32
 
 
 def test_offline_preprocessing_is_exact_192_binary_and_records_geometry():

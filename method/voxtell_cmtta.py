@@ -2191,10 +2191,24 @@ class VoxTellCMTTA:
         text_prompt: str = "liver",
         n_ctx: Optional[int] = None,
         formatted_text_prompt: Optional[str] = None,
+        qwen_device=None,
+        qwen_dtype: Optional[torch.dtype] = None,
     ):
         self.device = torch.device(device)
+        self.qwen_device = (
+            self.device if qwen_device is None else torch.device(qwen_device)
+        )
+        self.qwen_dtype = qwen_dtype
         self.args = args
         self.model = model.to(self.device).eval()
+        self.model_dtype = next(
+            (
+                parameter.dtype
+                for parameter in self.model.parameters()
+                if parameter.is_floating_point()
+            ),
+            torch.float32,
+        )
         for parameter in self.model.parameters():
             parameter.requires_grad_(False)
             parameter.grad = None
@@ -2742,7 +2756,7 @@ class VoxTellCMTTA:
                 raise RuntimeError(
                     f"Expected {D4_FUSION_CHANNELS} D4 fusion channels, got {num_heads}"
                 )
-            # Decoder outputs are reversed to [D5,D4,D3,D2,D1].  Therefore
+            # Decoder output are reversed to [D5,D4,D3,D2,D1].  Therefore
             # D4 is produced by internal stage len(stages)-2.  Its seg-head
             # input is cat([visual_features, fusion_features]); the final
             # num_heads channels are exactly the pre-head fusion response.
@@ -2880,14 +2894,31 @@ class VoxTellCMTTA:
         if input_ids.ndim != 2 or input_ids.shape[0] != 1:
             raise ValueError(f"Expected one tokenized prompt, got {tuple(input_ids.shape)}")
 
-        self.qwen_text_encoder = self.qwen_text_encoder.to(self.device).eval()
+        # Qwen is frozen but remains differentiable with respect to
+        # ``inputs_embeds``.  It may therefore live on CPU while VoxTell and
+        # the trainable ctx delta live on CUDA; autograd records both device
+        # copies and returns the prompt gradient to ``ctx_delta``.
+        qwen_device = getattr(self, "qwen_device", self.device)
+        qwen_dtype = getattr(self, "qwen_dtype", None)
+        if qwen_dtype is not None and qwen_dtype not in (
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+        ):
+            raise ValueError(f"Unsupported Qwen dtype: {qwen_dtype}")
+        self.qwen_text_encoder = self.qwen_text_encoder.to(
+            device=qwen_device, dtype=qwen_dtype
+        ).eval()
+        qwen_config = getattr(self.qwen_text_encoder, "config", None)
+        if qwen_config is not None and hasattr(qwen_config, "use_cache"):
+            qwen_config.use_cache = False
         token_embedding = self.qwen_text_encoder.get_input_embeddings()
         if token_embedding is None:
             raise ValueError("Qwen text encoder does not expose get_input_embeddings()")
         with torch.no_grad():
-            fixed_embeddings = token_embedding(input_ids.to(self.device)).detach()
+            fixed_embeddings = token_embedding(input_ids.to(qwen_device)).detach()
         self._fixed_token_embeddings = fixed_embeddings
-        self._fixed_attention_mask = attention_mask.to(self.device)
+        self._fixed_attention_mask = attention_mask.to(qwen_device)
 
         query_start = formatted_prompt.rfind(self.text_prompt)
         query_end = query_start + len(self.text_prompt)
@@ -2927,7 +2958,7 @@ class VoxTellCMTTA:
                     "Non-zero initial ctx is incompatible with zero-initialized ctx_delta"
                 )
         self._liver_token_indices = torch.tensor(
-            prompt_indices, device=self.device, dtype=torch.long
+            prompt_indices, device=qwen_device, dtype=torch.long
         )
         self.n_ctx = len(prompt_indices)
         delta = torch.zeros(
@@ -2952,6 +2983,7 @@ class VoxTellCMTTA:
         if fixed is None or fixed_mask is None or indices is None:
             raise RuntimeError("Qwen context inputs were not initialized")
         ctx_delta = ctx_delta.to(device=fixed.device, dtype=fixed.dtype)
+        indices = indices.to(device=fixed.device, dtype=torch.long)
         delta_embeddings = torch.zeros_like(fixed)
         delta_embeddings = delta_embeddings.index_copy(1, indices, ctx_delta)
         inputs_embeds = fixed + delta_embeddings
@@ -2977,7 +3009,11 @@ class VoxTellCMTTA:
                 ]
         else:
             pooled = last_token_pool(hidden_states, attention_mask)
-        return pooled.unsqueeze(1)
+        # The segmentation model always consumes text on its own device.  A
+        # cross-device copy is differentiable, so CPU Qwen offload does not
+        # sever gradients to the CUDA-resident ctx delta.
+        model_dtype = getattr(self, "model_dtype", pooled.dtype)
+        return pooled.unsqueeze(1).to(device=self.device, dtype=model_dtype)
 
     def close(self) -> None:
         for handle in self._hooks:

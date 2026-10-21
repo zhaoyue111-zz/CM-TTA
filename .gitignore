@@ -15,11 +15,10 @@ checkpoints/
 dataset/
 datasets/
 data_root/
-results/
-outputs/
 logs/
 
 *.npy
+*.npz
 *.pt
 *.pth
 *.ckpt

@@ -59,6 +59,8 @@ DISABLED_EXPERIMENTAL_PATHS = (
     "non_original_pseudo_update_modes",
 )
 
+DEFAULT_SPLIT_JSON = Path("/data/hilab/datasets/WCH_MRI145/HBP/split.json")
+
 SUMMARY_CASE_FIELDS = (
     "original_foreground_voxel_count",
     "cropped_foreground_voxel_count",
@@ -99,8 +101,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voxtell-root", default="../VoxTell_from_disk")
     parser.add_argument("--model-dir", default=None)
     parser.add_argument("--text-model", default=None)
+    parser.add_argument(
+        "--split-json",
+        default=str(DEFAULT_SPLIT_JSON),
+        help=(
+            "Dataset split JSON whose test_cases paths select and order the "
+            "preprocessed inputs"
+        ),
+    )
     parser.add_argument("--prompt", default="liver cancer")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--text-device",
+        default="cpu",
+        help=(
+            "Device for the frozen Qwen encoder (default: cpu, which leaves GPU "
+            "memory for 192^3 VoxTell adaptation; use 'same' to colocate it with "
+            "--device on a sufficiently large GPU)"
+        ),
+    )
+    parser.add_argument(
+        "--text-dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+        help=(
+            "Qwen weight dtype; auto uses float16 on CUDA and preserves the "
+            "loaded dtype on CPU"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=1377)
     parser.add_argument("--view-batch-size", type=int, default=1)
     parser.add_argument("--view-params-manifest", default=None)
@@ -137,6 +165,65 @@ def forced_adapter_args(base: argparse.Namespace, selector: dict, max_text_lengt
     }
     values.update(FORCED_ORIGINAL_CMTTA)
     return SimpleNamespace(**values)
+
+
+def select_test_split_entries(entries, split_json: str | Path):
+    """Select preprocessed cases by their original image paths in ``test_cases``.
+
+    The split is defined before preprocessing, so matching ``case_id`` or artifact
+    filenames would be an unnecessary assumption. Each offline artifact already
+    records its source image path; use that as the authoritative join key and
+    preserve the test order declared by the split file.
+    """
+    split_path = Path(split_json).expanduser().resolve()
+    if not split_path.is_file():
+        raise FileNotFoundError(f"Split JSON does not exist: {split_path}")
+    payload = json.loads(split_path.read_text(encoding="utf-8"))
+    test_cases = payload.get("test_cases") if isinstance(payload, dict) else None
+    if not isinstance(test_cases, list) or not test_cases:
+        raise ValueError(f"{split_path} must contain a non-empty test_cases list")
+    if not all(isinstance(value, str) and value for value in test_cases):
+        raise ValueError(f"Every test_cases entry in {split_path} must be a path string")
+
+    requested_paths = []
+    seen_requested = set()
+    for value in test_cases:
+        path = Path(value).expanduser()
+        path = (path if path.is_absolute() else split_path.parent / path).resolve()
+        if path in seen_requested:
+            raise ValueError(f"Duplicate test case path in {split_path}: {path}")
+        seen_requested.add(path)
+        requested_paths.append(path)
+
+    by_source_path = {}
+    for entry in entries:
+        source_path = Path(entry.image_path).expanduser().resolve()
+        if source_path in by_source_path:
+            raise ValueError(
+                "Multiple preprocessed artifacts refer to the same source image: "
+                f"{source_path}"
+            )
+        by_source_path[source_path] = entry
+
+    missing = [path for path in requested_paths if path not in by_source_path]
+    if missing:
+        preview = ", ".join(str(path) for path in missing[:5])
+        suffix = "" if len(missing) <= 5 else f" (and {len(missing) - 5} more)"
+        raise ValueError(
+            f"{len(missing)} test cases in {split_path} have no preprocessed artifact: "
+            f"{preview}{suffix}"
+        )
+    return [by_source_path[path] for path in requested_paths]
+
+
+def resolve_text_dtype(name: str, text_device: torch.device):
+    if name == "auto":
+        return torch.float16 if text_device.type == "cuda" else None
+    return {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[name]
 
 
 def generate_view_params_manifest(
@@ -459,6 +546,11 @@ def run_configuration(
     reference_initial_state: dict | None,
 ) -> tuple[list[dict], dict, dict]:
     adapter_args = forced_adapter_args(base_args, selector, predictor.max_text_length)
+    qwen_device = (
+        base_args.device
+        if str(base_args.text_device).strip().lower() == "same"
+        else torch.device(base_args.text_device)
+    )
     adapter = VoxTellCMTTA(
         predictor.network,
         None,
@@ -467,6 +559,8 @@ def run_configuration(
         qwen_text_encoder=predictor.text_backbone,
         qwen_tokenizer=predictor.tokenizer,
         text_prompt=base_args.prompt,
+        qwen_device=qwen_device,
+        qwen_dtype=resolve_text_dtype(base_args.text_dtype, qwen_device),
     )
     predictor.network = adapter.model
     initial_state = assert_fresh_adapter(adapter, reference_initial_state)
@@ -747,6 +841,8 @@ def main() -> None:
         raise ValueError("--view-batch-size must be positive")
     args.foreground_labels = sorted(set(args.foreground_labels))
     args.device = torch.device(args.device)
+    if str(args.text_device).strip().lower() != "same":
+        args.text_device = torch.device(args.text_device)
     if args.device.type == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA was requested but is unavailable")
@@ -760,6 +856,11 @@ def main() -> None:
         entries = load_preprocessed_manifest(args.preprocessed_manifest)
     else:
         entries = load_preprocessed_directory(args.preprocessed_dir)
+    entries = select_test_split_entries(entries, args.split_json)
+    print(
+        f"Loaded {len(entries)} test cases from "
+        f"{Path(args.split_json).expanduser().resolve()}"
+    )
     case_ids = [entry.case_id for entry in entries]
     view_manifest_path = (
         Path(args.view_params_manifest).expanduser().resolve()

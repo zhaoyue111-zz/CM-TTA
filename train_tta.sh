@@ -1,17 +1,20 @@
-python preprocess_voxtell_192.py \
-    --images-dir /data/hilab/datasets/WCH_MRI145/HBP/images \
-    --output-dir outputs/voxtell_192/HBP \
-    --foreground-labels 1
+#python preprocess_voxtell_192.py \
+#    --images-dir /data/hilab/datasets/WCH_MRI145/HBP/images \
+#    --output-dir output/voxtell_192/HBP/preprocess \
+#    --foreground-labels 1
 
 python run_voxtell_192_comparison.py \
-    --preprocessed-manifest /path/to/wch_hbp_192/preprocessed_manifest.json \
-    --output-dir /path/to/results/voxtell_192_selector_comparison \
+    --preprocessed-dir outputs/voxtell_192/HBP/preprocess \
+    --split-json /data/hilab/datasets/WCH_MRI145/HBP/split.json \
+    --output-dir outputs/voxtell_192/HBP/tta \
     --voxtell-root /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk \
     --foreground-labels 1 \
     --prompt "liver cancer" \
     --device cuda:0 \
     --seed 1377 \
-    --view-batch-size 1
+    --view-batch-size 1 \
+    --text-device cuda:1 \
+    --text-dtype float16
 
 
 ##!/usr/bin/env bash

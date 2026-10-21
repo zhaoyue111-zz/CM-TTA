@@ -1,0 +1,6246 @@
+{
+  "format": "voxtell-whole-case-192-v1",
+  "source_mode": "images_directory",
+  "images_dir": "/data/hilab/datasets/WCH_MRI145/HBP/images",
+  "labels_dir": "/data/hilab/datasets/WCH_MRI145/HBP/labels",
+  "foreground_labels": [
+    1
+  ],
+  "cases": [
+    {
+      "case_id": "0000155006",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0000155006.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0000155006.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0000155006.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          3,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        343
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4380,
+      "cropped_foreground_voxel_count": 4380,
+      "gt_192_foreground_voxel_count": 4956,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0000321625",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0000321625.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0000321625.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0000321625.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          98,
+          929
+        ],
+        [
+          2,
+          1014
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        831,
+        1012
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 244556,
+      "cropped_foreground_voxel_count": 244556,
+      "gt_192_foreground_voxel_count": 17080,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0000480919",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0000480919.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0000480919.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0000480919.nii.gz",
+      "original_shape": [
+        24,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          24
+        ],
+        [
+          47,
+          465
+        ],
+        [
+          2,
+          510
+        ]
+      ],
+      "cropped_shape": [
+        24,
+        418,
+        508
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 6080,
+      "cropped_foreground_voxel_count": 6080,
+      "gt_192_foreground_voxel_count": 8464,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0000503556",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0000503556.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0000503556.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0000503556.nii.gz",
+      "original_shape": [
+        80,
+        264,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          264
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        264,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 795,
+      "cropped_foreground_voxel_count": 795,
+      "gt_192_foreground_voxel_count": 671,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0000661245",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0000661245.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0000661245.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0000661245.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          102,
+          929
+        ],
+        [
+          0,
+          1003
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        827,
+        1003
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 5179,
+      "cropped_foreground_voxel_count": 5179,
+      "gt_192_foreground_voxel_count": 371,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0000801631",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0000801631.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0000801631.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0000801631.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2725,
+      "cropped_foreground_voxel_count": 2725,
+      "gt_192_foreground_voxel_count": 2559,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0001439686",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0001439686.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0001439686.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0001439686.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          110,
+          929
+        ],
+        [
+          7,
+          1016
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        819,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 7337,
+      "cropped_foreground_voxel_count": 7337,
+      "gt_192_foreground_voxel_count": 500,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0001491294",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0001491294.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0001491294.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0001491294.nii.gz",
+      "original_shape": [
+        27,
+        324,
+        432
+      ],
+      "bbox": [
+        [
+          0,
+          27
+        ],
+        [
+          0,
+          324
+        ],
+        [
+          0,
+          432
+        ]
+      ],
+      "cropped_shape": [
+        27,
+        324,
+        432
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2064,
+      "cropped_foreground_voxel_count": 2064,
+      "gt_192_foreground_voxel_count": 3796,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0001547059",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0001547059.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0001547059.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0001547059.nii.gz",
+      "original_shape": [
+        192,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          192
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        192,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1171,
+      "cropped_foreground_voxel_count": 1171,
+      "gt_192_foreground_voxel_count": 158,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0001679853",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0001679853.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0001679853.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0001679853.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          260
+        ],
+        [
+          0,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1921,
+      "cropped_foreground_voxel_count": 1921,
+      "gt_192_foreground_voxel_count": 2012,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0002088892",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0002088892.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0002088892.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0002088892.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          77,
+          940
+        ],
+        [
+          11,
+          1008
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        863,
+        997
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 331942,
+      "cropped_foreground_voxel_count": 331942,
+      "gt_192_foreground_voxel_count": 22747,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0002265234",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0002265234.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0002265234.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0002265234.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          4,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 15115,
+      "cropped_foreground_voxel_count": 15115,
+      "gt_192_foreground_voxel_count": 16761,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0002365751",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0002365751.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0002365751.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0002365751.nii.gz",
+      "original_shape": [
+        27,
+        324,
+        432
+      ],
+      "bbox": [
+        [
+          0,
+          27
+        ],
+        [
+          0,
+          324
+        ],
+        [
+          0,
+          432
+        ]
+      ],
+      "cropped_shape": [
+        27,
+        324,
+        432
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 5127,
+      "cropped_foreground_voxel_count": 5127,
+      "gt_192_foreground_voxel_count": 9478,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0002452267",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0002452267.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0002452267.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0002452267.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        345
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1822,
+      "cropped_foreground_voxel_count": 1822,
+      "gt_192_foreground_voxel_count": 2050,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0002453066",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0002453066.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0002453066.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0002453066.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          104,
+          927
+        ],
+        [
+          7,
+          1015
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        823,
+        1008
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 21015,
+      "cropped_foreground_voxel_count": 21015,
+      "gt_192_foreground_voxel_count": 1500,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0002855133",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0002855133.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0002855133.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0002855133.nii.gz",
+      "original_shape": [
+        45,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          45
+        ],
+        [
+          15,
+          502
+        ],
+        [
+          1,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        45,
+        487,
+        511
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 109719,
+      "cropped_foreground_voxel_count": 109719,
+      "gt_192_foreground_voxel_count": 69323,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0003081296",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0003081296.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0003081296.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0003081296.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          0,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 247244,
+      "cropped_foreground_voxel_count": 247244,
+      "gt_192_foreground_voxel_count": 269617,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0004918328",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0004918328.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0004918328.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0004918328.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        343
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3550,
+      "cropped_foreground_voxel_count": 3550,
+      "gt_192_foreground_voxel_count": 3951,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0006150559",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0006150559.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0006150559.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0006150559.nii.gz",
+      "original_shape": [
+        192,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          192
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        192,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3814,
+      "cropped_foreground_voxel_count": 3814,
+      "gt_192_foreground_voxel_count": 542,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0006317240",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0006317240.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0006317240.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0006317240.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          4,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3305,
+      "cropped_foreground_voxel_count": 3305,
+      "gt_192_foreground_voxel_count": 3578,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0006410698",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0006410698.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0006410698.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0006410698.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          4,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        342
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1518,
+      "cropped_foreground_voxel_count": 1518,
+      "gt_192_foreground_voxel_count": 1650,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0007059954",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0007059954.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0007059954.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0007059954.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 974,
+      "cropped_foreground_voxel_count": 974,
+      "gt_192_foreground_voxel_count": 772,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0007994390",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0007994390.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0007994390.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0007994390.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          4,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4554,
+      "cropped_foreground_voxel_count": 4554,
+      "gt_192_foreground_voxel_count": 4965,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0008006851",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0008006851.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0008006851.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0008006851.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          284
+        ],
+        [
+          0,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        283,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1874,
+      "cropped_foreground_voxel_count": 1874,
+      "gt_192_foreground_voxel_count": 1928,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0008266836",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0008266836.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0008266836.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0008266836.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          106,
+          928
+        ],
+        [
+          10,
+          1019
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        822,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 51793,
+      "cropped_foreground_voxel_count": 51793,
+      "gt_192_foreground_voxel_count": 3673,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0008386298",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0008386298.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0008386298.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0008386298.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          1,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        349
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 6964,
+      "cropped_foreground_voxel_count": 6964,
+      "gt_192_foreground_voxel_count": 7651,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0008446207",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0008446207.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0008446207.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0008446207.nii.gz",
+      "original_shape": [
+        80,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        258,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 53110,
+      "cropped_foreground_voxel_count": 53110,
+      "gt_192_foreground_voxel_count": 53164,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0008836521",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0008836521.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0008836521.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0008836521.nii.gz",
+      "original_shape": [
+        88,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          88
+        ],
+        [
+          0,
+          260
+        ],
+        [
+          2,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        88,
+        260,
+        349
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2062,
+      "cropped_foreground_voxel_count": 2062,
+      "gt_192_foreground_voxel_count": 1838,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0008877866",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0008877866.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0008877866.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0008877866.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4525,
+      "cropped_foreground_voxel_count": 4525,
+      "gt_192_foreground_voxel_count": 4315,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0009011272",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0009011272.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0009011272.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0009011272.nii.gz",
+      "original_shape": [
+        104,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 7431,
+      "cropped_foreground_voxel_count": 7431,
+      "gt_192_foreground_voxel_count": 1945,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0009478318",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0009478318.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0009478318.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0009478318.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 15681,
+      "cropped_foreground_voxel_count": 15681,
+      "gt_192_foreground_voxel_count": 12549,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0009699253",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0009699253.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0009699253.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0009699253.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          4,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        342
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 12134,
+      "cropped_foreground_voxel_count": 12134,
+      "gt_192_foreground_voxel_count": 13530,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0009772348",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0009772348.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0009772348.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0009772348.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          260
+        ],
+        [
+          0,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 31718,
+      "cropped_foreground_voxel_count": 31718,
+      "gt_192_foreground_voxel_count": 34349,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0009808605",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0009808605.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0009808605.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0009808605.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          101,
+          925
+        ],
+        [
+          0,
+          1006
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        824,
+        1006
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 72935,
+      "cropped_foreground_voxel_count": 72935,
+      "gt_192_foreground_voxel_count": 5161,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0009818705",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0009818705.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0009818705.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0009818705.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          260
+        ],
+        [
+          0,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        260,
+        349
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4731,
+      "cropped_foreground_voxel_count": 4731,
+      "gt_192_foreground_voxel_count": 5124,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0010325750",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0010325750.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0010325750.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0010325750.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          0,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        351
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 232,
+      "cropped_foreground_voxel_count": 232,
+      "gt_192_foreground_voxel_count": 220,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0010392655",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0010392655.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0010392655.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0010392655.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 450,
+      "cropped_foreground_voxel_count": 450,
+      "gt_192_foreground_voxel_count": 436,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0010724905",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0010724905.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0010724905.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0010724905.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          105,
+          927
+        ],
+        [
+          10,
+          1019
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        822,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 270785,
+      "cropped_foreground_voxel_count": 270785,
+      "gt_192_foreground_voxel_count": 19223,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0010909045",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0010909045.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0010909045.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0010909045.nii.gz",
+      "original_shape": [
+        80,
+        255,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          255
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        255,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2253,
+      "cropped_foreground_voxel_count": 2253,
+      "gt_192_foreground_voxel_count": 2019,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0011024068",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0011024068.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0011024068.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0011024068.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          1,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 40888,
+      "cropped_foreground_voxel_count": 40888,
+      "gt_192_foreground_voxel_count": 44697,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0011255567",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0011255567.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0011255567.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0011255567.nii.gz",
+      "original_shape": [
+        88,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          88
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          2,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        88,
+        258,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 7608,
+      "cropped_foreground_voxel_count": 7608,
+      "gt_192_foreground_voxel_count": 6921,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0011295982",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0011295982.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0011295982.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0011295982.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        345
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1900,
+      "cropped_foreground_voxel_count": 1900,
+      "gt_192_foreground_voxel_count": 2085,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0011880319",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0011880319.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0011880319.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0011880319.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3147,
+      "cropped_foreground_voxel_count": 3147,
+      "gt_192_foreground_voxel_count": 2966,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0013211509",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0013211509.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0013211509.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0013211509.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          4,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        343
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 17633,
+      "cropped_foreground_voxel_count": 17633,
+      "gt_192_foreground_voxel_count": 19517,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0013263151",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0013263151.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0013263151.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0013263151.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 186804,
+      "cropped_foreground_voxel_count": 186804,
+      "gt_192_foreground_voxel_count": 206785,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0013482554",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0013482554.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0013482554.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0013482554.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          2,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 13538,
+      "cropped_foreground_voxel_count": 13538,
+      "gt_192_foreground_voxel_count": 14903,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0013586010",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0013586010.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0013586010.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0013586010.nii.gz",
+      "original_shape": [
+        80,
+        235,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          235
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        235,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1124,
+      "cropped_foreground_voxel_count": 1124,
+      "gt_192_foreground_voxel_count": 1099,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0013837968",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0013837968.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0013837968.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0013837968.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1073,
+      "cropped_foreground_voxel_count": 1073,
+      "gt_192_foreground_voxel_count": 863,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0014186880",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0014186880.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0014186880.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0014186880.nii.gz",
+      "original_shape": [
+        80,
+        292,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          292
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        292,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 265,
+      "cropped_foreground_voxel_count": 265,
+      "gt_192_foreground_voxel_count": 201,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0014578613",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0014578613.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0014578613.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0014578613.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 321,
+      "cropped_foreground_voxel_count": 321,
+      "gt_192_foreground_voxel_count": 267,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015026134",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015026134.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015026134.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015026134.nii.gz",
+      "original_shape": [
+        80,
+        210,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          1,
+          209
+        ],
+        [
+          3,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        208,
+        343
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 191644,
+      "cropped_foreground_voxel_count": 191644,
+      "gt_192_foreground_voxel_count": 237154,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015474563",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015474563.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015474563.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015474563.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          103,
+          927
+        ],
+        [
+          9,
+          1018
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        824,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 9941,
+      "cropped_foreground_voxel_count": 9941,
+      "gt_192_foreground_voxel_count": 704,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015575075",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015575075.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015575075.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015575075.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 9493,
+      "cropped_foreground_voxel_count": 9493,
+      "gt_192_foreground_voxel_count": 9123,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015743530",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015743530.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015743530.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015743530.nii.gz",
+      "original_shape": [
+        72,
+        220,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          219
+        ],
+        [
+          2,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        218,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 21315,
+      "cropped_foreground_voxel_count": 21315,
+      "gt_192_foreground_voxel_count": 28109,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015853256",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015853256.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015853256.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015853256.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 7075,
+      "cropped_foreground_voxel_count": 7075,
+      "gt_192_foreground_voxel_count": 7830,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015855177",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015855177.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015855177.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015855177.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          0,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1192,
+      "cropped_foreground_voxel_count": 1192,
+      "gt_192_foreground_voxel_count": 1325,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015868885",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015868885.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015868885.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015868885.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 20379,
+      "cropped_foreground_voxel_count": 20379,
+      "gt_192_foreground_voxel_count": 22451,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015880526",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015880526.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015880526.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015880526.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          3,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 6727,
+      "cropped_foreground_voxel_count": 6727,
+      "gt_192_foreground_voxel_count": 7650,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015947592",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015947592.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015947592.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015947592.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          0,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 30329,
+      "cropped_foreground_voxel_count": 30329,
+      "gt_192_foreground_voxel_count": 32906,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015953398",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015953398.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015953398.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015953398.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          260
+        ],
+        [
+          0,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        260,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 53944,
+      "cropped_foreground_voxel_count": 53944,
+      "gt_192_foreground_voxel_count": 59188,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015978449",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015978449.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015978449.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015978449.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          4,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 38124,
+      "cropped_foreground_voxel_count": 38124,
+      "gt_192_foreground_voxel_count": 41730,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0015988711",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0015988711.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0015988711.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0015988711.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          260
+        ],
+        [
+          1,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        260,
+        349
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2374,
+      "cropped_foreground_voxel_count": 2374,
+      "gt_192_foreground_voxel_count": 2569,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016011685",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016011685.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016011685.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016011685.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          260
+        ],
+        [
+          0,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 584,
+      "cropped_foreground_voxel_count": 584,
+      "gt_192_foreground_voxel_count": 641,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016116007",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016116007.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016116007.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016116007.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          1,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 5223,
+      "cropped_foreground_voxel_count": 5223,
+      "gt_192_foreground_voxel_count": 5770,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016141725",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016141725.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016141725.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016141725.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          1,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 27153,
+      "cropped_foreground_voxel_count": 27153,
+      "gt_192_foreground_voxel_count": 29648,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016161882",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016161882.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016161882.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016161882.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          260
+        ],
+        [
+          0,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 122089,
+      "cropped_foreground_voxel_count": 122089,
+      "gt_192_foreground_voxel_count": 132474,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016167739",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016167739.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016167739.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016167739.nii.gz",
+      "original_shape": [
+        112,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          112
+        ],
+        [
+          97,
+          932
+        ],
+        [
+          5,
+          1022
+        ]
+      ],
+      "cropped_shape": [
+        112,
+        835,
+        1017
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 959162,
+      "cropped_foreground_voxel_count": 959162,
+      "gt_192_foreground_voxel_count": 71086,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016224160",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016224160.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016224160.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016224160.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          2,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 41270,
+      "cropped_foreground_voxel_count": 41270,
+      "gt_192_foreground_voxel_count": 45826,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016377191",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016377191.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016377191.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016377191.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          103,
+          927
+        ],
+        [
+          3,
+          1011
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        824,
+        1008
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 99260,
+      "cropped_foreground_voxel_count": 99260,
+      "gt_192_foreground_voxel_count": 7018,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016804070",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016804070.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016804070.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016804070.nii.gz",
+      "original_shape": [
+        96,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          96
+        ],
+        [
+          34,
+          478
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        96,
+        444,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2168,
+      "cropped_foreground_voxel_count": 2168,
+      "gt_192_foreground_voxel_count": 700,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0016980775",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0016980775.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0016980775.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0016980775.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          103,
+          926
+        ],
+        [
+          7,
+          1016
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        823,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 76773,
+      "cropped_foreground_voxel_count": 76773,
+      "gt_192_foreground_voxel_count": 5482,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017078287",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017078287.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017078287.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017078287.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 579,
+      "cropped_foreground_voxel_count": 579,
+      "gt_192_foreground_voxel_count": 528,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017078538",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017078538.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017078538.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017078538.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          2,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 147934,
+      "cropped_foreground_voxel_count": 147934,
+      "gt_192_foreground_voxel_count": 163045,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017174204",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017174204.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017174204.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017174204.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          2,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 30745,
+      "cropped_foreground_voxel_count": 30745,
+      "gt_192_foreground_voxel_count": 33828,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017224470",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017224470.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017224470.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017224470.nii.gz",
+      "original_shape": [
+        80,
+        324,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          324
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        324,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 538,
+      "cropped_foreground_voxel_count": 538,
+      "gt_192_foreground_voxel_count": 382,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017351674",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017351674.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017351674.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017351674.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          260
+        ],
+        [
+          0,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        260,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 13235,
+      "cropped_foreground_voxel_count": 13235,
+      "gt_192_foreground_voxel_count": 14248,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017354579",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017354579.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017354579.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017354579.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          3,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 75346,
+      "cropped_foreground_voxel_count": 75346,
+      "gt_192_foreground_voxel_count": 82559,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017405680",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017405680.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017405680.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017405680.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          0,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 47633,
+      "cropped_foreground_voxel_count": 47633,
+      "gt_192_foreground_voxel_count": 51915,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017452826",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017452826.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017452826.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017452826.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          0,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        349
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 45443,
+      "cropped_foreground_voxel_count": 45443,
+      "gt_192_foreground_voxel_count": 49677,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017484860",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017484860.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017484860.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017484860.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          4,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 12244,
+      "cropped_foreground_voxel_count": 12244,
+      "gt_192_foreground_voxel_count": 13744,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017528614",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017528614.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017528614.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017528614.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          285
+        ],
+        [
+          0,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        284,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3034,
+      "cropped_foreground_voxel_count": 3034,
+      "gt_192_foreground_voxel_count": 2915,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017554294",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017554294.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017554294.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017554294.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          260
+        ],
+        [
+          3,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        260,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1370,
+      "cropped_foreground_voxel_count": 1370,
+      "gt_192_foreground_voxel_count": 1514,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017686511",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017686511.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017686511.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017686511.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          260
+        ],
+        [
+          4,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        260,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1830,
+      "cropped_foreground_voxel_count": 1830,
+      "gt_192_foreground_voxel_count": 2029,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017805624",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017805624.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017805624.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017805624.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          1,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 19041,
+      "cropped_foreground_voxel_count": 19041,
+      "gt_192_foreground_voxel_count": 20704,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017811498",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017811498.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017811498.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017811498.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 114681,
+      "cropped_foreground_voxel_count": 114681,
+      "gt_192_foreground_voxel_count": 126281,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017815612",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017815612.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017815612.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017815612.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          2,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 36806,
+      "cropped_foreground_voxel_count": 36806,
+      "gt_192_foreground_voxel_count": 40089,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017850633",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017850633.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017850633.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017850633.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          3,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        343
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 185689,
+      "cropped_foreground_voxel_count": 185689,
+      "gt_192_foreground_voxel_count": 206654,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0017926194",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0017926194.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0017926194.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0017926194.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          2,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 14165,
+      "cropped_foreground_voxel_count": 14165,
+      "gt_192_foreground_voxel_count": 15308,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018022330",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018022330.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018022330.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018022330.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          4,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2137,
+      "cropped_foreground_voxel_count": 2137,
+      "gt_192_foreground_voxel_count": 2419,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018104483",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018104483.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018104483.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018104483.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          3,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 22453,
+      "cropped_foreground_voxel_count": 22453,
+      "gt_192_foreground_voxel_count": 24710,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018122332",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018122332.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018122332.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018122332.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          260
+        ],
+        [
+          0,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        351
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 16984,
+      "cropped_foreground_voxel_count": 16984,
+      "gt_192_foreground_voxel_count": 18252,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018128083",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018128083.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018128083.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018128083.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          284
+        ],
+        [
+          2,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        283,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 769,
+      "cropped_foreground_voxel_count": 769,
+      "gt_192_foreground_voxel_count": 765,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018199637",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018199637.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018199637.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018199637.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          0,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4287,
+      "cropped_foreground_voxel_count": 4287,
+      "gt_192_foreground_voxel_count": 4704,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018289026",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018289026.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018289026.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018289026.nii.gz",
+      "original_shape": [
+        104,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1693,
+      "cropped_foreground_voxel_count": 1693,
+      "gt_192_foreground_voxel_count": 454,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018290394",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018290394.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018290394.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018290394.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          105,
+          927
+        ],
+        [
+          12,
+          1021
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        822,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 27867,
+      "cropped_foreground_voxel_count": 27867,
+      "gt_192_foreground_voxel_count": 1999,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018411622",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018411622.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018411622.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018411622.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          2,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 987,
+      "cropped_foreground_voxel_count": 987,
+      "gt_192_foreground_voxel_count": 1073,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018430796",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018430796.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018430796.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018430796.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          4,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 436,
+      "cropped_foreground_voxel_count": 436,
+      "gt_192_foreground_voxel_count": 490,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018552274",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018552274.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018552274.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018552274.nii.gz",
+      "original_shape": [
+        104,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          101,
+          932
+        ],
+        [
+          0,
+          1002
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        831,
+        1002
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3518,
+      "cropped_foreground_voxel_count": 3518,
+      "gt_192_foreground_voxel_count": 264,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018624757",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018624757.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018624757.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018624757.nii.gz",
+      "original_shape": [
+        112,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          112
+        ],
+        [
+          104,
+          927
+        ],
+        [
+          27,
+          1024
+        ]
+      ],
+      "cropped_shape": [
+        112,
+        823,
+        997
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 17371,
+      "cropped_foreground_voxel_count": 17371,
+      "gt_192_foreground_voxel_count": 1274,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018689853",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018689853.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018689853.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018689853.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          110,
+          929
+        ],
+        [
+          11,
+          1019
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        819,
+        1008
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 16604,
+      "cropped_foreground_voxel_count": 16604,
+      "gt_192_foreground_voxel_count": 1193,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018806748",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018806748.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018806748.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018806748.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          0,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        351
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 49245,
+      "cropped_foreground_voxel_count": 49245,
+      "gt_192_foreground_voxel_count": 53346,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018830835",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018830835.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018830835.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018830835.nii.gz",
+      "original_shape": [
+        96,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          96
+        ],
+        [
+          104,
+          930
+        ],
+        [
+          11,
+          1023
+        ]
+      ],
+      "cropped_shape": [
+        96,
+        826,
+        1012
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 11344,
+      "cropped_foreground_voxel_count": 11344,
+      "gt_192_foreground_voxel_count": 990,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0018900524",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0018900524.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0018900524.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0018900524.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          0,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        349
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 863,
+      "cropped_foreground_voxel_count": 863,
+      "gt_192_foreground_voxel_count": 888,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0019209571",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0019209571.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0019209571.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0019209571.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          2,
+          259
+        ],
+        [
+          2,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        257,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 6374,
+      "cropped_foreground_voxel_count": 6374,
+      "gt_192_foreground_voxel_count": 7073,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0019218185",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0019218185.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0019218185.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0019218185.nii.gz",
+      "original_shape": [
+        88,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          88
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          1,
+          349
+        ]
+      ],
+      "cropped_shape": [
+        88,
+        258,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3177,
+      "cropped_foreground_voxel_count": 3177,
+      "gt_192_foreground_voxel_count": 2762,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0019227930",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0019227930.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0019227930.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0019227930.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3186,
+      "cropped_foreground_voxel_count": 3186,
+      "gt_192_foreground_voxel_count": 2555,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0019368194",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0019368194.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0019368194.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0019368194.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          259
+        ],
+        [
+          4,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        258,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 25465,
+      "cropped_foreground_voxel_count": 25465,
+      "gt_192_foreground_voxel_count": 27899,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0019836454",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0019836454.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0019836454.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0019836454.nii.gz",
+      "original_shape": [
+        72,
+        260,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          0,
+          259
+        ],
+        [
+          4,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        259,
+        344
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4252,
+      "cropped_foreground_voxel_count": 4252,
+      "gt_192_foreground_voxel_count": 4801,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0019873347",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0019873347.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0019873347.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0019873347.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          105,
+          928
+        ],
+        [
+          20,
+          1024
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        823,
+        1004
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 24161,
+      "cropped_foreground_voxel_count": 24161,
+      "gt_192_foreground_voxel_count": 1708,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0019971803",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0019971803.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0019971803.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0019971803.nii.gz",
+      "original_shape": [
+        80,
+        273,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          273
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        273,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1079,
+      "cropped_foreground_voxel_count": 1079,
+      "gt_192_foreground_voxel_count": 931,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0020946113",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0020946113.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0020946113.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0020946113.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          102,
+          926
+        ],
+        [
+          7,
+          1016
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        824,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4966,
+      "cropped_foreground_voxel_count": 4966,
+      "gt_192_foreground_voxel_count": 370,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0021111082",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0021111082.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0021111082.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0021111082.nii.gz",
+      "original_shape": [
+        80,
+        246,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          246
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        246,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1849,
+      "cropped_foreground_voxel_count": 1849,
+      "gt_192_foreground_voxel_count": 1661,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0021127910",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0021127910.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0021127910.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0021127910.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          285
+        ],
+        [
+          0,
+          346
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        284,
+        346
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2880,
+      "cropped_foreground_voxel_count": 2880,
+      "gt_192_foreground_voxel_count": 2909,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032098440",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032098440.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032098440.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032098440.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          105,
+          927
+        ],
+        [
+          15,
+          1022
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        822,
+        1007
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 28196,
+      "cropped_foreground_voxel_count": 28196,
+      "gt_192_foreground_voxel_count": 1945,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032174364",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032174364.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032174364.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032174364.nii.gz",
+      "original_shape": [
+        104,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2197,
+      "cropped_foreground_voxel_count": 2197,
+      "gt_192_foreground_voxel_count": 558,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032182222",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032182222.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032182222.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032182222.nii.gz",
+      "original_shape": [
+        104,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          99,
+          931
+        ],
+        [
+          2,
+          1021
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        832,
+        1019
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 5629,
+      "cropped_foreground_voxel_count": 5629,
+      "gt_192_foreground_voxel_count": 466,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032229283",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032229283.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032229283.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032229283.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          102,
+          926
+        ],
+        [
+          11,
+          1020
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        824,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3462,
+      "cropped_foreground_voxel_count": 3462,
+      "gt_192_foreground_voxel_count": 250,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032257210",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032257210.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032257210.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032257210.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          99,
+          923
+        ],
+        [
+          11,
+          1020
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        824,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 22520,
+      "cropped_foreground_voxel_count": 22520,
+      "gt_192_foreground_voxel_count": 1612,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032340293",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032340293.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032340293.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032340293.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          107,
+          928
+        ],
+        [
+          9,
+          1018
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        821,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2895995,
+      "cropped_foreground_voxel_count": 2895995,
+      "gt_192_foreground_voxel_count": 205872,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032500938",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032500938.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032500938.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032500938.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          104,
+          927
+        ],
+        [
+          6,
+          1015
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        823,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 950444,
+      "cropped_foreground_voxel_count": 950444,
+      "gt_192_foreground_voxel_count": 67497,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032540537",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032540537.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032540537.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032540537.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          105,
+          928
+        ],
+        [
+          14,
+          1022
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        823,
+        1008
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2816,
+      "cropped_foreground_voxel_count": 2816,
+      "gt_192_foreground_voxel_count": 204,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032558055",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032558055.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032558055.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032558055.nii.gz",
+      "original_shape": [
+        104,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4309,
+      "cropped_foreground_voxel_count": 4309,
+      "gt_192_foreground_voxel_count": 1094,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032677922",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032677922.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032677922.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032677922.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          101,
+          925
+        ],
+        [
+          17,
+          1024
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        824,
+        1007
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 130283,
+      "cropped_foreground_voxel_count": 130283,
+      "gt_192_foreground_voxel_count": 9235,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032710370",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032710370.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032710370.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032710370.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 301,
+      "cropped_foreground_voxel_count": 301,
+      "gt_192_foreground_voxel_count": 251,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032812091",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032812091.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032812091.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032812091.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 18071,
+      "cropped_foreground_voxel_count": 18071,
+      "gt_192_foreground_voxel_count": 14464,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032834064",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032834064.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032834064.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032834064.nii.gz",
+      "original_shape": [
+        80,
+        288,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          288
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        288,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1332,
+      "cropped_foreground_voxel_count": 1332,
+      "gt_192_foreground_voxel_count": 1082,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032854647",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032854647.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032854647.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032854647.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1212,
+      "cropped_foreground_voxel_count": 1212,
+      "gt_192_foreground_voxel_count": 1143,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032929968",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032929968.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032929968.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032929968.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 222,
+      "cropped_foreground_voxel_count": 222,
+      "gt_192_foreground_voxel_count": 219,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0032961497",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0032961497.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0032961497.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0032961497.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          101,
+          926
+        ],
+        [
+          12,
+          1021
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        825,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 16318,
+      "cropped_foreground_voxel_count": 16318,
+      "gt_192_foreground_voxel_count": 1124,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033052451",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033052451.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033052451.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033052451.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          285
+        ],
+        [
+          2,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        284,
+        349
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 44630,
+      "cropped_foreground_voxel_count": 44630,
+      "gt_192_foreground_voxel_count": 44322,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033102538",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033102538.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033102538.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033102538.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          106,
+          928
+        ],
+        [
+          6,
+          1016
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        822,
+        1010
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 80918,
+      "cropped_foreground_voxel_count": 80918,
+      "gt_192_foreground_voxel_count": 5853,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033164178",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033164178.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033164178.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033164178.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          109,
+          929
+        ],
+        [
+          5,
+          1013
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        820,
+        1008
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 186301,
+      "cropped_foreground_voxel_count": 186301,
+      "gt_192_foreground_voxel_count": 13296,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033185119",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033185119.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033185119.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033185119.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          105,
+          928
+        ],
+        [
+          6,
+          1015
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        823,
+        1009
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 35384,
+      "cropped_foreground_voxel_count": 35384,
+      "gt_192_foreground_voxel_count": 2518,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033235247",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033235247.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033235247.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033235247.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 3734,
+      "cropped_foreground_voxel_count": 3734,
+      "gt_192_foreground_voxel_count": 3551,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033315871",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033315871.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033315871.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033315871.nii.gz",
+      "original_shape": [
+        80,
+        292,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          292
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        292,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 11389,
+      "cropped_foreground_voxel_count": 11389,
+      "gt_192_foreground_voxel_count": 8990,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033330770",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033330770.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033330770.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033330770.nii.gz",
+      "original_shape": [
+        80,
+        244,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          244
+        ],
+        [
+          0,
+          384
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        244,
+        384
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 762,
+      "cropped_foreground_voxel_count": 762,
+      "gt_192_foreground_voxel_count": 727,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033498429",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033498429.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033498429.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033498429.nii.gz",
+      "original_shape": [
+        80,
+        250,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          80
+        ],
+        [
+          0,
+          249
+        ],
+        [
+          0,
+          348
+        ]
+      ],
+      "cropped_shape": [
+        80,
+        249,
+        348
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 4272,
+      "cropped_foreground_voxel_count": 4272,
+      "gt_192_foreground_voxel_count": 4334,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033655986",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033655986.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033655986.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033655986.nii.gz",
+      "original_shape": [
+        104,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 25508,
+      "cropped_foreground_voxel_count": 25508,
+      "gt_192_foreground_voxel_count": 6601,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033818833",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033818833.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033818833.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033818833.nii.gz",
+      "original_shape": [
+        104,
+        512,
+        512
+      ],
+      "bbox": [
+        [
+          0,
+          104
+        ],
+        [
+          0,
+          512
+        ],
+        [
+          0,
+          512
+        ]
+      ],
+      "cropped_shape": [
+        104,
+        512,
+        512
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 1747,
+      "cropped_foreground_voxel_count": 1747,
+      "gt_192_foreground_voxel_count": 459,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033819949",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033819949.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033819949.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033819949.nii.gz",
+      "original_shape": [
+        120,
+        1024,
+        1024
+      ],
+      "bbox": [
+        [
+          0,
+          120
+        ],
+        [
+          99,
+          933
+        ],
+        [
+          7,
+          1022
+        ]
+      ],
+      "cropped_shape": [
+        120,
+        834,
+        1015
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 14143,
+      "cropped_foreground_voxel_count": 14143,
+      "gt_192_foreground_voxel_count": 976,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033923781",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033923781.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033923781.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033923781.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          285
+        ],
+        [
+          0,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        284,
+        351
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 12752,
+      "cropped_foreground_voxel_count": 12752,
+      "gt_192_foreground_voxel_count": 12619,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0033973814",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0033973814.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0033973814.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0033973814.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          277
+        ],
+        [
+          0,
+          347
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        276,
+        347
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 36338,
+      "cropped_foreground_voxel_count": 36338,
+      "gt_192_foreground_voxel_count": 37305,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0034092512",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0034092512.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0034092512.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0034092512.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          285
+        ],
+        [
+          0,
+          350
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        284,
+        350
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 2343,
+      "cropped_foreground_voxel_count": 2343,
+      "gt_192_foreground_voxel_count": 2334,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "0034131385",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/0034131385.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/0034131385.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/0034131385.nii.gz",
+      "original_shape": [
+        72,
+        286,
+        352
+      ],
+      "bbox": [
+        [
+          0,
+          72
+        ],
+        [
+          1,
+          285
+        ],
+        [
+          0,
+          351
+        ]
+      ],
+      "cropped_shape": [
+        72,
+        284,
+        351
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 24648,
+      "cropped_foreground_voxel_count": 24648,
+      "gt_192_foreground_voxel_count": 24300,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    },
+    {
+      "case_id": "008093816",
+      "preprocessed_path": "/home/ubuntu/zy/pythoncode/sfda/CM-TTA/outputs/voxtell_192/HBP/preprocess/cases/008093816.npz",
+      "image_path": "/data/hilab/datasets/WCH_MRI145/HBP/images/008093816.nii.gz",
+      "gt_path": "/data/hilab/datasets/WCH_MRI145/HBP/labels/008093816.nii.gz",
+      "original_shape": [
+        25,
+        300,
+        384
+      ],
+      "bbox": [
+        [
+          0,
+          25
+        ],
+        [
+          1,
+          299
+        ],
+        [
+          0,
+          378
+        ]
+      ],
+      "cropped_shape": [
+        25,
+        298,
+        378
+      ],
+      "target_shape": [
+        192,
+        192,
+        192
+      ],
+      "foreground_labels": [
+        1
+      ],
+      "original_foreground_voxel_count": 936,
+      "cropped_foreground_voxel_count": 936,
+      "gt_192_foreground_voxel_count": 2353,
+      "foreground_erased_by_crop": false,
+      "foreground_erased_by_resize": false
+    }
+  ]
+}

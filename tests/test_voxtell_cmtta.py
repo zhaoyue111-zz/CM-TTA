@@ -4797,6 +4797,38 @@ class VoxTellCMTTATest(unittest.TestCase):
         finally:
             adapter.close()
 
+    def test_qwen_device_can_be_configured_independently(self):
+        qwen = TinyQwen()
+        adapter = VoxTellCMTTA(
+            TinyVoxTell(text_dim=4),
+            None,
+            "cpu",
+            make_args(),
+            qwen,
+            TinyQwenTokenizer(),
+            text_prompt="liver",
+            n_ctx=2,
+            formatted_text_prompt="prefix liver",
+            qwen_device="cpu",
+            qwen_dtype=torch.float16,
+        )
+        try:
+            self.assertEqual(adapter.qwen_device, torch.device("cpu"))
+            self.assertEqual(adapter._fixed_token_embeddings.device.type, "cpu")
+            self.assertEqual(
+                adapter._liver_token_indices.device,
+                adapter._fixed_token_embeddings.device,
+            )
+            self.assertEqual(adapter._fixed_token_embeddings.dtype, torch.float16)
+            encoded = adapter._encode_ctx(adapter.ctx_delta)
+            self.assertEqual(encoded.device, adapter.device)
+            self.assertEqual(encoded.dtype, adapter.model_dtype)
+            encoded.sum().backward()
+            self.assertIsNotNone(adapter.ctx_delta.grad)
+            self.assertGreater(float(adapter.ctx_delta.grad.norm()), 0.0)
+        finally:
+            adapter.close()
+
     def test_amp_skipped_step_fails_without_committing_lspm_state(self):
         class SkippedScaler:
             def __init__(self):
