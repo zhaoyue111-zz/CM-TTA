@@ -53,25 +53,42 @@ def _case_name(case) -> str:
     return name if name.endswith(".nii.gz") else f"{name}.nii.gz"
 
 
+def resolve_image_label_dirs(data_dir: str) -> Tuple[Path, Path]:
+    """Resolve either the legacy ``images/P0`` layout or flat case folders."""
+    root = Path(data_dir)
+    candidates = (
+        (root / "images" / P0, root / "labels" / P0),
+        (root / "images", root / "labels"),
+    )
+    for image_dir, label_dir in candidates:
+        if image_dir.is_dir() and label_dir.is_dir():
+            return image_dir, label_dir
+    searched = ", ".join(
+        f"({image_dir}, {label_dir})" for image_dir, label_dir in candidates
+    )
+    raise FileNotFoundError(
+        "Could not find matching image/label directories. Expected one of: "
+        f"{searched}"
+    )
+
+
 def read_test_entries(
     data_dir: str, split_file: Optional[str] = None
 ) -> List[Tuple[Path, Path]]:
-    root = Path(data_dir)
     split = read_balanced_split(data_dir, split_file)
-    image_dir = root / "images" / P0
-    label_dir = root / "labels" / P0
+    image_dir, label_dir = resolve_image_label_dirs(data_dir)
     entries = []
     for case in split["test_cases"]:
         name = _case_name(case)
         image_path = image_dir / name
         label_path = label_dir / name
         if not image_path.exists():
-            raise FileNotFoundError(f"P0 test image does not exist: {image_path}")
+            raise FileNotFoundError(f"Test image does not exist: {image_path}")
         if not label_path.exists():
-            raise FileNotFoundError(f"P0 test label does not exist: {label_path}")
+            raise FileNotFoundError(f"Test label does not exist: {label_path}")
         entries.append((image_path, label_path))
     if not entries:
-        raise ValueError("The P0 test split is empty")
+        raise ValueError("The test split is empty")
     return entries
 
 

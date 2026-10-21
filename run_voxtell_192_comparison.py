@@ -73,6 +73,12 @@ SUMMARY_CASE_FIELDS = (
     "pre_student_192_mIoU",
     "post_student_192_Dice",
     "post_student_192_mIoU",
+    "selected_view_pre_student_192_Dice",
+    "selected_view_pre_student_192_mIoU",
+    "selected_view_post_student_192_Dice",
+    "selected_view_post_student_192_mIoU",
+    "selected_view_student_192_Dice_change",
+    "selected_view_student_192_mIoU_change",
     "post_teacher_original_sliding_Dice",
     "post_teacher_original_sliding_mIoU",
     "post_teacher_192_native_Dice",
@@ -427,6 +433,15 @@ def evaluate_probability(probability: np.ndarray, target: np.ndarray) -> dict[st
     return binary_metrics(np.asarray(probability) >= 0.5, np.asarray(target) > 0)
 
 
+def make_intensity_view(
+    image_192: np.ndarray, param: dict[str, float], view_index: int
+) -> np.ndarray:
+    """Reconstruct the exact unaugmented/augmented input used by CM-TTA."""
+    if int(view_index) == 0:
+        return image_192
+    return image_192 * float(param["scale"]) + float(param["offset"])
+
+
 def evaluate_selection_context_views(
     predictor,
     image_192: np.ndarray,
@@ -437,9 +452,7 @@ def evaluate_selection_context_views(
     """Evaluate all views with the exact prepared short context used by selection."""
     rows = []
     for view_index, param in enumerate(view_params):
-        view = image_192 if view_index == 0 else (
-            image_192 * float(param["scale"]) + float(param["offset"])
-        )
+        view = make_intensity_view(image_192, param, view_index)
         probability = predict_official_probability(
             predictor, view, selection_text_feature, assert_one_window=True
         )
@@ -657,6 +670,36 @@ def run_configuration(
             )
             post_student_metrics = evaluate_probability(post_student_probability, gt_192[0])
 
+            # Evaluate the metric-selected intensity view with the raw student
+            # immediately before and after its optimizer step. This is distinct
+            # from selected_view_Dice, which uses prepared_case.short_ctx because
+            # that is the context under which CAC/TDC actually selected the view.
+            if selected_view == 0:
+                selected_view_pre_student_metrics = pre_student_metrics
+                selected_view_post_student_metrics = post_student_metrics
+            else:
+                selected_image = make_intensity_view(
+                    artifact["image_192"], params[selected_view], selected_view
+                )
+                selected_view_pre_student_metrics = evaluate_probability(
+                    predict_official_probability(
+                        predictor,
+                        selected_image,
+                        pre_student_text,
+                        assert_one_window=True,
+                    ),
+                    gt_192[0],
+                )
+                selected_view_post_student_metrics = evaluate_probability(
+                    predict_official_probability(
+                        predictor,
+                        selected_image,
+                        post_student_text,
+                        assert_one_window=True,
+                    ),
+                    gt_192[0],
+                )
+
             # Teacher B: official interface on 192^3, exactly one window.
             post_teacher_192_probability = predict_official_probability(
                 predictor, artifact["image_192"], post_teacher_text, assert_one_window=True
@@ -705,6 +748,18 @@ def run_configuration(
                 "post_student_192_mIoU": post_student_metrics["mIoU"],
                 "student_192_Dice_change": post_student_metrics["Dice"] - pre_student_metrics["Dice"],
                 "student_192_mIoU_change": post_student_metrics["mIoU"] - pre_student_metrics["mIoU"],
+                "selected_view_pre_student_192_Dice": selected_view_pre_student_metrics["Dice"],
+                "selected_view_pre_student_192_mIoU": selected_view_pre_student_metrics["mIoU"],
+                "selected_view_post_student_192_Dice": selected_view_post_student_metrics["Dice"],
+                "selected_view_post_student_192_mIoU": selected_view_post_student_metrics["mIoU"],
+                "selected_view_student_192_Dice_change": (
+                    selected_view_post_student_metrics["Dice"]
+                    - selected_view_pre_student_metrics["Dice"]
+                ),
+                "selected_view_student_192_mIoU_change": (
+                    selected_view_post_student_metrics["mIoU"]
+                    - selected_view_pre_student_metrics["mIoU"]
+                ),
                 "post_teacher_original_sliding_Dice": original_sliding_metrics["Dice"],
                 "post_teacher_original_sliding_mIoU": original_sliding_metrics["mIoU"],
                 "post_teacher_192_native_Dice": post_teacher_192_metrics["Dice"],
@@ -794,6 +849,12 @@ def write_combined_outputs(output_dir: Path, per_config: dict[str, dict]) -> Non
         "pre_student_192_mIoU",
         "post_student_192_Dice",
         "post_student_192_mIoU",
+        "selected_view_pre_student_192_Dice",
+        "selected_view_pre_student_192_mIoU",
+        "selected_view_post_student_192_Dice",
+        "selected_view_post_student_192_mIoU",
+        "selected_view_student_192_Dice_change",
+        "selected_view_student_192_mIoU_change",
         "post_teacher_original_sliding_Dice",
         "post_teacher_original_sliding_mIoU",
         "post_teacher_192_native_Dice",
@@ -831,6 +892,43 @@ def write_combined_outputs(output_dir: Path, per_config: dict[str, dict]) -> Non
         json.dumps(payload, indent=2), encoding="utf-8"
     )
     write_cases_csv(output_dir / "combined_selector_comparison.csv", combined_rows)
+
+    mean_dice_rows = []
+    for name in names:
+        summary = per_config[name]["summary"]
+        mean_dice_rows.append(
+            {
+                "selector": name,
+                "mean_oracle_best_of_10_selection_context_Dice": summary[
+                    "mean_all_views_max_Dice"
+                ],
+                "mean_metric_selected_view_selection_context_Dice": summary[
+                    "mean_selected_view_Dice"
+                ],
+                "mean_original_view_pre_update_student_Dice": summary[
+                    "mean_pre_student_192_Dice"
+                ],
+                "mean_original_view_post_update_student_Dice": summary[
+                    "mean_post_student_192_Dice"
+                ],
+                "mean_selected_view_pre_update_student_Dice": summary[
+                    "mean_selected_view_pre_student_192_Dice"
+                ],
+                "mean_selected_view_post_update_student_Dice": summary[
+                    "mean_selected_view_post_student_192_Dice"
+                ],
+                "mean_original_view_student_Dice_change": summary[
+                    "mean_student_192_Dice_change"
+                ],
+                "mean_selected_view_student_Dice_change": summary[
+                    "mean_selected_view_student_192_Dice_change"
+                ],
+            }
+        )
+    (output_dir / "mean_dice_analysis.json").write_text(
+        json.dumps(mean_dice_rows, indent=2), encoding="utf-8"
+    )
+    write_cases_csv(output_dir / "mean_dice_analysis.csv", mean_dice_rows)
 
 
 def main() -> None:

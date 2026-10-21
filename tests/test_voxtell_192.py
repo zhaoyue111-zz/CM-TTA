@@ -133,6 +133,12 @@ def _summary_case(offset=0.0):
         "pre_student_192_mIoU",
         "post_student_192_Dice",
         "post_student_192_mIoU",
+        "selected_view_pre_student_192_Dice",
+        "selected_view_pre_student_192_mIoU",
+        "selected_view_post_student_192_Dice",
+        "selected_view_post_student_192_mIoU",
+        "selected_view_student_192_Dice_change",
+        "selected_view_student_192_mIoU_change",
         "post_teacher_original_sliding_Dice",
         "post_teacher_original_sliding_mIoU",
         "post_teacher_192_native_Dice",
@@ -566,6 +572,21 @@ def test_combined_outputs_align_cases_and_include_each_final_macro_average():
         csv_text = (output / "combined_selector_comparison.csv").read_text()
         assert "CAC_final_mean_Dice_all_test_cases" in csv_text
         assert "TDC+Entropy_final_mean_mIoU_all_test_cases" in csv_text
+        analysis = json.loads((output / "mean_dice_analysis.json").read_text())
+        assert [row["selector"] for row in analysis] == [
+            config["name"] for config in SELECTOR_CONFIGS
+        ]
+        assert set(analysis[0]) == {
+            "selector",
+            "mean_oracle_best_of_10_selection_context_Dice",
+            "mean_metric_selected_view_selection_context_Dice",
+            "mean_original_view_pre_update_student_Dice",
+            "mean_original_view_post_update_student_Dice",
+            "mean_selected_view_pre_update_student_Dice",
+            "mean_selected_view_post_update_student_Dice",
+            "mean_original_view_student_Dice_change",
+            "mean_selected_view_student_Dice_change",
+        }
 
 
 def test_soft_192_probability_restores_shape_bbox_and_preserves_soft_interpolation():

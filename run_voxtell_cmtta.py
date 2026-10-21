@@ -31,6 +31,56 @@ DEFAULT_QWEN = Path(
 )
 
 
+ORIGINAL_CMTTA_SETTINGS = {
+    "pseudo_update_mode": "original",
+    "pseudo_teacher_inference": "patch",
+    "pseudo_view_weighting": "uniform",
+    "pseudo_spatial_weighting": "none",
+    "alignment_loss": "cac",
+    "response_weight": 0.0,
+    "pseudo_component_filter": "none",
+    "pseudo_region_refinement": "none",
+    "use_lora": False,
+    "use_d4_local_distill": False,
+    "d4_local_diagnostics": False,
+    "text_rank_diagnostics": False,
+    "gradient_conflict_diagnostics": False,
+    "decoder_alignment_check": False,
+    "response_diagnostics": False,
+    "response_export_dir": None,
+    "response_export_cases": None,
+}
+
+
+def validate_original_cmtta_configuration(args: argparse.Namespace) -> None:
+    """Reject experimental losses/features in the original CM-TTA entrypoint."""
+    changed = {
+        name: getattr(args, name)
+        for name, expected in ORIGINAL_CMTTA_SETTINGS.items()
+        if getattr(args, name) != expected
+    }
+    if changed:
+        details = ", ".join(
+            f"{name}={value!r} (expected {ORIGINAL_CMTTA_SETTINGS[name]!r})"
+            for name, value in changed.items()
+        )
+        raise ValueError(
+            "run_voxtell_cmtta.py is restricted to the original CM-TTA loss; "
+            f"experimental settings are disabled: {details}"
+        )
+
+
+def resolve_text_dtype(name: str, text_device: torch.device):
+    """Use half precision for the frozen Qwen encoder when it resides on CUDA."""
+    if name == "auto":
+        return torch.float16 if text_device.type == "cuda" else None
+    return {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }[name]
+
+
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -1050,6 +1100,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--text_model", default=str(DEFAULT_QWEN))
     parser.add_argument("--prompt", default="liver")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--text_device",
+        default="same",
+        help="Device for the frozen Qwen encoder; 'same' uses --device.",
+    )
+    parser.add_argument(
+        "--text_dtype",
+        choices=("auto", "float16", "bfloat16", "float32"),
+        default="auto",
+        help="Frozen Qwen dtype; auto uses float16 on CUDA.",
+    )
     parser.add_argument("--output_dir", default="results_/voxtell_cmtta_p0")
     parser.add_argument(
         "--fail_if_output_exists",
@@ -1359,14 +1420,20 @@ def main() -> None:
         raise ValueError("VoxTell CM-TTA uses exactly one TTA step per complete 3-D case")
     if args.print_freq < 1:
         raise ValueError("--print_freq must be positive")
-    if args.prompt != "liver":
-        raise ValueError('VoxTell CM-TTA fixes the original text prompt to "liver"')
+    if not args.prompt.strip():
+        raise ValueError("--prompt must not be empty")
+    validate_original_cmtta_configuration(args)
     seed_everything(args.seed)
     args.device = torch.device(args.device)
     if args.device.type == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA was requested but is unavailable")
         torch.cuda.set_device(args.device)
+    text_device = (
+        args.device if args.text_device == "same" else torch.device(args.text_device)
+    )
+    if text_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA text_device was requested but CUDA is unavailable")
 
     output_dir = Path(args.output_dir)
     if args.fail_if_output_exists and output_dir.exists():
@@ -1381,8 +1448,15 @@ def main() -> None:
         replay_order = load_case_order_replay(args.case_order_replay)
         entries = apply_case_order_replay(entries, replay_order)
     replay_view_params = None
+    replay_view_order = None
     if args.view_params_replay:
         replay_view_params = load_view_params_replay(args.view_params_replay)
+        replay_view_order = load_case_order_replay(args.view_params_replay)
+        actual_order = [image_path.name for image_path, _ in entries]
+        if replay_view_order != actual_order:
+            raise ValueError(
+                "view_params_replay case order does not match the current split order"
+            )
         loaded_basenames = {image_path.name for image_path, _ in entries}
         replay_basenames = set(replay_view_params)
         if loaded_basenames != replay_basenames:
@@ -1406,6 +1480,8 @@ def main() -> None:
         qwen_text_encoder=predictor.text_backbone,
         qwen_tokenizer=predictor.tokenizer,
         text_prompt=args.prompt,
+        qwen_device=text_device,
+        qwen_dtype=resolve_text_dtype(args.text_dtype, text_device),
     )
     if args.checkpoint:
         load_cmtta_checkpoint(args.checkpoint, adapter)
@@ -1619,6 +1695,7 @@ def main() -> None:
                     teacher_context["info"] = info
                     teacher_context["long_text_feature"] = long_text_feature
                     return labels
+            optimizer_steps_before_case = adapter.optimizer_step_count
             trace = adapter.adapt_case(
                 patches,
                 valid_masks,
@@ -1627,6 +1704,23 @@ def main() -> None:
                 case_basename=image_path.name,
                 adaptation_step=1,
             )
+            optimizer_steps_for_case = (
+                adapter.optimizer_step_count - optimizer_steps_before_case
+            )
+            if int(trace.get("spatial_patch_count", -1)) != len(patches):
+                raise RuntimeError(
+                    f"Patch accounting mismatch for {image_path.name}: "
+                    f"trace={trace.get('spatial_patch_count')} actual={len(patches)}"
+                )
+            if (
+                int(trace.get("optimizer_steps_for_case", -1)) != 1
+                or optimizer_steps_for_case != 1
+            ):
+                raise RuntimeError(
+                    f"Expected exactly one optimizer step for {image_path.name}; "
+                    f"trace={trace.get('optimizer_steps_for_case')} "
+                    f"observed={optimizer_steps_for_case}"
+                )
             if (
                 expected_view_params is not None
                 and trace["view_params"] != expected_view_params
@@ -1784,6 +1878,10 @@ def main() -> None:
             row["view_metrics"] = row_view_metrics
             row["zero_shot_nonoverlap_dice"] = zero_shot_nonoverlap_dice
             row["zero_shot_patch_gap"] = zero_shot_patch_gap
+            row["spatial_patch_count"] = int(trace["spatial_patch_count"])
+            row["optimizer_steps_for_case"] = int(
+                trace["optimizer_steps_for_case"]
+            )
             if "teacher_inference_diagnostics" in trace:
                 teacher_diagnostics = trace["teacher_inference_diagnostics"]
                 teacher_diagnostics["zero_shot_before_adaptation"] = {
@@ -1955,15 +2053,22 @@ def main() -> None:
         adapter.close()
 
     average = macro_average_case_metrics(case_rows)
-    output = {"cases": case_rows, "average": average}
+    output = {
+        "case_order": [image_path.name for image_path, _ in entries],
+        "cases": case_rows,
+        "average": average,
+    }
     if replay_order is not None or replay_view_params is not None:
         output["replay_validation"] = {
             "case_order_source": args.case_order_replay,
             "view_params_source": args.view_params_replay,
             "actual_case_order": [image_path.name for image_path, _ in entries],
             "case_order_matches_request": (
-                replay_order is None
-                or [image_path.name for image_path, _ in entries] == replay_order
+                (replay_order is None or output["case_order"] == replay_order)
+                and (
+                    replay_view_order is None
+                    or output["case_order"] == replay_view_order
+                )
             ),
             "view_params_match_source_by_basename": replay_view_params is not None,
         }

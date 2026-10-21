@@ -14,7 +14,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from data.voxtell_p0 import make_case_patches, pad_to_patch_grid
+from data.voxtell_p0 import make_case_patches, pad_to_patch_grid, read_test_entries
 from method.voxtell_cmtta import (
     LoRAPackedQKVMultiheadAttention,
     ResponseDiagnosticsAccumulator,
@@ -54,6 +54,7 @@ from method.voxtell_cmtta import (
     save_cmtta_checkpoint,
 )
 from run_voxtell_cmtta import (
+    ORIGINAL_CMTTA_SETTINGS,
     apply_case_order_replay,
     binary_diagnostic_metrics,
     case_metric_changes,
@@ -66,6 +67,7 @@ from run_voxtell_cmtta import (
     load_view_params_replay,
     patch_teacher_probability,
     predict_case_soft_probability,
+    resolve_text_dtype,
     save_prediction_nifti,
     selected_view_data,
     selector_only_case_report,
@@ -73,6 +75,7 @@ from run_voxtell_cmtta import (
     stitch_patch_probabilities,
     summarize_gradient_conflict_diagnostics,
     summarize_selector_only,
+    validate_original_cmtta_configuration,
     zero_shot_diagnostic_fields,
 )
 
@@ -372,6 +375,46 @@ def make_args(**overrides):
 
 
 class VoxTellCMTTATest(unittest.TestCase):
+    def test_read_test_entries_supports_flat_and_legacy_p0_layouts(self):
+        for legacy_layout in (False, True):
+            with self.subTest(legacy_layout=legacy_layout), TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                suffix = Path("P0") if legacy_layout else Path()
+                image_dir = root / "images" / suffix
+                label_dir = root / "labels" / suffix
+                image_dir.mkdir(parents=True)
+                label_dir.mkdir(parents=True)
+                for name in ("case_b.nii.gz", "case_a.nii.gz"):
+                    (image_dir / name).touch()
+                    (label_dir / name).touch()
+                split_path = root / "split.json"
+                split_path.write_text(
+                    json.dumps({"test_cases": ["case_b", "case_a.nii.gz"]}),
+                    encoding="utf-8",
+                )
+
+                entries = read_test_entries(str(root), str(split_path))
+
+                self.assertEqual(
+                    [image.name for image, _ in entries],
+                    ["case_b.nii.gz", "case_a.nii.gz"],
+                )
+                self.assertTrue(all(image.parent == image_dir for image, _ in entries))
+                self.assertTrue(all(label.parent == label_dir for _, label in entries))
+
+    def test_original_runner_rejects_experimental_loss_settings(self):
+        args = types.SimpleNamespace(**ORIGINAL_CMTTA_SETTINGS)
+        validate_original_cmtta_configuration(args)
+        args.use_lora = True
+        with self.assertRaisesRegex(ValueError, "use_lora=True"):
+            validate_original_cmtta_configuration(args)
+
+    def test_text_dtype_auto_uses_fp16_only_on_cuda(self):
+        self.assertEqual(
+            resolve_text_dtype("auto", torch.device("cuda:1")), torch.float16
+        )
+        self.assertIsNone(resolve_text_dtype("auto", torch.device("cpu")))
+
     @staticmethod
     def _component_filter_fixture():
         probabilities = [
