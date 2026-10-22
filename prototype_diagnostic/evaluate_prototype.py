@@ -147,9 +147,11 @@ def evaluate_query_case(
         "case_name": name,
         "foreground_labels": [int(value) for value in foreground_labels],
         "roi_shape": [int(value) for value in prepared.original_shape],
+        "preprocessed_shape": [int(value) for value in prepared.preprocessed_shape],
+        "bbox": [[int(value) for value in bounds] for bounds in prepared.bbox],
         "sliding_patch_count": int(extracted.sliding_patch_count),
-        "gt_tumor_voxels": int(target.sum()),
-        "tumor_prevalence": float(target.mean()),
+        "gt_tumor_voxels": int(target_full.sum()),
+        "tumor_prevalence": float(target_full.mean()),
         "gt_foreground_voxels": int(target.sum()),
         "gt_foreground_voxels_outside_preprocessed_crop": outside_crop_foreground,
         "evaluated_voxels": int(target.size),
@@ -195,7 +197,9 @@ def evaluate_query_case(
         top_one_full,
     )
     metrics["representative_axial_slice"] = slice_index
-    metrics["evaluation_space"] = "complete input liver cuboid ROI (D,H,W)"
+    metrics["evaluation_space"] = (
+        "official VoxTell preprocessed space; outputs restored to liver cuboid ROI"
+    )
     write_json(case_dir / "metrics.json", metrics)
     return metrics
 

@@ -26,8 +26,11 @@ from preceding decoder-stage fusion, while remaining upstream of the final
 foreground logit projection.
 
 Input cases are read directly from `<data_dir>/images/*.nii.gz` with same-named files
-in `<data_dir>/labels/`. No liver segmentation or additional ROI crop is performed;
-the predictor's Z-score normalization is applied to the complete input cuboid.
+in `<data_dir>/labels/`. Although each input is already a liver cuboid ROI, VoxTell
+still uses its official `predictor.preprocess()`, including `crop_to_nonzero` and
+Z-score normalization. All features, TDC values, and prototypes are computed in this
+official preprocessed space, then aligned to the original liver cuboid through the
+saved bounding box. The diagnostic does not run a new liver segmentation step.
 
 For every case/view, `SlidingD5FeatureExtractor` uses the predictor's own patch size,
 50% overlap slicers and nnUNet Gaussian (`sigma_scale=1/8`, scale 10). Logits and all
@@ -39,7 +42,7 @@ removed using `pad_nd_image`'s returned slices; no spatial reshape is used.
 Memory cases are chosen either explicitly with `--memory_cases` or by descending
 source-model TDC. TDC is always recomputed here with the same frozen VoxTell, fixed
 prompt and views used for feature extraction. For every view, D5-D2 logits are
-restored over the complete ROI with the same sliding-window Gaussian fusion, then
+restored over the complete preprocessed volume with the same sliding-window Gaussian fusion, then
 reduced by `tdc_patch_components`/`tdc_from_components`. This is recorded as
 `tdc_type="sliding_volume_tdc"`; it is not CM-TTA non-overlap patch-accumulation TDC.
 `source_tdc.json` records each case's original-view, view-mean and view-maximum TDC;
@@ -106,9 +109,10 @@ all paired ROIs are evaluated. `--foreground_labels` accepts one or more integer
 - `cases/<case>/`: `metrics.json`, `diagnostic.png`, `seg_prob.nii.gz`,
   `proto_sim_max.nii.gz`, and `proto_sim_topk.nii.gz`.
 
-Similarity evaluation covers the complete input liver cuboid ROI. Saved NIfTIs retain
-the ROI shape and affine. If a query is also a memory case, every prototype from that
-same case is excluded before matching.
+Similarity evaluation runs in official VoxTell preprocessed space. Saved maps are
+restored through the preprocessing bbox to the original liver cuboid shape and affine.
+If a query is also a memory case, every prototype from that same case is excluded
+before matching.
 
 The recovery hypothesis is supported when zero-foreground cases still show:
 

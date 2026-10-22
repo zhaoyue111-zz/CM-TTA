@@ -6,7 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import nibabel as nib
 import numpy as np
@@ -99,22 +99,24 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         for logits in decoder_result.decoder_logits:
             self.assertTrue(torch.allclose(logits, data[0], atol=1e-5))
 
-    def test_prepare_case_keeps_complete_liver_roi_shape(self):
-        class IdentityNormalization:
-            @staticmethod
-            def run(image, _seg):
-                return image
-
-        predictor = SimpleNamespace(normalization=IdentityNormalization())
+    def test_prepare_case_uses_official_preprocess_and_records_geometry(self):
         roi = np.zeros((1, 3, 4, 5), dtype=np.float32)
         roi[:, 1, 1:3, 1:4] = 1.0
+        processed = torch.ones(1, 2, 2, 3)
+        bbox = ((1, 3), (1, 3), (1, 4))
+        predictor = SimpleNamespace(
+            preprocess=Mock(return_value=(processed, bbox, (3, 4, 5)))
+        )
         with patch(
             "prototype_diagnostic.extract_features.load_ras_image", return_value=roi
         ):
             prepared = prepare_case(predictor, Path("roi.nii.gz"))
+        predictor.preprocess.assert_called_once()
+        self.assertIs(predictor.preprocess.call_args.args[0], roi)
         self.assertEqual(prepared.original_shape, (3, 4, 5))
-        self.assertEqual(tuple(prepared.data.shape), (1, 3, 4, 5))
-        self.assertEqual(prepared.bbox, ((0, 3), (0, 4), (0, 5)))
+        self.assertEqual(prepared.preprocessed_shape, (2, 2, 3))
+        self.assertIs(prepared.data, processed)
+        self.assertEqual(prepared.bbox, bbox)
 
     def test_connected_components_and_erosion_are_three_dimensional(self):
         mask = np.zeros((7, 7, 7), dtype=bool)
@@ -208,6 +210,8 @@ class PrototypeDiagnosticTest(unittest.TestCase):
             image_path=Path("case.nii.gz"),
             data=torch.zeros(1, 2, 2, 2),
             original_shape=(2, 2, 2),
+            preprocessed_shape=(2, 2, 2),
+            bbox=((0, 2), (0, 2), (0, 2)),
         )
         params = [
             {"scale": 1.0, "offset": 0.0},
@@ -221,6 +225,8 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         self.assertEqual(result["view_count"], len(params))
         self.assertEqual(result["tdc_type"], "sliding_volume_tdc")
         self.assertEqual(result["roi_shape"], [2, 2, 2])
+        self.assertEqual(result["preprocessed_shape"], [2, 2, 2])
+        self.assertEqual(result["bbox"], [[0, 2], [0, 2], [0, 2]])
         self.assertEqual(result["sliding_patch_count"], 7)
         self.assertEqual(len(result["views"]), len(params))
         self.assertEqual(result["original_tdc"], 1.0)
@@ -276,7 +282,7 @@ class PrototypeDiagnosticTest(unittest.TestCase):
             ["case_a.nii.gz", "case_b.nii.gz"],
         )
 
-    def test_bank_gt_quality_is_posthoc_and_does_not_mutate_bank(self):
+    def test_bank_gt_quality_crops_nonfull_bbox_without_mutating_bank(self):
         bank = {
             "prototypes": [
                 {
@@ -284,21 +290,27 @@ class PrototypeDiagnosticTest(unittest.TestCase):
                     "case_name": "case.nii.gz",
                     "region_id": 3,
                     "region_size": 2,
-                    "roi_shape": [1, 1, 4],
-                    "region_flat_indices": torch.tensor([1, 2]),
+                    "roi_shape": [3, 4, 5],
+                    "preprocessed_shape": [2, 3, 4],
+                    "bbox": [[1, 3], [1, 4], [1, 5]],
+                    "region_flat_indices": torch.tensor([0, 23]),
                     "tdc": 0.75,
                     "view_support_mean": 0.9,
                 }
             ]
         }
         before = deepcopy(bank)
+        gt = np.zeros((3, 4, 5), dtype=bool)
+        gt[1, 1, 1] = True  # cropped flat index 0, inside prototype region
+        gt[1, 1, 2] = True  # inside crop but outside prototype region
+        gt[0, 0, 0] = True  # outside bbox; still in full-case coverage denominator
         rows = bank_region_quality_rows(
             bank,
-            {"case.nii.gz": np.array([[[False, True, False, True]]])},
+            {"case.nii.gz": gt},
         )
         self.assertEqual(rows[0]["intersection_with_gt"], 1)
         self.assertEqual(rows[0]["region_purity"], 0.5)
-        self.assertEqual(rows[0]["gt_coverage"], 0.5)
+        self.assertAlmostEqual(rows[0]["gt_coverage"], 1.0 / 3.0)
         self.assertTrue(torch.equal(bank["prototypes"][0]["feature"], before["prototypes"][0]["feature"]))
         self.assertTrue(
             torch.equal(

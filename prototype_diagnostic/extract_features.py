@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from acvl_utils.cropping_and_padding.padding import pad_nd_image
@@ -25,6 +24,7 @@ class PreparedCase:
     data: torch.Tensor
     bbox: Sequence[Sequence[int]]
     original_shape: tuple[int, int, int]
+    preprocessed_shape: tuple[int, int, int]
 
 
 @dataclass
@@ -104,21 +104,13 @@ def embed_prompt(
 
 def prepare_case(predictor, image_path: Path) -> PreparedCase:
     image = load_ras_image(str(image_path))
-    if image.ndim == 3:
-        image = image[None]
-    if image.ndim != 4 or image.shape[0] != 1:
-        raise ValueError(
-            f"Expected one-channel liver ROI (C,D,H,W), got {image.shape}"
-        )
-    image = image.astype(np.float32, copy=True)
-    original_shape = tuple(int(value) for value in image.shape[1:])
-    data = torch.from_numpy(predictor.normalization.run(image, None))
-    bbox = tuple((0, size) for size in original_shape)
+    data, bbox, original_shape = predictor.preprocess(image)
     return PreparedCase(
         image_path=Path(image_path),
         data=data,
         bbox=bbox,
         original_shape=tuple(int(v) for v in original_shape),
+        preprocessed_shape=tuple(int(v) for v in data.shape[-3:]),
     )
 
 

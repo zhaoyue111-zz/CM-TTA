@@ -18,7 +18,7 @@ from prototype_diagnostic.extract_features import (
     deterministic_view_params,
     prepare_case,
 )
-from prototype_diagnostic.utils import case_name
+from prototype_diagnostic.utils import bbox_slices, case_name
 
 
 def load_view_params_replay(
@@ -122,6 +122,8 @@ def compute_source_tdc_for_case(
         "case_name": prepared.image_path.name,
         "tdc_type": "sliding_volume_tdc",
         "roi_shape": [int(value) for value in prepared.original_shape],
+        "preprocessed_shape": [int(value) for value in prepared.preprocessed_shape],
+        "bbox": [[int(value) for value in bounds] for bounds in prepared.bbox],
         "sliding_patch_count": int(view_rows[0]["sliding_patch_count"]),
         "view_count": len(view_rows),
         "views": view_rows,
@@ -247,20 +249,27 @@ def region_prototype(feature_mean: torch.Tensor, core: np.ndarray) -> torch.Tens
 def bank_region_quality_rows(
     bank: dict[str, object], gt_by_case: dict[str, np.ndarray]
 ) -> list[dict[str, object]]:
-    """Compute GT-only post-hoc region quality without changing the bank."""
+    """Compute post-hoc quality; GT coverage uses full liver-cuboid tumor count."""
     rows = []
     for item in bank["prototypes"]:
         name = str(item["case_name"])
-        gt = np.asarray(gt_by_case[name], dtype=bool)
-        expected_shape = tuple(int(value) for value in item["roi_shape"])
-        if gt.shape != expected_shape:
+        gt_full = np.asarray(gt_by_case[name], dtype=bool)
+        roi_shape = tuple(int(value) for value in item["roi_shape"])
+        if gt_full.shape != roi_shape:
             raise ValueError(
-                f"GT ROI shape mismatch for {name}: {gt.shape} vs {expected_shape}"
+                f"GT ROI shape mismatch for {name}: {gt_full.shape} vs {roi_shape}"
+            )
+        gt = gt_full[bbox_slices(item["bbox"])]
+        preprocessed_shape = tuple(int(value) for value in item["preprocessed_shape"])
+        if gt.shape != preprocessed_shape:
+            raise ValueError(
+                f"Cropped GT shape mismatch for {name}: {gt.shape} vs "
+                f"{preprocessed_shape}"
             )
         indices = torch.as_tensor(item["region_flat_indices"], dtype=torch.long).numpy()
         intersection = int(gt.reshape(-1)[indices].sum())
         region_size = int(item["region_size"])
-        gt_voxels = int(gt.sum())
+        gt_voxels = int(gt_full.sum())
         rows.append(
             {
                 "case_name": name,
@@ -338,6 +347,12 @@ def build_prototype_bank(
                     "region_size": int(region_size),
                     "core_size": int(core.sum()),
                     "roi_shape": [int(value) for value in prepared.original_shape],
+                    "preprocessed_shape": [
+                        int(value) for value in prepared.preprocessed_shape
+                    ],
+                    "bbox": [
+                        [int(value) for value in bounds] for bounds in prepared.bbox
+                    ],
                     "region_flat_indices": torch.from_numpy(
                         np.flatnonzero(region).astype(np.int64)
                     ),
