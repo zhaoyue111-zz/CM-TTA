@@ -1,8 +1,14 @@
 # VoxTell D5 foreground-prototype diagnostic
 
-This directory is an inference-only experiment. It does not construct CM-TTA,
-`ctx_delta`, a loss, or an optimizer, and it never changes model weights or pseudo
-labels. Ground truth is loaded only after the prototype bank has been completed.
+This directory is an offline SFDA diagnostic over pre-cropped liver cuboid ROIs.
+The protocol is:
+
+`liver cuboid ROI -> frozen VoxTell sliding inference -> sliding-volume TDC -> reliable-case region prototype bank -> leave-one-case-out prototype retrieval -> GT-only offline evaluation`
+
+It does not construct LoRA, EMA, CM-TTA, `ctx_delta`, LSPM, a loss, or an optimizer,
+and it never changes model weights or pseudo labels. The fixed prompt is
+`"liver cancer"`. Ground truth is loaded only after the prototype bank has been
+completed.
 
 ## What is extracted
 
@@ -19,6 +25,10 @@ segmentation einsum. It already receives text-conditioned information propagated
 from preceding decoder-stage fusion, while remaining upstream of the final
 foreground logit projection.
 
+Input cases are read directly from `<data_dir>/images/*.nii.gz` with same-named files
+in `<data_dir>/labels/`. No liver segmentation or additional ROI crop is performed;
+the predictor's Z-score normalization is applied to the complete input cuboid.
+
 For every case/view, `SlidingD5FeatureExtractor` uses the predictor's own patch size,
 50% overlap slicers and nnUNet Gaussian (`sigma_scale=1/8`, scale 10). Logits and all
 feature channels are fused using the same spatial Gaussian denominator. Padding is
@@ -29,12 +39,14 @@ removed using `pad_nd_image`'s returned slices; no spatial reshape is used.
 Memory cases are chosen either explicitly with `--memory_cases` or by descending
 source-model TDC. TDC is always recomputed here with the same frozen VoxTell, fixed
 prompt and views used for feature extraction. For every view, D5-D2 logits are
-restored over the complete preprocessed case with the same sliding-window Gaussian
-fusion, then reduced by CM-TTA's `tdc_patch_components`/`tdc_from_components`.
+restored over the complete ROI with the same sliding-window Gaussian fusion, then
+reduced by `tdc_patch_components`/`tdc_from_components`. This is recorded as
+`tdc_type="sliding_volume_tdc"`; it is not CM-TTA non-overlap patch-accumulation TDC.
 `source_tdc.json` records each case's original-view, view-mean and view-maximum TDC;
 memory ranking defaults to `original_tdc`.
 
-`--results_json` is optional and is used **only** to replay
+By default, views are generated from a fixed per-case seed. `--results_json` remains
+optional and is used **only** to replay
 `adaptation_trace.view_params`. Its saved TDC and adapted model/ctx state are ignored.
 Cases without replay parameters use the original CM-TTA intensity sampler under a
 deterministic per-case seed.
@@ -51,19 +63,16 @@ Each saved prototype contains `feature`, `case_name`, `region_id`, `region_size`
 
 ## Example
 
-Run from the CM-TTA repository root. The existing results file below is optional and
-only makes this diagnostic reuse exactly the same augmentation parameters:
+Run from the CM-TTA repository root:
 
 ```bash
 python -m prototype_diagnostic.run_diagnostic \
-  --data_dir /data/hilab/datasets/WCH_MRI145/HBP \
-  --split_file /data/hilab/datasets/WCH_MRI145/HBP/split.json \
+  --data_dir /path/to/liver_cuboid_roi \
   --voxtell_root /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk \
   --model_dir /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk/model \
   --text_model /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk/model/Qwen3-Embedding-4B \
   --prompt "liver cancer" \
   --foreground_labels 1 \
-  --results_json outputs/HBP_nonoverlap_original/tdc/results.json \
   --memory_top_ratio 0.2 \
   --num_views 10 \
   --view_support 0.8 \
@@ -72,33 +81,34 @@ python -m prototype_diagnostic.run_diagnostic \
   --topk 5 \
   --device cuda:0 \
   --text_device cpu \
-  --output_dir prototype_diagnostic/outputs/HBP_tdc_prototypes \
+  --output_dir prototype_diagnostic/outputs/liver_roi_prototypes \
   --fail_if_output_exists
 ```
 
 To choose memory cases manually, pass, for example,
-`--memory_cases case_a.nii.gz case_b.nii.gz`. Omitting `--results_json` generates a
-deterministic view set locally. Source TDC is still reported for every split case.
-`--query_cases` can restrict evaluation; otherwise split test cases are evaluated in
-their original order. `--foreground_labels` accepts one or more integer IDs (for
-example `--foreground_labels 1 3`) and is used only after bank construction.
+`--memory_cases case_a.nii.gz case_b.nii.gz`. `--split_file` can optionally restrict
+the discovered flat-layout cases. `--query_cases` can restrict evaluation; otherwise
+all paired ROIs are evaluated. `--foreground_labels` accepts one or more integer IDs
+(for example `--foreground_labels 1 3`) and is used only after bank construction.
 
 ## Outputs and interpretation
 
 - `prototype_bank.pt`: region prototypes and bank provenance.
 - `source_tdc.json`: source-state per-view TDC plus original/mean/max summaries and
   the exact ranking value.
+- `bank_region_quality.csv`: post-hoc GT intersection, purity, and GT coverage for
+  every already-created prototype region. These values never affect bank selection.
 - `per_case_metrics.csv`: flattened per-case distributions, AUROC/AUPRC, and rank
-  enrichment.
+  enrichment, plus ROI shape, sliding patch count, tumor voxels/prevalence, and the
+  zero-foreground flag.
 - `summary.json`: all cases plus separate `pred_fg_voxels > 0` and
   `pred_fg_voxels == 0` groups.
 - `cases/<case>/`: `metrics.json`, `diagnostic.png`, `seg_prob.nii.gz`,
   `proto_sim_max.nii.gz`, and `proto_sim_topk.nii.gz`.
 
-Similarity evaluation is restricted to the preprocessed nonzero crop, where D5
-features exist. Saved NIfTIs are restored to source shape/affine; voxels outside that
-crop are zero. If a query is also a memory case, every prototype from that same case
-is excluded before matching.
+Similarity evaluation covers the complete input liver cuboid ROI. Saved NIfTIs retain
+the ROI shape and affine. If a query is also a memory case, every prototype from that
+same case is excluded before matching.
 
 The recovery hypothesis is supported when zero-foreground cases still show:
 

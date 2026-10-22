@@ -29,7 +29,7 @@ def _split_case_name(case: object) -> str:
 
 
 def resolve_image_label_dirs(data_dir: str | Path) -> tuple[Path, Path]:
-    """Resolve flat HBP or legacy P0 paths without importing project data code."""
+    """Resolve the flat ROI layout, retaining the existing legacy P0 fallback."""
     root = Path(data_dir).expanduser()
     candidates = (
         (root / "images" / "P0", root / "labels" / "P0"),
@@ -43,19 +43,24 @@ def resolve_image_label_dirs(data_dir: str | Path) -> tuple[Path, Path]:
 
 
 def read_test_entries(
-    data_dir: str | Path, split_file: str | Path
+    data_dir: str | Path, split_file: str | Path | None = None
 ) -> list[tuple[Path, Path]]:
-    """Read only split test cases from flat or legacy P0 directory layouts."""
-    split_path = Path(split_file).expanduser()
-    if not split_path.exists():
-        raise FileNotFoundError(f"Split file does not exist: {split_path}")
-    payload = json.loads(split_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping) or not isinstance(payload.get("test_cases"), list):
-        raise ValueError(f"{split_path} must contain a test_cases list")
+    """Read paired ROI images/labels, optionally restricted by a test split."""
     image_dir, label_dir = resolve_image_label_dirs(data_dir)
+    if split_file is None:
+        names = [path.name for path in sorted(image_dir.glob("*.nii.gz"))]
+    else:
+        split_path = Path(split_file).expanduser()
+        if not split_path.exists():
+            raise FileNotFoundError(f"Split file does not exist: {split_path}")
+        payload = json.loads(split_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping) or not isinstance(
+            payload.get("test_cases"), list
+        ):
+            raise ValueError(f"{split_path} must contain a test_cases list")
+        names = [_split_case_name(raw_case) for raw_case in payload["test_cases"]]
     entries: list[tuple[Path, Path]] = []
-    for raw_case in payload["test_cases"]:
-        name = _split_case_name(raw_case)
+    for name in names:
         image_path = image_dir / name
         label_path = label_dir / name
         if not image_path.is_file():
@@ -64,7 +69,7 @@ def read_test_entries(
             raise FileNotFoundError(f"Test label does not exist: {label_path}")
         entries.append((image_path, label_path))
     if not entries:
-        raise ValueError("The test split is empty")
+        raise ValueError("No paired liver ROI cases were found")
     return entries
 
 
@@ -223,6 +228,7 @@ def top_fraction_enrichment(
 ) -> dict[str, float | int | None]:
     target = np.asarray(target, dtype=bool)
     target_count = int(target.sum())
+    prevalence = float(target_count / target.size) if target.size else 0.0
     result: dict[str, float | int | None] = {}
     for fraction in fractions:
         selected = top_fraction_mask(scores, float(fraction))
@@ -234,6 +240,10 @@ def top_fraction_enrichment(
         )
         result[f"{prefix}_gt_foreground_recall"] = (
             float(true_positive / target_count) if target_count else None
+        )
+        precision = float(true_positive / max(1, int(selected.sum())))
+        result[f"{prefix}_enrichment_factor"] = (
+            float(precision / prevalence) if prevalence > 0.0 else None
         )
     return result
 

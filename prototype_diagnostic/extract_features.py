@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from acvl_utils.cropping_and_padding.padding import pad_nd_image
@@ -32,6 +33,7 @@ class ExtractedVolume:
     logits: torch.Tensor
     probability: torch.Tensor
     decoder_logits: tuple[torch.Tensor, ...] | None = None
+    sliding_patch_count: int = 0
 
 
 def build_predictor(
@@ -102,7 +104,16 @@ def embed_prompt(
 
 def prepare_case(predictor, image_path: Path) -> PreparedCase:
     image = load_ras_image(str(image_path))
-    data, bbox, original_shape = predictor.preprocess(image)
+    if image.ndim == 3:
+        image = image[None]
+    if image.ndim != 4 or image.shape[0] != 1:
+        raise ValueError(
+            f"Expected one-channel liver ROI (C,D,H,W), got {image.shape}"
+        )
+    image = image.astype(np.float32, copy=True)
+    original_shape = tuple(int(value) for value in image.shape[1:])
+    data = torch.from_numpy(predictor.normalization.run(image, None))
+    bbox = tuple((0, size) for size in original_shape)
     return PreparedCase(
         image_path=Path(image_path),
         data=data,
@@ -332,4 +343,5 @@ class SlidingD5FeatureExtractor:
             logits=logits,
             probability=probability,
             decoder_logits=fused_decoder,
+            sliding_patch_count=len(slicers),
         )

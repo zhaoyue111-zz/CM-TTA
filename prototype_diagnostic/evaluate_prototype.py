@@ -146,6 +146,10 @@ def evaluate_query_case(
     metrics: dict[str, object] = {
         "case_name": name,
         "foreground_labels": [int(value) for value in foreground_labels],
+        "roi_shape": [int(value) for value in prepared.original_shape],
+        "sliding_patch_count": int(extracted.sliding_patch_count),
+        "gt_tumor_voxels": int(target.sum()),
+        "tumor_prevalence": float(target.mean()),
         "gt_foreground_voxels": int(target.sum()),
         "gt_foreground_voxels_outside_preprocessed_crop": outside_crop_foreground,
         "evaluated_voxels": int(target.size),
@@ -191,7 +195,7 @@ def evaluate_query_case(
         top_one_full,
     )
     metrics["representative_axial_slice"] = slice_index
-    metrics["evaluation_space"] = "preprocessed nonzero crop (D,H,W); outputs restored to source"
+    metrics["evaluation_space"] = "complete input liver cuboid ROI (D,H,W)"
     write_json(case_dir / "metrics.json", metrics)
     return metrics
 

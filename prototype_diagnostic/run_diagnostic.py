@@ -10,6 +10,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from prototype_diagnostic.build_bank import (
+    bank_region_quality_rows,
     build_prototype_bank,
     load_view_params_replay,
     recompute_source_tdc,
@@ -23,6 +24,8 @@ from prototype_diagnostic.evaluate_prototype import (
 from prototype_diagnostic.extract_features import build_predictor, embed_prompt
 from prototype_diagnostic.utils import (
     case_name,
+    foreground_mask,
+    load_ras_label_values,
     read_test_entries,
     seed_everything,
     write_csv,
@@ -38,11 +41,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument("--data_dir", required=True)
-    parser.add_argument("--split_file", required=True)
+    parser.add_argument("--split_file", default=None)
     parser.add_argument("--voxtell_root", required=True)
     parser.add_argument("--model_dir", required=True)
     parser.add_argument("--text_model", required=True)
-    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--prompt", default="liver cancer")
     parser.add_argument(
         "--results_json",
         default=None,
@@ -103,8 +106,8 @@ def _select_named_entries(entries, requested: list[str] | None):
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    if not args.prompt.strip():
-        raise ValueError("--prompt must not be empty")
+    if args.prompt.strip() != "liver cancer":
+        raise ValueError('This diagnostic uses the fixed prompt "liver cancer"')
     if args.num_views < 1 or args.topk < 1 or args.voxel_chunk_size < 1:
         raise ValueError("num_views, topk and voxel_chunk_size must be positive")
     if not args.foreground_labels:
@@ -123,7 +126,12 @@ def main(argv: list[str] | None = None) -> None:
     entries = read_test_entries(args.data_dir, args.split_file)
     entries_by_name = {image.name: (image, label) for image, label in entries}
     query_cases = _select_named_entries(entries, args.query_cases)
-    replay_views, replay_results_order = load_view_params_replay(args.results_json)
+    replay_views = load_view_params_replay(args.results_json)
+    view_params_source = (
+        "results_json_replay_with_deterministic_fallback"
+        if args.results_json
+        else "deterministic_seed"
+    )
     view_params_by_case = resolve_view_params(
         entries_by_name,
         replay_views,
@@ -159,8 +167,9 @@ def main(argv: list[str] | None = None) -> None:
         {
             "model_state": "frozen source VoxTell",
             "prompt": args.prompt,
+            "tdc_type": "sliding_volume_tdc",
             "ranking_metric": "original_tdc",
-            "results_json_usage": "view_params replay only",
+            "view_params_source": view_params_source,
             "case_order": list(entries_by_name),
             "cases": [source_tdc_by_case[name] for name in entries_by_name],
         },
@@ -176,9 +185,9 @@ def main(argv: list[str] | None = None) -> None:
         "resolved_memory_cases": memory_cases,
         "resolved_query_cases": query_cases,
         "split_case_order": list(entries_by_name),
-        "results_json_case_order": replay_results_order,
-        "results_json_usage": "view_params replay only",
+        "view_params_source": view_params_source,
         "source_tdc_recomputed": True,
+        "tdc_type": "sliding_volume_tdc",
         "memory_ranking_metric": "original_tdc",
         "diagnostic_only": True,
         "uses_ground_truth_for_bank": False,
@@ -200,6 +209,14 @@ def main(argv: list[str] | None = None) -> None:
         min_region_voxels=args.min_region_voxels,
         core_erosion=args.core_erosion,
     )
+    bank_gt = {
+        name: foreground_mask(
+            load_ras_label_values(entries_by_name[name][1]), args.foreground_labels
+        )
+        for name in memory_cases
+    }
+    bank_quality_path = output_dir / "bank_region_quality.csv"
+    write_csv(bank_quality_path, bank_region_quality_rows(bank, bank_gt))
     prototype_source_cases = {
         str(item["case_name"]) for item in bank["prototypes"]
     }
@@ -245,7 +262,9 @@ def main(argv: list[str] | None = None) -> None:
             "prototype_bank_path": str(bank_path),
             "source_tdc_path": str(source_tdc_path),
             "source_tdc_model_state": "frozen source VoxTell",
+            "tdc_type": "sliding_volume_tdc",
             "memory_ranking_metric": "original_tdc",
+            "bank_region_quality_path": str(bank_quality_path),
             "prototype_count": len(bank["prototypes"]),
             "memory_case_count": len(memory_cases),
             "query_case_count": len(query_cases),

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import nibabel as nib
 import numpy as np
@@ -17,13 +19,18 @@ from prototype_diagnostic.build_bank import (
     _component_regions,
     _eroded_core,
     aggregate_normalized_view_features,
+    bank_region_quality_rows,
     compute_source_tdc_for_case,
     load_view_params_replay,
     region_prototype,
     select_memory_cases,
 )
 from prototype_diagnostic.evaluate_prototype import prototype_similarity_maps
-from prototype_diagnostic.extract_features import ExtractedVolume, SlidingD5FeatureExtractor
+from prototype_diagnostic.extract_features import (
+    ExtractedVolume,
+    SlidingD5FeatureExtractor,
+    prepare_case,
+)
 from prototype_diagnostic.utils import (
     binary_ranking_metrics,
     foreground_mask,
@@ -79,6 +86,7 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         self.assertTrue(torch.allclose(result.feature[0], data[0], atol=1e-5))
         self.assertTrue(torch.allclose(result.feature[1], data[0] * 2, atol=1e-5))
         self.assertTrue(torch.allclose(result.logits, data[0], atol=1e-5))
+        self.assertEqual(result.sliding_patch_count, 8)
 
         decoder_result = extractor.extract(
             data,
@@ -90,6 +98,23 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         self.assertEqual(len(decoder_result.decoder_logits), 4)
         for logits in decoder_result.decoder_logits:
             self.assertTrue(torch.allclose(logits, data[0], atol=1e-5))
+
+    def test_prepare_case_keeps_complete_liver_roi_shape(self):
+        class IdentityNormalization:
+            @staticmethod
+            def run(image, _seg):
+                return image
+
+        predictor = SimpleNamespace(normalization=IdentityNormalization())
+        roi = np.zeros((1, 3, 4, 5), dtype=np.float32)
+        roi[:, 1, 1:3, 1:4] = 1.0
+        with patch(
+            "prototype_diagnostic.extract_features.load_ras_image", return_value=roi
+        ):
+            prepared = prepare_case(predictor, Path("roi.nii.gz"))
+        self.assertEqual(prepared.original_shape, (3, 4, 5))
+        self.assertEqual(tuple(prepared.data.shape), (1, 3, 4, 5))
+        self.assertEqual(prepared.bbox, ((0, 3), (0, 4), (0, 5)))
 
     def test_connected_components_and_erosion_are_three_dimensional(self):
         mask = np.zeros((7, 7, 7), dtype=bool)
@@ -150,7 +175,7 @@ class PrototypeDiagnosticTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            views, order = load_view_params_replay(path)
+            views = load_view_params_replay(path)
             source_tdc = {
                 "a.nii.gz": {"memory_ranking_value": 0.9},
                 "b.nii.gz": {"memory_ranking_value": 0.1},
@@ -158,7 +183,6 @@ class PrototypeDiagnosticTest(unittest.TestCase):
             selected = select_memory_cases(
                 ["a.nii.gz", "b.nii.gz"], None, source_tdc, 0.5
             )
-        self.assertEqual(order, ["a.nii.gz", "b.nii.gz"])
         self.assertEqual(selected, ["a.nii.gz"])
         self.assertEqual(len(views["a.nii.gz"]), 2)
 
@@ -176,11 +200,14 @@ class PrototypeDiagnosticTest(unittest.TestCase):
                     logits=logits[0],
                     probability=torch.sigmoid(logits[0]),
                     decoder_logits=logits,
+                    sliding_patch_count=7,
                 )
 
         extractor = StubExtractor()
         prepared = SimpleNamespace(
-            image_path=Path("case.nii.gz"), data=torch.zeros(1, 2, 2, 2)
+            image_path=Path("case.nii.gz"),
+            data=torch.zeros(1, 2, 2, 2),
+            original_shape=(2, 2, 2),
         )
         params = [
             {"scale": 1.0, "offset": 0.0},
@@ -192,6 +219,9 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         )
         self.assertEqual(extractor.calls, len(params))
         self.assertEqual(result["view_count"], len(params))
+        self.assertEqual(result["tdc_type"], "sliding_volume_tdc")
+        self.assertEqual(result["roi_shape"], [2, 2, 2])
+        self.assertEqual(result["sliding_patch_count"], 7)
         self.assertEqual(len(result["views"]), len(params))
         self.assertEqual(result["original_tdc"], 1.0)
         self.assertEqual(result["mean_tdc"], 1.0)
@@ -230,14 +260,52 @@ class PrototypeDiagnosticTest(unittest.TestCase):
             (root / "labels").mkdir()
             (root / "images" / "case_a.nii.gz").touch()
             (root / "labels" / "case_a.nii.gz").touch()
+            (root / "images" / "case_b.nii.gz").touch()
+            (root / "labels" / "case_b.nii.gz").touch()
             split = root / "split.json"
             split.write_text(
                 json.dumps({"test_cases": [{"case_name": "case_a"}]}),
                 encoding="utf-8",
             )
             entries = read_test_entries(root, split)
+            discovered = read_test_entries(root)
         self.assertEqual(entries[0][0], root / "images" / "case_a.nii.gz")
         self.assertEqual(entries[0][1], root / "labels" / "case_a.nii.gz")
+        self.assertEqual(
+            [image.name for image, _label in discovered],
+            ["case_a.nii.gz", "case_b.nii.gz"],
+        )
+
+    def test_bank_gt_quality_is_posthoc_and_does_not_mutate_bank(self):
+        bank = {
+            "prototypes": [
+                {
+                    "feature": torch.tensor([1.0, 0.0]),
+                    "case_name": "case.nii.gz",
+                    "region_id": 3,
+                    "region_size": 2,
+                    "roi_shape": [1, 1, 4],
+                    "region_flat_indices": torch.tensor([1, 2]),
+                    "tdc": 0.75,
+                    "view_support_mean": 0.9,
+                }
+            ]
+        }
+        before = deepcopy(bank)
+        rows = bank_region_quality_rows(
+            bank,
+            {"case.nii.gz": np.array([[[False, True, False, True]]])},
+        )
+        self.assertEqual(rows[0]["intersection_with_gt"], 1)
+        self.assertEqual(rows[0]["region_purity"], 0.5)
+        self.assertEqual(rows[0]["gt_coverage"], 0.5)
+        self.assertTrue(torch.equal(bank["prototypes"][0]["feature"], before["prototypes"][0]["feature"]))
+        self.assertTrue(
+            torch.equal(
+                bank["prototypes"][0]["region_flat_indices"],
+                before["prototypes"][0]["region_flat_indices"],
+            )
+        )
 
     def test_metrics_and_crop_restoration(self):
         target = np.array([0, 0, 1, 1], dtype=bool)
@@ -247,6 +315,7 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         self.assertEqual(ranking["auroc"], 1.0)
         self.assertEqual(ranking["auprc"], 1.0)
         self.assertEqual(enrichment["top_50pct_gt_foreground_precision"], 1.0)
+        self.assertEqual(enrichment["top_50pct_enrichment_factor"], 2.0)
         restored = restore_crop(
             np.ones((2, 2, 2), dtype=np.float32),
             ((1, 3), (1, 3), (1, 3)),

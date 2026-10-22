@@ -23,10 +23,10 @@ from prototype_diagnostic.utils import case_name
 
 def load_view_params_replay(
     results_json: str | Path | None,
-) -> tuple[dict[str, list[dict[str, float]]], list[str]]:
+) -> dict[str, list[dict[str, float]]]:
     """Load augmentation parameters only; adapted-run metrics are ignored."""
     if results_json is None:
-        return {}, []
+        return {}
     path = Path(results_json)
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload.get("cases") if isinstance(payload, dict) else payload
@@ -34,7 +34,7 @@ def load_view_params_replay(
         raise ValueError(f"{path} must contain a cases list")
 
     views_by_case: dict[str, list[dict[str, float]]] = {}
-    order: list[str] = []
+    seen: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("Every results row must be a mapping")
@@ -42,9 +42,9 @@ def load_view_params_replay(
         if not isinstance(raw_name, str) or not raw_name.strip():
             raise ValueError("Every results row must contain a non-empty case basename")
         name = case_name(raw_name)
-        if name in order:
+        if name in seen:
             raise ValueError(f"Duplicate case in results.json: {name}")
-        order.append(name)
+        seen.add(name)
         trace = row.get("adaptation_trace")
         params = trace.get("view_params") if isinstance(trace, dict) else None
         if isinstance(params, list) and params:
@@ -56,7 +56,7 @@ def load_view_params_replay(
                     {"scale": float(param["scale"]), "offset": float(param["offset"])}
                 )
             views_by_case[name] = normalized
-    return views_by_case, order
+    return views_by_case
 
 
 def resolve_view_params(
@@ -110,6 +110,7 @@ def compute_source_tdc_for_case(
                 "scale": float(param["scale"]),
                 "offset": float(param["offset"]),
                 "tdc": float(tdc[0]),
+                "sliding_patch_count": int(extracted.sliding_patch_count),
                 "pair_dice": pair_dice[0].detach().cpu().tolist(),
                 "pair_valid": pair_valid[0].detach().cpu().tolist(),
             }
@@ -119,6 +120,9 @@ def compute_source_tdc_for_case(
         raise ValueError("At least one source TDC view is required")
     return {
         "case_name": prepared.image_path.name,
+        "tdc_type": "sliding_volume_tdc",
+        "roi_shape": [int(value) for value in prepared.original_shape],
+        "sliding_patch_count": int(view_rows[0]["sliding_patch_count"]),
         "view_count": len(view_rows),
         "views": view_rows,
         "original_tdc": scores[0],
@@ -240,6 +244,38 @@ def region_prototype(feature_mean: torch.Tensor, core: np.ndarray) -> torch.Tens
     return F.normalize(feature_mean[:, core_tensor].mean(dim=1).float(), dim=0)
 
 
+def bank_region_quality_rows(
+    bank: dict[str, object], gt_by_case: dict[str, np.ndarray]
+) -> list[dict[str, object]]:
+    """Compute GT-only post-hoc region quality without changing the bank."""
+    rows = []
+    for item in bank["prototypes"]:
+        name = str(item["case_name"])
+        gt = np.asarray(gt_by_case[name], dtype=bool)
+        expected_shape = tuple(int(value) for value in item["roi_shape"])
+        if gt.shape != expected_shape:
+            raise ValueError(
+                f"GT ROI shape mismatch for {name}: {gt.shape} vs {expected_shape}"
+            )
+        indices = torch.as_tensor(item["region_flat_indices"], dtype=torch.long).numpy()
+        intersection = int(gt.reshape(-1)[indices].sum())
+        region_size = int(item["region_size"])
+        gt_voxels = int(gt.sum())
+        rows.append(
+            {
+                "case_name": name,
+                "region_id": int(item["region_id"]),
+                "tdc": float(item["tdc"]),
+                "view_support_mean": float(item["view_support_mean"]),
+                "region_size": region_size,
+                "intersection_with_gt": intersection,
+                "region_purity": float(intersection / region_size),
+                "gt_coverage": float(intersection / gt_voxels) if gt_voxels else 0.0,
+            }
+        )
+    return rows
+
+
 def build_prototype_bank(
     predictor,
     text_embedding: torch.Tensor,
@@ -301,6 +337,10 @@ def build_prototype_bank(
                     "region_id": int(region_id),
                     "region_size": int(region_size),
                     "core_size": int(core.sum()),
+                    "roi_shape": [int(value) for value in prepared.original_shape],
+                    "region_flat_indices": torch.from_numpy(
+                        np.flatnonzero(region).astype(np.int64)
+                    ),
                     "tdc": source_tdc_by_case[name]["memory_ranking_value"],
                     "tdc_original": source_tdc_by_case[name]["original_tdc"],
                     "tdc_mean": source_tdc_by_case[name]["mean_tdc"],
@@ -342,6 +382,7 @@ def build_prototype_bank(
             "region mean, final L2 normalization"
         ),
         "tdc_source": "same frozen source VoxTell, prompt, and view parameters",
+        "tdc_type": "sliding_volume_tdc",
         "memory_ranking_metric": "original_tdc",
         "feature_channels": feature_channels,
         "memory_cases": list(memory_cases),
