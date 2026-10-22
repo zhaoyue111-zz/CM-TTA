@@ -1,0 +1,287 @@
+{
+  "all_query_cases": {
+    "case_count": 44,
+    "case_names": [
+      "0017174204.nii.gz",
+      "0008877866.nii.gz",
+      "0032340293.nii.gz",
+      "0015743530.nii.gz",
+      "0015855177.nii.gz",
+      "0016161882.nii.gz",
+      "0017484860.nii.gz",
+      "0033330770.nii.gz",
+      "0017351674.nii.gz",
+      "0002452267.nii.gz",
+      "0032677922.nii.gz",
+      "0018128083.nii.gz",
+      "0018122332.nii.gz",
+      "0009772348.nii.gz",
+      "0006150559.nii.gz",
+      "0008006851.nii.gz",
+      "0017926194.nii.gz",
+      "0015947592.nii.gz",
+      "0016224160.nii.gz",
+      "0001547059.nii.gz",
+      "0032257210.nii.gz",
+      "0017811498.nii.gz",
+      "0018199637.nii.gz",
+      "0032834064.nii.gz",
+      "0018552274.nii.gz",
+      "0032854647.nii.gz",
+      "0011295982.nii.gz",
+      "0002088892.nii.gz",
+      "0018689853.nii.gz",
+      "0018411622.nii.gz",
+      "0018900524.nii.gz",
+      "0033235247.nii.gz",
+      "0013837968.nii.gz",
+      "0018430796.nii.gz",
+      "0001491294.nii.gz",
+      "0016167739.nii.gz",
+      "0032710370.nii.gz",
+      "0032929968.nii.gz",
+      "0007059954.nii.gz",
+      "0016804070.nii.gz",
+      "0002453066.nii.gz",
+      "0011880319.nii.gz",
+      "0017078287.nii.gz",
+      "0016980775.nii.gz"
+    ],
+    "metrics": {
+      "proto_max_auroc": {
+        "count": 44,
+        "mean": 0.8306644188481708,
+        "std": 0.2440175872630215,
+        "median": 0.9681092977252401
+      },
+      "proto_max_auprc": {
+        "count": 44,
+        "mean": 0.4097936311822421,
+        "std": 0.3449193804824587,
+        "median": 0.4264508222421771
+      },
+      "proto_max_foreground_background_gap": {
+        "count": 44,
+        "mean": 0.2657160248603772,
+        "std": 0.18370893576460484,
+        "median": 0.35290480149711473
+      },
+      "proto_topk_auroc": {
+        "count": 44,
+        "mean": 0.8415165348062146,
+        "std": 0.23301590838782948,
+        "median": 0.9734693899650235
+      },
+      "proto_topk_auprc": {
+        "count": 44,
+        "mean": 0.4352561044877514,
+        "std": 0.3576457644432718,
+        "median": 0.5167705904594911
+      },
+      "proto_topk_foreground_background_gap": {
+        "count": 44,
+        "mean": 0.29770920423288966,
+        "std": 0.19704277202054,
+        "median": 0.38559312381140837
+      },
+      "seg_probability_auroc": {
+        "count": 44,
+        "mean": 0.9267825406234464,
+        "std": 0.13034448867300819,
+        "median": 0.9964928701945595
+      },
+      "seg_probability_auprc": {
+        "count": 44,
+        "mean": 0.5590762428795789,
+        "std": 0.4146481072474133,
+        "median": 0.8243457299365953
+      },
+      "seg_probability_foreground_background_gap": {
+        "count": 44,
+        "mean": 0.5805695215358473,
+        "std": 0.406806179463448,
+        "median": 0.7466054062376584
+      }
+    }
+  },
+  "normal_foreground_cases": {
+    "case_count": 43,
+    "case_names": [
+      "0017174204.nii.gz",
+      "0008877866.nii.gz",
+      "0032340293.nii.gz",
+      "0015743530.nii.gz",
+      "0015855177.nii.gz",
+      "0016161882.nii.gz",
+      "0017484860.nii.gz",
+      "0033330770.nii.gz",
+      "0017351674.nii.gz",
+      "0002452267.nii.gz",
+      "0032677922.nii.gz",
+      "0018128083.nii.gz",
+      "0018122332.nii.gz",
+      "0009772348.nii.gz",
+      "0006150559.nii.gz",
+      "0008006851.nii.gz",
+      "0017926194.nii.gz",
+      "0015947592.nii.gz",
+      "0016224160.nii.gz",
+      "0032257210.nii.gz",
+      "0017811498.nii.gz",
+      "0018199637.nii.gz",
+      "0032834064.nii.gz",
+      "0018552274.nii.gz",
+      "0032854647.nii.gz",
+      "0011295982.nii.gz",
+      "0002088892.nii.gz",
+      "0018689853.nii.gz",
+      "0018411622.nii.gz",
+      "0018900524.nii.gz",
+      "0033235247.nii.gz",
+      "0013837968.nii.gz",
+      "0018430796.nii.gz",
+      "0001491294.nii.gz",
+      "0016167739.nii.gz",
+      "0032710370.nii.gz",
+      "0032929968.nii.gz",
+      "0007059954.nii.gz",
+      "0016804070.nii.gz",
+      "0002453066.nii.gz",
+      "0011880319.nii.gz",
+      "0017078287.nii.gz",
+      "0016980775.nii.gz"
+    ],
+    "metrics": {
+      "proto_max_auroc": {
+        "count": 43,
+        "mean": 0.8402372493412834,
+        "std": 0.2385313835846038,
+        "median": 0.9694358219261648
+      },
+      "proto_max_auprc": {
+        "count": 43,
+        "mean": 0.4193211347930389,
+        "std": 0.343135661910822,
+        "median": 0.44186397933199717
+      },
+      "proto_max_foreground_background_gap": {
+        "count": 43,
+        "mean": 0.2725996750976103,
+        "std": 0.18013580635990004,
+        "median": 0.3592070786743897
+      },
+      "proto_topk_auroc": {
+        "count": 43,
+        "mean": 0.8504565077433686,
+        "std": 0.2281282616091004,
+        "median": 0.9738132470242895
+      },
+      "proto_topk_auprc": {
+        "count": 43,
+        "mean": 0.4453755560611353,
+        "std": 0.3554988189032481,
+        "median": 0.523236947584379
+      },
+      "proto_topk_foreground_background_gap": {
+        "count": 43,
+        "mean": 0.3050242816021297,
+        "std": 0.1933244038875744,
+        "median": 0.3860190181273092
+      },
+      "seg_probability_auroc": {
+        "count": 43,
+        "mean": 0.9285546824660766,
+        "std": 0.13132636171986034,
+        "median": 0.9965496347903209
+      },
+      "seg_probability_auprc": {
+        "count": 43,
+        "mean": 0.5720391043789711,
+        "std": 0.4105337034765206,
+        "median": 0.8379029928681268
+      },
+      "seg_probability_foreground_background_gap": {
+        "count": 43,
+        "mean": 0.5940711383157508,
+        "std": 0.4016453422255684,
+        "median": 0.7665768381647053
+      }
+    }
+  },
+  "zero_foreground_cases": {
+    "case_count": 1,
+    "case_names": [
+      "0001547059.nii.gz"
+    ],
+    "metrics": {
+      "proto_max_auroc": {
+        "count": 1,
+        "mean": 0.41903270764433104,
+        "std": 0.0,
+        "median": 0.41903270764433104
+      },
+      "proto_max_auprc": {
+        "count": 1,
+        "mean": 0.00011097591798147217,
+        "std": 0.0,
+        "median": 0.00011097591798147217
+      },
+      "proto_max_foreground_background_gap": {
+        "count": 1,
+        "mean": -0.030280935340643855,
+        "std": 0.0,
+        "median": -0.030280935340643855
+      },
+      "proto_topk_auroc": {
+        "count": 1,
+        "mean": 0.45709769850858384,
+        "std": 0.0,
+        "median": 0.45709769850858384
+      },
+      "proto_topk_auprc": {
+        "count": 1,
+        "mean": 0.00011968683224227441,
+        "std": 0.0,
+        "median": 0.00011968683224227441
+      },
+      "proto_topk_foreground_background_gap": {
+        "count": 1,
+        "mean": -0.016839122644432325,
+        "std": 0.0,
+        "median": -0.016839122644432325
+      },
+      "seg_probability_auroc": {
+        "count": 1,
+        "mean": 0.8505804413903411,
+        "std": 0.0,
+        "median": 0.8505804413903411
+      },
+      "seg_probability_auprc": {
+        "count": 1,
+        "mean": 0.0016731984057114068,
+        "std": 0.0,
+        "median": 0.0016731984057114068
+      },
+      "seg_probability_foreground_background_gap": {
+        "count": 1,
+        "mean": 2.3726493124123257e-15,
+        "std": 0.0,
+        "median": 2.3726493124123257e-15
+      }
+    }
+  },
+  "group_definition": {
+    "normal_foreground_cases": "pred_fg_voxels > 0",
+    "zero_foreground_cases": "pred_fg_voxels == 0"
+  },
+  "prototype_bank_path": "prototype_diagnostic/outputs/HBP_liver_roi_prototype/prototype_bank.pt",
+  "source_tdc_path": "prototype_diagnostic/outputs/HBP_liver_roi_prototype/source_tdc.json",
+  "source_tdc_model_state": "frozen source VoxTell",
+  "tdc_type": "sliding_volume_tdc",
+  "memory_ranking_metric": "original_tdc",
+  "bank_region_quality_path": "prototype_diagnostic/outputs/HBP_liver_roi_prototype/bank_region_quality.csv",
+  "prototype_count": 42,
+  "memory_case_count": 9,
+  "query_case_count": 44,
+  "hypothesis": "GT foreground D5 features are more similar than background to foreground prototypes from other cases"
+}

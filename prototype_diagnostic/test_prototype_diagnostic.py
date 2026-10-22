@@ -99,6 +99,18 @@ class PrototypeDiagnosticTest(unittest.TestCase):
         for logits in decoder_result.decoder_logits:
             self.assertTrue(torch.allclose(logits, data[0], atol=1e-5))
 
+    def test_sliding_hook_discards_padding_without_changing_alignment(self):
+        predictor = _TinyPredictor()
+        extractor = SlidingD5FeatureExtractor(predictor, print_shapes=False)
+        data = torch.tensor([[[[3.0]]]])
+        result = extractor.extract(data, torch.zeros(1, 1, 2))
+        self.assertEqual(tuple(result.feature.shape), (2, 1, 1, 1))
+        self.assertTrue(
+            torch.allclose(result.feature[:, 0, 0, 0], torch.tensor([3.0, 6.0]))
+        )
+        self.assertTrue(torch.allclose(result.logits, data[0]))
+        self.assertEqual(result.sliding_patch_count, 1)
+
     def test_prepare_case_uses_official_preprocess_and_records_geometry(self):
         roi = np.zeros((1, 3, 4, 5), dtype=np.float32)
         roi[:, 1, 1:3, 1:4] = 1.0

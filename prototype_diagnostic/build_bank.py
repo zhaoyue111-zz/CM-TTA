@@ -321,13 +321,21 @@ def build_prototype_bank(
             support_sum += (extracted.probability > 0.5).to(torch.int16)
             if extracted.feature is None:
                 raise RuntimeError("D5 feature hook returned no feature")
-            normalized = F.normalize(extracted.feature.float(), dim=0)
+            # extract() already returns float32 on CPU. Normalize in place and
+            # reuse the first view as the accumulator to avoid two additional
+            # full-volume CxDxHxW allocations.
+            normalized = extracted.feature
+            norms = torch.linalg.vector_norm(normalized, dim=0, keepdim=True)
+            normalized.div_(norms.clamp_min_(torch.finfo(normalized.dtype).eps))
             if normalized_feature_sum is None:
-                normalized_feature_sum = torch.zeros_like(normalized)
-            normalized_feature_sum.add_(normalized)
+                normalized_feature_sum = normalized
+            else:
+                normalized_feature_sum.add_(normalized)
+            del normalized, norms, extracted
         if normalized_feature_sum is None:
             raise RuntimeError(f"No feature views extracted for {name}")
-        feature_mean = normalized_feature_sum / float(len(params))
+        normalized_feature_sum.div_(float(len(params)))
+        feature_mean = normalized_feature_sum
         feature_channels = int(feature_mean.shape[0])
         support = support_sum.float() / float(len(params))
         consensus = support.numpy() >= float(view_support)
@@ -383,6 +391,10 @@ def build_prototype_bank(
             f"[prototype-diagnostic] bank {case_index}/{len(memory_cases)} {name}: "
             f"regions={len(regions)} consensus_voxels={int(consensus.sum())}"
         )
+        del feature_mean, normalized_feature_sum, support, support_sum, consensus
+        if regions:
+            del region, core
+        del regions
 
     if not prototypes:
         raise RuntimeError(

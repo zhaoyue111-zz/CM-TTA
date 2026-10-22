@@ -25,5 +25,7 @@ logs/
 *.safetensors
 *.nii
 *.nii.gz
+*.png
+*.jpg
 
 *.ipynb_checkpoints/

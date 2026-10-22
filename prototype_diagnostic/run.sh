@@ -1,0 +1,17 @@
+python -m prototype_diagnostic.run_diagnostic \
+  --data_dir /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk/WCH_MREI145_predict/liver/HBP \
+  --split_file /data/hilab/datasets/WCH_MRI145/HBP/split.json \
+  --voxtell_root /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk \
+  --model_dir /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk/model \
+  --text_model /home/ubuntu/zy/pythoncode/sfda/VoxTell_from_disk/model/Qwen3-Embedding-4B \
+  --prompt "liver cancer" \
+  --foreground_labels 1 \
+  --memory_top_ratio 0.2 \
+  --num_views 10 \
+  --view_support 0.8 \
+  --min_region_voxels 64 \
+  --core_erosion 1 \
+  --topk 5 \
+  --device cuda:0 \
+  --text_device cuda:1 \
+  --output_dir prototype_diagnostic/outputs/HBP_liver_roi_prototype

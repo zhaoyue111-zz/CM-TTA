@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import sys
 from dataclasses import dataclass
@@ -96,7 +97,12 @@ def embed_prompt(
         hidden = backbone(**tokens).last_hidden_state
         embedding = last_token_pool(hidden, tokens["attention_mask"])
         embedding = embedding.reshape(1, 1, -1).detach().to(predictor.device)
-    predictor.text_backbone = backbone.to("cpu")
+    # The diagnostic uses one fixed prompt, so keeping the 4B text backbone
+    # after this point only consumes host/GPU memory without changing any
+    # subsequent result.
+    predictor.text_backbone = None
+    del hidden, tokens, backbone
+    gc.collect()
     if text_device.type == "cuda":
         torch.cuda.empty_cache()
     return embedding
@@ -189,14 +195,19 @@ class SlidingD5FeatureExtractor:
         )
         slicers = self.predictor._internal_get_sliding_window_slicers(padded.shape[1:])
         padded_shape = tuple(int(v) for v in padded.shape[1:])
+        output_shape = tuple(int(v) for v in input_image.shape[1:])
+        crop = tuple(revert_padding[1:])
         gaussian = compute_gaussian(
             tuple(self.predictor.patch_size),
             sigma_scale=1.0 / 8,
             value_scaling_factor=10,
             device=torch.device("cpu"),
         ).float()
-        logits_sum = torch.zeros(padded_shape, dtype=torch.float32)
-        denominator = torch.zeros(padded_shape, dtype=torch.float32)
+        # Accumulate only the official preprocessed extent. Padding is needed
+        # by the network, but retaining a Cx192^3 float32 accumulator is
+        # prohibitively expensive for D5 when the actual ROI is much smaller.
+        logits_sum = torch.zeros(output_shape, dtype=torch.float32)
+        denominator = torch.zeros(output_shape, dtype=torch.float32)
         feature_sum: torch.Tensor | None = None
         decoder_sums: list[torch.Tensor] | None = None
         captured: list[torch.Tensor] = []
@@ -212,6 +223,32 @@ class SlidingD5FeatureExtractor:
         try:
             for tile_index, slicer in enumerate(slicers):
                 tile = padded[slicer][None].to(self.device, non_blocking=True)
+                output_slices = []
+                patch_slices = []
+                for axis, (window, valid, padded_size) in enumerate(
+                    zip(slicer[1:], crop, padded_shape)
+                ):
+                    window_start = 0 if window.start is None else int(window.start)
+                    window_stop = (
+                        padded_size if window.stop is None else int(window.stop)
+                    )
+                    valid_start = 0 if valid.start is None else int(valid.start)
+                    valid_stop = padded_size if valid.stop is None else int(valid.stop)
+                    overlap_start = max(window_start, valid_start)
+                    overlap_stop = min(window_stop, valid_stop)
+                    if overlap_stop <= overlap_start:
+                        raise RuntimeError(
+                            f"Sliding tile has no overlap with preprocessed data on axis {axis}"
+                        )
+                    output_slices.append(
+                        slice(overlap_start - valid_start, overlap_stop - valid_start)
+                    )
+                    patch_slices.append(
+                        slice(overlap_start - window_start, overlap_stop - window_start)
+                    )
+                output_slices = tuple(output_slices)
+                patch_slices = tuple(patch_slices)
+                gaussian_crop = gaussian[patch_slices]
                 captured.clear()
                 with torch.inference_mode(), torch.autocast(
                     device_type=self.device.type,
@@ -235,28 +272,33 @@ class SlidingD5FeatureExtractor:
                     raise RuntimeError(
                         f"Expected one {D5_PREHEAD_MODULE} activation per tile, got {len(captured)}"
                     )
-                patch_feature = captured[0][0].float().cpu() if capture_feature else None
-                patch_logits = final_output[0, 0].float().cpu()
                 tile_shape = tuple(int(s.stop - s.start) for s in slicer[1:])
-                if patch_feature is not None and tuple(patch_feature.shape[1:]) != tile_shape:
+                raw_patch_feature = captured[0][0] if capture_feature else None
+                if raw_patch_feature is not None and tuple(raw_patch_feature.shape[1:]) != tile_shape:
                     raise RuntimeError(
                         "D5 pre-head feature is not full-resolution/aligned with the tile: "
-                        f"feature={tuple(patch_feature.shape)} tile={tile_shape}"
+                        f"feature={tuple(raw_patch_feature.shape)} tile={tile_shape}"
                     )
-                if tuple(patch_logits.shape) != tile_shape:
+                if tuple(final_output.shape[2:]) != tile_shape:
                     raise RuntimeError(
-                        f"D5 logits shape {tuple(patch_logits.shape)} != tile {tile_shape}"
+                        f"D5 logits shape {tuple(final_output.shape[2:])} != tile {tile_shape}"
                     )
+                patch_feature = (
+                    raw_patch_feature[(slice(None), *patch_slices)].float().cpu()
+                    if raw_patch_feature is not None
+                    else None
+                )
+                patch_logits = final_output[0, 0][patch_slices].float().cpu()
                 if patch_feature is not None and feature_sum is None:
                     feature_sum = torch.zeros(
-                        (int(patch_feature.shape[0]), *padded_shape), dtype=torch.float32
+                        (int(patch_feature.shape[0]), *output_shape), dtype=torch.float32
                     )
                 if patch_feature is not None:
-                    feature_sum[(slice(None), *slicer[1:])] += (
-                        patch_feature * gaussian.unsqueeze(0)
+                    feature_sum[(slice(None), *output_slices)].addcmul_(
+                        patch_feature, gaussian_crop.unsqueeze(0)
                     )
-                logits_sum[slicer[1:]] += patch_logits * gaussian
-                denominator[slicer[1:]] += gaussian
+                logits_sum[output_slices].addcmul_(patch_logits, gaussian_crop)
+                denominator[output_slices] += gaussian_crop
 
                 if return_decoder_logits:
                     resized = []
@@ -271,14 +313,16 @@ class SlidingD5FeatureExtractor:
                                 mode="trilinear",
                                 align_corners=False,
                             )
-                        resized.append(level_logits[0, 0].cpu())
+                        resized.append(level_logits[0, 0][patch_slices].cpu())
                     if decoder_sums is None:
                         decoder_sums = [
-                            torch.zeros(padded_shape, dtype=torch.float32)
+                            torch.zeros(output_shape, dtype=torch.float32)
                             for _ in resized
                         ]
                     for accumulator, level_logits in zip(decoder_sums, resized):
-                        accumulator[slicer[1:]] += level_logits * gaussian
+                        accumulator[output_slices].addcmul_(
+                            level_logits, gaussian_crop
+                        )
 
                 if self.print_shapes and not self._printed and tile_index == 0:
                     feature_shape = tuple(captured[0].shape) if captured else None
@@ -309,16 +353,11 @@ class SlidingD5FeatureExtractor:
         if decoder_sums is not None:
             for accumulator in decoder_sums:
                 accumulator.div_(denominator)
-        crop = tuple(revert_padding[1:])
-        feature = (
-            feature_sum[(slice(None), *crop)].contiguous()
-            if feature_sum is not None
-            else None
-        )
-        logits = logits_sum[crop].contiguous()
+        feature = feature_sum
+        logits = logits_sum
         probability = torch.sigmoid(logits)
         fused_decoder = (
-            tuple(accumulator[crop].contiguous() for accumulator in decoder_sums)
+            tuple(decoder_sums)
             if decoder_sums is not None
             else None
         )
